@@ -1,0 +1,173 @@
+{
+  "label": "v0",
+  "snapshot": {
+    "date_utc": "2026-10-30T15:21:47Z",
+    "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+    "kernel": "6.6.87.2-microsoft-standard-WSL2",
+    "cpu_model": "AMD Ryzen 9 9900X 12-Core Processor",
+    "source_archive_sha256": "268c12f0efeeeb0c54314955ab795888f94212bdc8b69d22a31736b24222e28a",
+    "binary_sha256": "14738e73a36edfd8fdeee8e670938048007369eb3f428bd89f9ce8d694e6cae5"
+  },
+  "source_files": {
+    ".gitignore": "b9e24be23d26f9ed0e802b975374b40d8661d811bcd5f617824b975e8276d4e1",
+    "Cargo.lock": "a2e8f1e199b03b1a2b818a2291ea0c11521b0fcd4f1f9f71452dde91c31d94cf",
+    "Cargo.toml": "32724c12eac736ef7eeb391ec6529c9d47a38105f54bf1271be5ca9b0aef13a7",
+    "LICENSE": "a562bed6b541ea26c554aff9c8a2e66a4e0337549b8bd48f5431be898dde9930",
+    "README.md": "6c800125d4bbf0e89a85bc52dd7248f3250e0de9f7901eb022b898083ebc4bb9",
+    "examples/basic09.tsv": "dea4a1ae2e0b1fe9a2689ac160d4af42ae5277192321ff3f4d7b7f0c0d2f79b9",
+    "examples/cc.asm": "b05c2cb4f654626c8feb672732767decead9374070b3e50c81c0cf0f2a4de979",
+    "examples/ccompiler.tsv": "15bfc52ee29a45bebc0a028b962b2218e50a576be4be3a92945dbad097ae3812",
+    "examples/hello.c": "47168dccc5d793c79934164624e32222ad0516fc0a6f787843e44756b0650634",
+    "examples/hello.rs": "00a18df95a211180b513760291c0089839be0b97feb4aa8e991fb3885a16b774",
+    "examples/mandel.c": "40c0787f9dfdd2182ef18754bc701a59146547a707265b65865c93978affbb53",
+    "examples/mandelbrot.sh": "f85454d4545bc3bcc408e06cf0875d3b343f0162602564d4af6d991695976f65",
+    "examples/mandelbrot.tsv": "c42546493706e87d5e1bddff78712cb5f8041372f63c6e801cd46ac444e7fef6",
+    "examples/nitros9-c.sh": "16fff7c1088e92c30468ae9fef7eedbb7b858cec97749758b55a1d803047b887",
+    "examples/nitros9.sh": "7e592db61bfafb3dff6bb27efc089b658bb98fa26404ec8d4fd585ccab0c4427",
+    "scripts/build-c-disk.py": "3bd4c88793c5c316d37da100c47f997a893dc05235866daa2416d5d60f3a8b7c",
+    "src/cpu.rs": "8f9b021399869d42a9f0a31eb799a712173af92698d2d7294e6f0dd1fa0ac5c3",
+    "src/lib.rs": "a16e4b7fb7e9a2753058fa453ceaa1f82e605ade4e64b36b94a0f82945cd6052",
+    "src/machine.rs": "07ee1478ceb55774d6ba1ccbc9a0e8b1d84114c9cb30c025128d6191d0cdccbc",
+    "src/main.rs": "5553e6ff523f68ed419750ba44d3b905b50fb82eeb009d21e5e8ed5559463cec",
+    "tests/ccompiler.rs": "895e4f8e95066379697d831f251aa07372c111ab8f2da228373bcf7e6627f244",
+    "tests/emulator.rs": "b5f58338580b921cb7f890a19a5c7fe073d3adec4e847d4afad597897549ab96",
+    "tests/mandelbrot.rs": "5d2fa1c8c9336de20218f6a067e6d80da3dc8cf1bcdd04c6c61f83a64ac20a96",
+    "tests/nitros9.rs": "4c60e5f33711a239f5f4620a7fd365bf4cfe6e64cbf691b2fb2b20885d09b8ed"
+  },
+  "inputs": {
+    "reference/nitros9-basic09-starter-kit/nitros9-runtime/6809M.bin": "510dea6bc49787728ba33c414b38178fa89ca2bad47a47164f30af2fe7c3d2b5",
+    "artifacts/ccompiler/multicomp09-c.img": "8155600ae25221a9143e6e737fc103da0cb6d55024360ebadf8ec0a394b39c42",
+    "examples/mandelbrot.tsv": "c42546493706e87d5e1bddff78712cb5f8041372f63c6e801cd46ac444e7fef6"
+  },
+  "benchmark": {
+    "workload": "NitrOS-9 native-C Mandelbrot, 76x25, 48 iterations",
+    "cpu_model": "AMD Ryzen 9 9900X 12-Core Processor",
+    "kernel": "6.6.87.2-microsoft-standard-WSL2",
+    "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+    "binary": "/home/minoru/src/rs6809/artifacts/baselines/v0/rs6809",
+    "binary_sha256": "14738e73a36edfd8fdeee8e670938048007369eb3f428bd89f9ce8d694e6cae5",
+    "inputs": {
+      "reference/nitros9-basic09-starter-kit/nitros9-runtime/6809M.bin": "510dea6bc49787728ba33c414b38178fa89ca2bad47a47164f30af2fe7c3d2b5",
+      "artifacts/ccompiler/multicomp09-c.img": "8155600ae25221a9143e6e737fc103da0cb6d55024360ebadf8ec0a394b39c42",
+      "examples/mandelbrot.tsv": "c42546493706e87d5e1bddff78712cb5f8041372f63c6e801cd46ac444e7fef6"
+    },
+    "command": [
+      "/home/minoru/src/rs6809/artifacts/baselines/v0/rs6809",
+      "--rom",
+      "/home/minoru/src/rs6809/reference/nitros9-basic09-starter-kit/nitros9-runtime/6809M.bin",
+      "--disk",
+      "/home/minoru/src/rs6809/artifacts/ccompiler/multicomp09-c.img",
+      "--boot",
+      "--script",
+      "/home/minoru/src/rs6809/examples/mandelbrot.tsv",
+      "--until",
+      "MANDELBROT-DONE",
+      "--max-cycles",
+      "1000000000",
+      "--measure-from",
+      "Mandelbrot / Microware C / 6809"
+    ],
+    "warmup_runs": 1,
+    "runs": [
+      {
+        "run": 1,
+        "draw_cycles": 490703662,
+        "draw_seconds": 1.516325,
+        "effective_mhz": 323.61377804890117,
+        "total_cycles": 563528763,
+        "total_seconds": 1.747302,
+        "process_seconds": 1.748320792999948,
+        "stdout_sha256": "d454da0b41cfba268f74a3a3b0b6384028beb0b83f8bdabc52cdd32071ac4faa"
+      },
+      {
+        "run": 2,
+        "draw_cycles": 490703662,
+        "draw_seconds": 1.481374,
+        "effective_mhz": 331.2490039652377,
+        "total_cycles": 563528763,
+        "total_seconds": 1.703421,
+        "process_seconds": 1.7044090979998145,
+        "stdout_sha256": "d454da0b41cfba268f74a3a3b0b6384028beb0b83f8bdabc52cdd32071ac4faa"
+      },
+      {
+        "run": 3,
+        "draw_cycles": 490703662,
+        "draw_seconds": 1.480105,
+        "effective_mhz": 331.53300745555214,
+        "total_cycles": 563528763,
+        "total_seconds": 1.70313,
+        "process_seconds": 1.7041528939998898,
+        "stdout_sha256": "d454da0b41cfba268f74a3a3b0b6384028beb0b83f8bdabc52cdd32071ac4faa"
+      },
+      {
+        "run": 4,
+        "draw_cycles": 490703662,
+        "draw_seconds": 1.484641,
+        "effective_mhz": 330.5200799385171,
+        "total_cycles": 563528763,
+        "total_seconds": 1.716719,
+        "process_seconds": 1.7179509879997568,
+        "stdout_sha256": "d454da0b41cfba268f74a3a3b0b6384028beb0b83f8bdabc52cdd32071ac4faa"
+      },
+      {
+        "run": 5,
+        "draw_cycles": 490703662,
+        "draw_seconds": 1.481785,
+        "effective_mhz": 331.1571260338038,
+        "total_cycles": 563528763,
+        "total_seconds": 1.705794,
+        "process_seconds": 1.7069069610006409,
+        "stdout_sha256": "d454da0b41cfba268f74a3a3b0b6384028beb0b83f8bdabc52cdd32071ac4faa"
+      },
+      {
+        "run": 6,
+        "draw_cycles": 490703662,
+        "draw_seconds": 1.505807,
+        "effective_mhz": 325.8742069866856,
+        "total_cycles": 563528763,
+        "total_seconds": 1.738144,
+        "process_seconds": 1.7391652489995977,
+        "stdout_sha256": "d454da0b41cfba268f74a3a3b0b6384028beb0b83f8bdabc52cdd32071ac4faa"
+      },
+      {
+        "run": 7,
+        "draw_cycles": 490703662,
+        "draw_seconds": 1.478108,
+        "effective_mhz": 331.98092561571957,
+        "total_cycles": 563528763,
+        "total_seconds": 1.70308,
+        "process_seconds": 1.704090936999819,
+        "stdout_sha256": "d454da0b41cfba268f74a3a3b0b6384028beb0b83f8bdabc52cdd32071ac4faa"
+      }
+    ],
+    "summary": {
+      "median_draw_seconds": 1.481785,
+      "min_draw_seconds": 1.478108,
+      "max_draw_seconds": 1.516325,
+      "draw_cycles": 490703662,
+      "median_effective_mhz": 331.1571260338038
+    }
+  },
+  "profile": {
+    "event": "cpu-clock:u",
+    "sample_frequency_hz": 997,
+    "total_samples": 1775,
+    "lost_samples": 0,
+    "scope": "Drawing tail only: discard first 0.5 seconds of recorded samples; excludes boot and compilation",
+    "time_window_seconds": [
+      6598.143326,
+      6599.533863
+    ],
+    "self_percent": {
+      "Machine::read": 34.41,
+      "Cpu::step (includes inlined execute)": 18.39,
+      "Cpu::index": 14.1,
+      "Machine::step": 9.35,
+      "Machine::write": 5.82,
+      "Cpu::unary": 4.14,
+      "Cpu::interrupt": 4.06,
+      "Cpu::ea": 3.45,
+      "CLI main (includes inlined run)": 3.3
+    }
+  }
+}

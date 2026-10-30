@@ -1,0 +1,12 @@
+[package]
+name = "rs6809"
+version = "0.1.0"
+edition = "2024"
+description = "Pure Rust 6809 emulator with 64 KiB RAM and a serial console"
+license = "MIT"
+
+[dependencies]
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

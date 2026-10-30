@@ -1,0 +1,8 @@
+# Expected prompt<TAB>response. Every response is followed by CR.
+Time ?	2026/10/30 12:00:00
+OS9:	basic09
+B:	e test
+E:	10 PRINT 6*7
+E:	20 END
+E:	q
+B:	run test

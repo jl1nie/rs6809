@@ -1,0 +1,22 @@
+{
+  "workload": "fixed-point Mandelbrot, 76x25, 48 iterations",
+  "files": [
+    {
+      "path": "artifacts/benchmark/fixed-inputs/rom.bin",
+      "sha256": "510dea6bc49787728ba33c414b38178fa89ca2bad47a47164f30af2fe7c3d2b5",
+      "original_path": "reference/nitros9-basic09-starter-kit/nitros9-runtime/6809M.bin"
+    },
+    {
+      "path": "artifacts/benchmark/fixed-inputs/disk.img",
+      "sha256": "8155600ae25221a9143e6e737fc103da0cb6d55024360ebadf8ec0a394b39c42",
+      "original_path": "artifacts/ccompiler/multicomp09-c.img"
+    },
+    {
+      "path": "artifacts/benchmark/fixed-inputs/input.tsv",
+      "sha256": "c42546493706e87d5e1bddff78712cb5f8041372f63c6e801cd46ac444e7fef6",
+      "original_path": "examples/mandelbrot.tsv"
+    }
+  ],
+  "source": "benchmarks/mandel_fixed.c",
+  "source_sha256": "40c0787f9dfdd2182ef18754bc701a59146547a707265b65865c93978affbb53"
+}

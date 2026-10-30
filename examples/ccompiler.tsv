@@ -1,0 +1,4 @@
+Time ?	2026/10/30 12:00:00
+OS9:	chd /dd/SOURCES
+OS9:	cc hello
+OS9:	./hello

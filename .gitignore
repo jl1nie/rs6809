@@ -1,0 +1,6 @@
+/target/
+/reference/
+*.log
+
+/artifacts/
+__pycache__/
