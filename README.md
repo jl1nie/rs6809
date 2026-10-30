@@ -124,6 +124,8 @@ sh examples/mandelbrot.sh
 初期値z=c、更新後の発散判定も元のBASIC09に合わせています。
 ソースは [examples/mandel.c](examples/mandel.c)、自動入力は `examples/mandelbrot.tsv` です。
 元のBASIC09とC版を実行して比較し、**1,975文字すべての一致**を確認しました。
+この実数版の描画時間は7回の中央値 **1.673355秒**、704,530,641仮想サイクル（421.0MHz相当）でした。
+起動・コンパイルを除いた計測で、[詳細と再現手順](docs/mandelbrot-basic09-port.md#c移植版の速度ベンチマーク)を保存しています。
 
 手動なら `sh examples/nitros9-c.sh` で起動し、日時入力後に：
 

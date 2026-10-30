@@ -1,0 +1,109 @@
+{
+  "workload": "BASIC09-to-C Mandelbrot, 79x25, 16 real iterations",
+  "cpu_model": "AMD Ryzen 9 9900X 12-Core Processor",
+  "kernel": "6.6.87.2-microsoft-standard-WSL2",
+  "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+  "binary": "/home/minoru/src/rs6809/target/release/rs6809",
+  "binary_sha256": "6717e5928610d764c5226bc2043a2247bd35fa41df4752775ac22520b11877b3",
+  "inputs": {
+    "reference/nitros9-basic09-starter-kit/nitros9-runtime/6809M.bin": "510dea6bc49787728ba33c414b38178fa89ca2bad47a47164f30af2fe7c3d2b5",
+    "artifacts/ccompiler/multicomp09-c.img": "8092dd1f4bf11d4b153b78e22c328ace0d4389441f876a4677e0233d14bca191",
+    "examples/mandelbrot.tsv": "c42546493706e87d5e1bddff78712cb5f8041372f63c6e801cd46ac444e7fef6"
+  },
+  "command": [
+    "/home/minoru/src/rs6809/target/release/rs6809",
+    "--rom",
+    "/home/minoru/src/rs6809/reference/nitros9-basic09-starter-kit/nitros9-runtime/6809M.bin",
+    "--disk",
+    "/home/minoru/src/rs6809/artifacts/ccompiler/multicomp09-c.img",
+    "--boot",
+    "--script",
+    "/home/minoru/src/rs6809/examples/mandelbrot.tsv",
+    "--until",
+    "MANDELBROT-DONE",
+    "--max-cycles",
+    "1000000000",
+    "--measure-from",
+    "Mandelbrot / BASIC09 to C / 6809"
+  ],
+  "warmup_runs": 1,
+  "runs": [
+    {
+      "run": 1,
+      "draw_cycles": 704530641,
+      "draw_seconds": 1.673355,
+      "effective_mhz": 421.0287960414855,
+      "total_cycles": 766675722,
+      "total_seconds": 1.801246,
+      "process_seconds": 1.8024885759999734,
+      "stdout_sha256": "e6b841b7120f42aca73dd64f1fa134b5b5164d4fb7aa56f271f3f2c540bcaa5b"
+    },
+    {
+      "run": 2,
+      "draw_cycles": 704530641,
+      "draw_seconds": 1.665992,
+      "effective_mhz": 422.88957029805664,
+      "total_cycles": 766675722,
+      "total_seconds": 1.793418,
+      "process_seconds": 1.794715924000002,
+      "stdout_sha256": "e6b841b7120f42aca73dd64f1fa134b5b5164d4fb7aa56f271f3f2c540bcaa5b"
+    },
+    {
+      "run": 3,
+      "draw_cycles": 704530641,
+      "draw_seconds": 1.662165,
+      "effective_mhz": 423.8632392091038,
+      "total_cycles": 766675722,
+      "total_seconds": 1.788692,
+      "process_seconds": 1.789928338999971,
+      "stdout_sha256": "e6b841b7120f42aca73dd64f1fa134b5b5164d4fb7aa56f271f3f2c540bcaa5b"
+    },
+    {
+      "run": 4,
+      "draw_cycles": 704530641,
+      "draw_seconds": 1.725248,
+      "effective_mhz": 408.3648501548763,
+      "total_cycles": 766675722,
+      "total_seconds": 1.856227,
+      "process_seconds": 1.8575452669999777,
+      "stdout_sha256": "e6b841b7120f42aca73dd64f1fa134b5b5164d4fb7aa56f271f3f2c540bcaa5b"
+    },
+    {
+      "run": 5,
+      "draw_cycles": 704530641,
+      "draw_seconds": 1.669111,
+      "effective_mhz": 422.0993337171704,
+      "total_cycles": 766675722,
+      "total_seconds": 1.796144,
+      "process_seconds": 1.7973559859999568,
+      "stdout_sha256": "e6b841b7120f42aca73dd64f1fa134b5b5164d4fb7aa56f271f3f2c540bcaa5b"
+    },
+    {
+      "run": 6,
+      "draw_cycles": 704530641,
+      "draw_seconds": 1.682588,
+      "effective_mhz": 418.7184509814643,
+      "total_cycles": 766675722,
+      "total_seconds": 1.811708,
+      "process_seconds": 1.81325928199999,
+      "stdout_sha256": "e6b841b7120f42aca73dd64f1fa134b5b5164d4fb7aa56f271f3f2c540bcaa5b"
+    },
+    {
+      "run": 7,
+      "draw_cycles": 704530641,
+      "draw_seconds": 1.72267,
+      "effective_mhz": 408.9759739241991,
+      "total_cycles": 766675722,
+      "total_seconds": 1.854017,
+      "process_seconds": 1.8551086769999756,
+      "stdout_sha256": "e6b841b7120f42aca73dd64f1fa134b5b5164d4fb7aa56f271f3f2c540bcaa5b"
+    }
+  ],
+  "summary": {
+    "median_draw_seconds": 1.673355,
+    "min_draw_seconds": 1.662165,
+    "max_draw_seconds": 1.725248,
+    "draw_cycles": 704530641,
+    "median_effective_mhz": 421.0287960414855
+  }
+}
