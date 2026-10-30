@@ -115,9 +115,62 @@ cargo test --release --test ccompiler -- --ignored
 
 ## マンデルブロー集合のCデモ
 
+リポジトリのルートで、エミュレータのコマンド作成、C開発用ディスク作成、
+ゲスト内でのCベンチマークのコンパイル・実行を順に行います。
+事前に上記の参照キット取得と「Cコンパイラ」の必要ツールの準備を済ませてください。
+
+1. ホストでエミュレータのコマンドを作成します。
+
+   ```sh
+   cargo build --release
+   ```
+
+   実行ファイルは `target/release/rs6809` です。
+
+2. CソースとMicroware Cを収録したディスクを作り、エミュレータを起動します。
+
+   ```sh
+   python3 scripts/build-c-disk.py
+   sh examples/nitros9-c.sh
+   ```
+
+   `Time ?` に `2026/10/31 12:00:00` のように日時を入力します。
+
+3. ゲストの `OS9:` プロンプトでCベンチマークをコンパイルします。
+
+   ```text
+   chd /dd/SOURCES
+   cc mandel
+   ```
+
+   `c.prep` から `c.link` まで実行され、同じディレクトリに実行コマンド `mandel` ができます。
+
+4. ゲストで実行します。
+
+   ```text
+   ./mandel
+   ```
+
+   79列×25行のマンデルブローが描画され、`MANDELBROT-DONE` と表示されます。
+   対話実行の終了はCtrl-Cです。
+
+ディスク作成からコンパイル・実行・1回の速度計測まで自動で行う場合は：
+
 ```sh
 sh examples/mandelbrot.sh
 ```
+
+標準エラーの `measured_cycles` が描画区間の仮想CPUサイクル数、続く `host_seconds` が
+ホストでの所要秒数です。起動・コンパイル時間はこの描画区間に含みません。
+
+ウォームアップ1回と計測7回で中央値を求める場合は、ディスク作成後に：
+
+```sh
+python3 scripts/benchmark-emulator.py --workload basic09 --runs 7 --output artifacts/benchmark/mandelbrot-c.json
+```
+
+こちらはビルド済みの `target/release/rs6809` を使います。
+結果は画面と指定したJSONに保存します。Cソースを変更した場合はディスクを作り直してください。
 
 画像で指定されたBASIC09の `PROCEDURE mandel` をCへ直接移植しています。
 79列×25行、X=-39〜39、Y=-12〜12、実数演算、最大16回反復で、発散した点を0〜F、内部を空白で表示します。
@@ -126,14 +179,6 @@ sh examples/mandelbrot.sh
 元のBASIC09とC版を実行して比較し、**1,975文字すべての一致**を確認しました。
 この実数版の描画時間は7回の中央値 **1.673355秒**、704,530,641仮想サイクル（421.0MHz相当）でした。
 起動・コンパイルを除いた計測で、[詳細と再現手順](docs/mandelbrot-basic09-port.md#c移植版の速度ベンチマーク)を保存しています。
-
-手動なら `sh examples/nitros9-c.sh` で起動し、日時入力後に：
-
-```text
-chd /dd/SOURCES
-cc mandel
-./mandel
-```
 
 元のBASIC09ソースも `/dd/SOURCES/mandel.b09` に収録しています。
 再比較は `python3 scripts/compare-basic09-port.py` で実行できます。
