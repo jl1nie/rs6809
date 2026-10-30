@@ -44,7 +44,7 @@
     "cpu_model": "AMD Ryzen 9 9900X 12-Core Processor",
     "kernel": "6.6.87.2-microsoft-standard-WSL2",
     "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
-    "binary": "/home/minoru/src/rs6809/artifacts/baselines/v0/rs6809",
+    "binary": "artifacts/baselines/v0/rs6809",
     "binary_sha256": "14738e73a36edfd8fdeee8e670938048007369eb3f428bd89f9ce8d694e6cae5",
     "inputs": {
       "reference/nitros9-basic09-starter-kit/nitros9-runtime/6809M.bin": "510dea6bc49787728ba33c414b38178fa89ca2bad47a47164f30af2fe7c3d2b5",
@@ -52,14 +52,14 @@
       "examples/mandelbrot.tsv": "c42546493706e87d5e1bddff78712cb5f8041372f63c6e801cd46ac444e7fef6"
     },
     "command": [
-      "/home/minoru/src/rs6809/artifacts/baselines/v0/rs6809",
+      "artifacts/baselines/v0/rs6809",
       "--rom",
-      "/home/minoru/src/rs6809/reference/nitros9-basic09-starter-kit/nitros9-runtime/6809M.bin",
+      "reference/nitros9-basic09-starter-kit/nitros9-runtime/6809M.bin",
       "--disk",
-      "/home/minoru/src/rs6809/artifacts/ccompiler/multicomp09-c.img",
+      "artifacts/ccompiler/multicomp09-c.img",
       "--boot",
       "--script",
-      "/home/minoru/src/rs6809/examples/mandelbrot.tsv",
+      "examples/mandelbrot.tsv",
       "--until",
       "MANDELBROT-DONE",
       "--max-cycles",

@@ -18,6 +18,12 @@ def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def portable(arg):
+    """Record repository paths relative to ROOT so reports do not leak host paths."""
+    path = Path(arg)
+    return str(path.relative_to(ROOT)) if path.is_absolute() and path.is_relative_to(ROOT) else arg
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary", type=Path, default=ROOT / "target/release/rs6809")
@@ -62,9 +68,9 @@ def main():
                 if line.startswith("model name")), "unknown")
     report = {"workload": label, "cpu_model": cpu,
               "kernel": platform.release(), "rustc": subprocess.check_output(["rustc", "--version"], text=True).strip(),
-              "binary": str(binary), "binary_sha256": digest(binary),
+              "binary": portable(str(binary)), "binary_sha256": digest(binary),
               "inputs": {str(p.relative_to(ROOT)): digest(p) for p in [rom, disk, script]},
-              "command": command, "warmup_runs": 1, "runs": runs,
+              "command": [portable(arg) for arg in command], "warmup_runs": 1, "runs": runs,
               "summary": {"median_draw_seconds": median, "min_draw_seconds": min(times),
                           "max_draw_seconds": max(times), "draw_cycles": runs[0]["draw_cycles"],
                           "median_effective_mhz": runs[0]["draw_cycles"] / median / 1e6}}
