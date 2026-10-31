@@ -26,37 +26,43 @@ class Session:
     def receive(self, marker, timeout=8):
         end = time.monotonic() + timeout
         while marker not in self.buffer and time.monotonic() < end:
-            if not select.select([self.socket], [], [], 0.1)[0]:
-                continue
-            data = self.socket.recv(8192)
-            if not data:
+            if not self.pump(0.1):
                 break
-            for byte in data:
-                if self.state == "data":
-                    if byte == 255:
-                        self.state = "command"
-                    else:
-                        self.buffer.append(byte)
-                elif self.state == "command":
-                    if byte in (251, 252, 253, 254):
-                        self.option = byte
-                        self.state = "option"
-                    else:
-                        if byte == 255:
-                            self.buffer.append(byte)
-                        self.state = "data"
-                elif self.state == "option":
-                    if self.option == 251:
-                        self.socket.sendall(bytes([255, 253 if byte in (1, 3) else 254, byte]))
-                    elif self.option == 253:
-                        self.socket.sendall(bytes([255, 251 if byte == 3 else 252, byte]))
-                    self.state = "data"
         if marker not in self.buffer:
             raise AssertionError(f"missing {marker!r}: {bytes(self.buffer)[-1000:]!r}")
         end = self.buffer.index(marker) + len(marker)
         result = bytes(self.buffer[:end])
         del self.buffer[:end]
         return result
+
+    def pump(self, timeout):
+        """Append available data to the buffer; return False after the peer closes."""
+        if not select.select([self.socket], [], [], timeout)[0]:
+            return True
+        data = self.socket.recv(8192)
+        if not data:
+            return False
+        for byte in data:
+            if self.state == "data":
+                if byte == 255:
+                    self.state = "command"
+                else:
+                    self.buffer.append(byte)
+            elif self.state == "command":
+                if byte in (251, 252, 253, 254):
+                    self.option = byte
+                    self.state = "option"
+                else:
+                    if byte == 255:
+                        self.buffer.append(byte)
+                    self.state = "data"
+            elif self.state == "option":
+                if self.option == 251:
+                    self.socket.sendall(bytes([255, 253 if byte in (1, 3) else 254, byte]))
+                elif self.option == 253:
+                    self.socket.sendall(bytes([255, 251 if byte == 3 else 252, byte]))
+                self.state = "data"
+        return True
 
     def login(self, name, password, invalid_first=False, welcomed=False):
         if not welcomed:
@@ -185,6 +191,11 @@ def main():
             for session in sessions:
                 session.close()
             emulator.stop()
+        # The host console shows only the boot log, never a remote user's session on ACIA 1.
+        console = (directory / "console.log").read_bytes()
+        assert b"LEVEL2-STARTED" in console
+        for leaked in [b"User name?:", b"SESSION-0", b"PERSISTENT-CONTENT"]:
+            assert leaked not in console, f"ACIA 1 session output leaked to host stdout: {leaked!r}"
         # Kill/restart the emulator, reopening the same SD backing file.
         emulator = Emulator(args.binary.resolve(), image, directory)
         session = Session(emulator.port)

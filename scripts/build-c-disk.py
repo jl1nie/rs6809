@@ -13,6 +13,7 @@ OUT = ROOT / "artifacts/ccompiler"
 TOOLS = ROOT / "artifacts/tools"
 LW_VERSION = "4.25"
 LW_SHA256 = "9bb97e987d486d7abd85d04cb98a53f666f02785c108647b795c4a111c5eb09f"
+FLAGS = ["--no-warn=ifp1", "--6809", "--format=os9", "--pragma=pcaspcr,nosymbolcase,condundefzero,undefextern,dollarnotlocal,noforwardrefmax"]
 
 
 def run(*args, cwd=None):
@@ -75,14 +76,11 @@ def patch_sd_driver(disk, lwasm, flags):
     print("Patched mc09sd: OR-based LSN0 test; module size and boot-file layout preserved", flush=True)
 
 
-def main():
-    if not REF.is_dir():
-        raise SystemExit("Get the reference starter kit first; see README.md")
+def compiler(lwasm):
+    """Assemble the Microware C commands into OUT; return their paths and the header and library files."""
     OUT.mkdir(parents=True, exist_ok=True)
-    lwasm, os9 = tools()
     sources = REF / "nitros9-languages/ccompiler"
     defs = REF / "nitros9/defs"
-    flags = ["--no-warn=ifp1", "--6809", "--format=os9", "--pragma=pcaspcr,nosymbolcase,condundefzero,undefextern,dollarnotlocal,noforwardrefmax", f"--includedir={defs}"]
     commands = {name: f"{name}_dis.asm" for name in ["cc1", "c.pass1", "c.pass2", "c.opt", "c.link", "make"]}
     commands.update({"c.prep": "c.prep.asm", "c.asm": "c_asm.asm"})
     defs_mtime = max(path.stat().st_mtime for path in defs.glob("*.d"))
@@ -90,7 +88,20 @@ def main():
         output = OUT / name
         if not output.is_file() or output.stat().st_mtime < max(defs_mtime, (sources / source).stat().st_mtime, (sources / "defsfile").stat().st_mtime):
             print(f"Assembling {name}", flush=True)
-            run(lwasm, *flags, f"--output={output}", source, cwd=sources)
+            run(lwasm, *FLAGS, f"--includedir={defs}", f"--output={output}", source, cwd=sources)
+    headers = sorted((sources / "defs").glob("*.h"))
+    libraries = sorted(path for path in (sources / "lib").iterdir() if path.suffix in (".l", ".r"))
+    return [OUT / name for name in commands], headers, libraries
+
+
+def main():
+    if not REF.is_dir():
+        raise SystemExit("Get the reference starter kit first; see README.md")
+    lwasm, os9 = tools()
+    defs = REF / "nitros9/defs"
+    flags = [*FLAGS, f"--includedir={defs}"]
+    modules, headers, libraries = compiler(lwasm)
+    commands = {module.name: None for module in modules}
     run(lwasm, *flags, f"--output={OUT / 'cc'}", ROOT / "examples/cc.asm")
     commands["cc"] = "cc.asm"
     disk = OUT / "nitros9-c.dsk"
@@ -104,11 +115,10 @@ def main():
     for name in commands:
         os9run("copy", "-o=0", OUT / name, f"{disk},CMDS/{name}")
         os9run("attr", "-q", "-pe", "-npw", "-pr", "-e", "-w", "-r", f"{disk},CMDS/{name}")
-    for header in sorted((sources / "defs").glob("*.h")):
+    for header in headers:
         os9run("copy", "-o=0", "-l", header, f"{disk},DEFS/{header.name}")
-    for library in sorted((sources / "lib").iterdir()):
-        if library.suffix in (".l", ".r"):
-            os9run("copy", "-o=0", library, f"{disk},LIB/{library.name}")
+    for library in libraries:
+        os9run("copy", "-o=0", library, f"{disk},LIB/{library.name}")
     for name in ["hello.c", "mandel.c"]:
         os9run("copy", "-o=0", "-l", ROOT / "examples" / name, f"{disk},SOURCES/{name}")
     os9run("copy", "-o=0", "-l", REF / "nitros9-runtime/mandel.b09", f"{disk},SOURCES/mandel.b09")

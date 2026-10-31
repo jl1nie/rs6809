@@ -133,6 +133,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         .map(|address| TelnetServer::bind(&address, &mut machine))
         .transpose()?;
     let mut announced = false;
+    let mut console_private = false;
     let mut cpu = Cpu::default();
     cpu.reset(&mut machine);
     if let Some(path) = bin {
@@ -192,8 +193,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             if let Some(server) = &mut server {
                 server.send(0, &bytes, &mut machine);
             }
-            out.write_all(&bytes)?;
-            out.flush()?;
+            // Once ACIA 1 offers logins it belongs to a remote user; only the
+            // boot log before that reaches the host console.
+            if !console_private {
+                out.write_all(&bytes)?;
+                out.flush()?;
+            }
             for b in bytes {
                 seen.push(char::from(b));
             }
@@ -235,6 +240,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             blocks = 0;
             if let Some(server) = &mut server {
                 server.poll(&mut machine)?;
+                console_private |= machine.serial(0).unwrap().session_ready();
                 if !announced
                     && (0..machine.acia_count()).any(|i| machine.serial(i).unwrap().session_ready())
                 {

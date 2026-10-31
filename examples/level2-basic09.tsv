@@ -1,0 +1,11 @@
+OS9:	chd /dd/SOURCES
+OS9:	basic09
+B:	e test
+E:	10 PRINT 6*7
+E:	20 END
+E:	q
+B:	run test
+B:	load mandel.b09
+B:	run mandel
+B:	bye
+OS9:	echo BASIC09-DONE

@@ -74,11 +74,39 @@ def main():
     if revision != REFERENCE_COMMIT:
         raise SystemExit(f"Level 2 patches require starter-kit commit {REFERENCE_COMMIT}")
     # Reuse the checksum-verified local LWTOOLS and ToolShed setup.
-    lwasm, os9 = runpy.run_path(str(ROOT / "scripts/build-c-disk.py"))["tools"]()
+    build_c = runpy.run_path(str(ROOT / "scripts/build-c-disk.py"))
+    lwasm, os9 = build_c["tools"]()
+    # Microware C runs natively; cc1 drives its passes through shell scripts that use echo and del.
+    compiler, headers, libraries = build_c["compiler"](lwasm)
     WORK.mkdir(parents=True, exist_ok=True)
     for name, path in patched.items():
         (WORK / name).write_text((SOURCE / path).read_text())
     run("patch", "--batch", "--fuzz=0", "-p1", "-i", ROOT / "scripts/nitros9-level2.patch")
+    # The mc09 kernel hard-wires 512KB. Probe block $40, the first above 512KB:
+    # it counts only if it holds a marker without ghosting onto block 0.
+    kernel = WORK / "mc09krn.asm"
+    sizing = "                    ldd       #$0240    ; load D from #$0240\n"
+    if kernel.read_text().count(sizing) != 1:
+        raise SystemExit("Unexpected kernel memory sizing; review mc09krn.asm")
+    kernel.write_text(kernel.read_text().replace(sizing, """\
+                    ldd       #(MMU_TR0|5)*256+$40 ; map block $40 at $A000
+                    std       >MMUADR
+                    lda       #$5A      ; marker at block $40 offset $200
+                    sta       >-$6000,x
+                    cmpa      >-$6000,x ; RAM present?
+                    bne       KrnMem512
+                    cmpa      ,x        ; ghosted onto block 0 (X=D.BlkMap)?
+                    bne       KrnMem1M
+                    lda       #1        ; restore block 0's in-use mark
+                    sta       ,x
+KrnMem512           ldd       #$0240    ; 512KB: 64 blocks
+                    bra       KrnMemMap
+KrnMem1M            ldd       #$0280    ; 1MB: 128 blocks
+KrnMemMap           pshs      d
+                    ldd       #(MMU_TR0|5)*256+5 ; restore the 1:1 mapping
+                    std       >MMUADR
+                    puls      d
+"""))
     if args.multi_user:
         (WORK / "fcpymem_compat.asm").write_text((ROOT / "scripts/os9/fcpymem_compat.asm").read_text())
         run("patch", "--batch", "--fuzz=0", "-p1", "-i", ROOT / "scripts/nitros9-telnet.patch")
@@ -128,11 +156,11 @@ def main():
               f"-DHwBASE={0xffd2 + index * 2}", "-DPauses=0")
     build("clock", "level2/mc09l2/modules/mc09clock.asm", "-DMainsFrq=50", "-DRTCSoft=1")
     commands = {"shell": "level1/cmds/shell_21.asm", "echo": "level1/cmds/echo.asm",
-                "mfree": "level2/cmds/mfree.asm"}
+                "mfree": "level2/cmds/mfree.asm", "del": "level1/cmds/del.asm"}
     if args.multi_user:
         commands.update({"tsmon": "level1/cmds/tsmon.asm", "login": "level1/cmds/login.asm",
                          "procs": "level2/cmds/procs.asm", "sleep": "level1/cmds/sleep.asm",
-                         "list": "level1/cmds/list.asm", "dir": "level1/cmds/dir.asm", "del": "level1/cmds/del.asm"})
+                         "list": "level1/cmds/list.asm", "dir": "level1/cmds/dir.asm"})
     for name, path in commands.items():
         build(name, path)
 
@@ -160,6 +188,26 @@ def main():
         dest = f"{disk}," + (name if name == "sysgo" else "CMDS/" + name)
         tool("copy", OUT / name, dest)
         tool("attr", "-q", "-pe", "-pr", "-e", "-r", dest)
+    # BASIC09 is level-independent; reuse the starter kit's verified 6809 modules.
+    basic09 = []
+    for name in ["basic09", "runb", "inkey", "syscall"]:
+        module = OUT / name
+        module.unlink(missing_ok=True)
+        tool("copy", f"{REF / 'nitros9-runtime/NOS9_mc09_basic09.dsk'},CMDS/{name}", module)
+        if not module.is_file():
+            raise SystemExit(f"Cannot extract {name} from the starter-kit BASIC09 disk")
+        basic09.append(module)
+    for module in [*compiler, *basic09]:
+        dest = f"{disk},CMDS/{module.name}"
+        tool("copy", module, dest)
+        tool("attr", "-q", "-pe", "-pr", "-e", "-r", dest)
+    samples = [ROOT / "examples/hello.c", ROOT / "examples/mandel.c", REF / "nitros9-runtime/mandel.b09"]
+    for directory, files in [("DEFS", headers), ("LIB", libraries), ("SOURCES", samples)]:
+        tool("makdir", f"{disk},{directory}")
+        for path in files:
+            dest = f"{disk},{directory}/{path.name}"
+            tool("copy", *(["-l"] if path.suffix in (".h", ".c", ".b09") else []), path, dest)
+            tool("attr", "-q", "-npe", "-npw", "-pr", "-ne", "-w", "-r", dest)
     startup = "".join(f"tsmon /{terminal} &\n" for terminal in terminals) if args.multi_user else ""
     (OUT / "startup").write_text(startup + "echo LEVEL2-STARTED\n")
     tool("copy", "-l", OUT / "startup", f"{disk},startup")
@@ -175,8 +223,11 @@ def main():
         for name, _ in users:
             tool("makdir", f"{disk},{name}")
             tool("attr", "-q", "-npr", "-npw", "-npe", "-r", "-w", "-e", f"{disk},{name}")
-        # ToolShed makdir creates UID 0 directories. Set the native FD owner
-        # after building so each home is writable only by its own user.
+            for path in samples:
+                tool("copy", "-l", path, f"{disk},{name}/{path.name}")
+                tool("attr", "-q", "-npe", "-npw", "-npr", "-ne", "-w", "-r", f"{disk},{name}/{path.name}")
+        # ToolShed creates UID 0 entries. Set the native FD owner after building
+        # so each home and its sample sources belong only to their user.
         image = bytearray(disk.read_bytes())
         def descriptor(path):
             fd = int.from_bytes(image[8:11], "big") * 256
@@ -201,8 +252,9 @@ def main():
                 fd = found
             return fd
         for uid, (name, _) in enumerate(users, 1):
-            fd = descriptor(name)
-            image[fd + 1:fd + 3] = uid.to_bytes(2, "big")
+            for path in [name, *(f"{name}/{sample.name}" for sample in samples)]:
+                fd = descriptor(path)
+                image[fd + 1:fd + 3] = uid.to_bytes(2, "big")
         disk.write_bytes(image)
         credentials = OUT / "accounts.txt"
         credentials.touch(mode=0o600)

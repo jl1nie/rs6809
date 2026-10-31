@@ -1,7 +1,7 @@
 # rs6809
 
 Pure RustのMotorola 6809エミュレータです。外部crate・Cコード・FFIを使わず、標準ライブラリのみで動作します。
-標準構成は64KB RAMとACIA相当のシリアルコンソールです。Multicomp互換モードは512KB RAMを備え、NitrOS-9 Level 1 / BASIC09とLevel 2を起動できます。
+標準構成は64KB RAMとACIA相当のシリアルコンソールです。Multicomp互換モードは既定512KB・最大1MBのRAMを備え、NitrOS-9 Level 1 / BASIC09とLevel 2を起動できます。
 Level 2では1つのOSを共有してTelnetから複数ユーザー・複数プロセスを同時に動かせます。
 
 ## ビルドと最小サンプル
@@ -58,7 +58,7 @@ cargo test --release --test nitros9 -- --ignored --nocapture
 このテストはROM→NitrOS-9→シェル→BASIC09→編集モード→`RUN test`→`42`→`B:` の全経路を確認します。
 参照キットが必要なので通常の `cargo test` では無視されます。
 
-## NitrOS-9 Level 2（512KB）
+## NitrOS-9 Level 2（512KB／1MB）
 
 上記と同じ参照キット（コミット `bf60370cfa180636cde3ee305d089d94872de82a`）から、
 Multicomp用Level 2カーネルと専用ディスクを構築できます。
@@ -71,8 +71,30 @@ sh examples/nitros9-level2.sh
 ```
 
 起動後に `NitrOS-9/6809 Level 2 V03.3.0`、`LEVEL2-STARTED`、`OS9:` が表示されます。
-`mfree` で `$7FFFF` までの物理メモリと空きメモリを確認できます。
-最小ディスクには `shell`、`echo`、`mfree` を収録しています。BASIC09やCコンパイラは含みません。
+`mfree` で物理メモリの上限と空きメモリを確認できます。既定の512KBでは `$7FFFF` まで、
+`--ram-kb 1024` を付けて起動すると `$FFFFF` までを使います。
+ディスクには `shell`、`echo`、`del`、`mfree` と、Microware Cのオリジナルのドライバ `cc1` 一式
+（`c.prep`〜`c.link`、`/dd/DEFS` のヘッダ、`/dd/LIB` のライブラリ）、BASIC09（`basic09`・`runb`・`inkey`・`syscall`）を収録しています。
+BASIC09は参照キットの検証済みBASIC09ディスクから同じモジュールを取り出します。
+`/dd/SOURCES` には `hello.c`・`mandel.c`・`mandel.b09` を置きます。
+
+```text
+OS9:chd /dd/SOURCES
+OS9:cc1 hello.c -f=/dd/SOURCES/hello
+OS9:/dd/SOURCES/hello
+Hello from C: 42
+```
+
+`cc1` は作業用のシェルスクリプト `c.com` と中間ファイル `ctmp.<プロセス番号>.*` を現在のディレクトリに作ります。
+`-f=` を省略すると実行ファイルを実行ディレクトリ `/dd/CMDS` に出力します。
+
+```text
+OS9:chd /dd/SOURCES
+OS9:basic09
+B:load mandel.b09
+B:run mandel
+```
+Level 2では各プロセスが専用の64KB空間を持つため、Level 1でメモリ不足になった `cc1` も動作します。
 Level 2用の参照ソースに必要な変更は生成先だけに適用し、参照キットとLevel 1ディスクは保持します。
 変更理由は [Level 2対応の記録](docs/level2.md) を参照してください。
 
@@ -81,10 +103,12 @@ cargo test --release --test nitros9_level2 -- --ignored
 ```
 
 このテストはROMからの起動、startup実行、シェルでの `mfree`、別プロセスの `echo` 実行と
-シェルへの復帰を確認します。
+シェルへの復帰、`cc1` による `hello.c` のコンパイル・実行、BASIC09での `6*7` と `mandel.b09` の実行を確認します。
 
 MulticompのRAMは既定512KBで、`--ram-kb 64|128|256|512|1024` で選べます。
-従来の64KB構成は `--ram-kb 64` で再現できます。このLevel 2イメージは512KB向けです。
+従来の64KB構成は `--ram-kb 64` で再現できます。
+Level 2カーネルは起動時に512KBか1MBかを検出するため、同じディスクをどちらでも使えます。
+Level 2には512KB以上が必要です。起動スクリプトにも `--ram-kb 1024` を追加できます（例：`sh examples/nitros9-telnet.sh --ram-kb 1024`）。
 CoCo 3専用のROM・ディスク・GIMEには対応しません。
 
 ## Telnet・マルチユーザー
@@ -127,6 +151,36 @@ python3 scripts/test-telnet.py --acia-count 4
 
 テスト用ディスクは一時ディレクトリに作成します。
 設定・切断時の動作・保存先・検証手順は [Telnet接続の説明](docs/telnet.md) にまとめています。
+
+### 複数ユーザーで同時にマンデルブロー
+
+複数のTelnetユーザーが1台の6809を共有し、それぞれのホームで `mandel.c` を `cc1` でコンパイルして実行します。
+参照キットと「Cコンパイラ」の必要ツール、`cargo build --release` を事前に済ませてください。
+
+```sh
+python3 scripts/demo-mandelbrot.py --users 3
+```
+
+スクリプトは `artifacts/level2-mandel/` にマルチユーザーディスクを作り直し、次の順に実行します。
+
+1. 1人で `cc1 mandel.c -f=/dd/ユーザー名/mandel` と `/dd/ユーザー名/mandel` を実行し、基準の画像と時間を記録します。
+2. 全員が同時にコンパイルします。
+3. 全員が同時に自分の `mandel` を実行し、画像が基準と一致することを確認します。
+
+端末では各ユーザーのコンパイル段階と描画済み行数を表示し、最後に単独時と同時実行時の所要時間を比較します。
+`--users 1|2|3|4` で人数を、`--skip-build` で既存ディスクの再利用を指定できます。
+マルチユーザー構成では各ユーザーのホームに `hello.c`・`mandel.c`・`mandel.b09` を置きます。
+出力先は `-f=` で自分のホームを指定してください。省略すると全員共通の `/dd/CMDS` に書き込みます。
+
+手動で試す場合は、デモでディスクを作成した後に起動し、別々の端末から接続します。
+
+```sh
+sh examples/nitros9-mandel-telnet.sh
+telnet 127.0.0.1 ポート番号
+```
+
+アカウントは `artifacts/level2-mandel/accounts.txt` にあります。
+エミュレータの標準出力には起動ログだけを表示するため、同じ端末でtelnetを使っても出力は混ざりません。
 
 ## Cコンパイラ
 
