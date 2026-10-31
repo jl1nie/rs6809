@@ -545,7 +545,10 @@ const MLANG = { 0: "", 1: "6809", 2: "I-code", 3: "P-code", 4: "C", 5: "Cobol", 
 function renderMods(mods, level) {
   $("thBlk").textContent = level === 2 ? "ブロック" : "";
   $("mods").innerHTML = mods.map((m) => `<tr><td class="mono name">${esc(m.name)}</td><td>${MTYPE[m.type >> 4] || hex(m.type >> 4, 1)}</td><td>${MLANG[m.type & 15] ?? ""}</td>` +
-    `<td class="mono">$${hex(m.addr, 4)}</td><td class="mono">${m.size}</td><td>${m.links}</td><td class="mono">${level === 2 ? m.blocks.map((b) => hex(b, 2)).join(" ") : ""}</td></tr>`).join("");
+    // Level 2's MD$MPtr is relative to the module's DAT image; show the physical address.
+    (level === 2 && m.blocks.length
+      ? `<td class="mono" title="モジュールDATイメージ内 $${hex(m.addr, 4)}">物理$${hex(m.blocks[0] * 0x2000 + (m.addr & 0x1fff), 5)}</td>`
+      : `<td class="mono">$${hex(m.addr, 4)}</td>`) + `<td class="mono">${m.size}</td><td>${m.links}</td><td class="mono">${level === 2 ? m.blocks.map((b) => hex(b, 2)).join(" ") : ""}</td></tr>`).join("");
 }
 function renderMemMap(mm, mods, procs, level) {
   const g = $("memgrid");

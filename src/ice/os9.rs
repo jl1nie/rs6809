@@ -245,7 +245,6 @@ pub struct Process {
     pub signal: u8,
     pub paths: [u8; 16],
     pub dat: Vec<u16>,
-    pub ticks: Option<(u32, u32, u32, u32)>,
 }
 
 #[derive(Debug, Clone)]
@@ -446,7 +445,6 @@ impl<'a> View<'a> {
                 *p = r(l.path + i as u16);
             }
             let two = self.level == Level::Two;
-            let r32 = |o: u16| u32::from(r16(o)) << 16 | u32::from(r16(o + 2));
             out.push(Process {
                 id,
                 addr: a,
@@ -469,41 +467,33 @@ impl<'a> View<'a> {
                 } else {
                     Vec::new()
                 },
-                ticks: two.then(|| (r32(0xad), r32(0xb1), r32(0xb5), r32(0xb9))),
             });
         }
         out
     }
     pub fn modules(&self) -> Vec<Module> {
         let start = self.sys16(self.g().moddir);
-        let end = self.sys16(self.g().moddir + 2);
+        // Level 2 entries end at D.ModEnd; D.ModDir+2 bounds the DAT images
+        // that grow down from the top of the same area.
+        let end = match self.level {
+            Level::One => self.sys16(self.g().moddir + 2),
+            Level::Two => self.sys16(0x58),
+        };
         let step = if self.level == Level::One { 4 } else { 8 };
         let mut out = Vec::new();
         let mut e = start;
         while e < end && out.len() < 256 {
-            let (ptr, links, image, blocks) = match self.level {
-                Level::One => (
-                    self.sys16(e),
-                    u16::from(self.sys(e + 2)),
-                    [0x333e; 8],
-                    Vec::new(),
-                ),
+            // Level 2: MD$MPDAT, MD$MBSiz, MD$MPtr (relative to that image), MD$Link.
+            let (ptr, links, image) = match self.level {
+                Level::One => (self.sys16(e), u16::from(self.sys(e + 2)), [0x333e; 8]),
                 Level::Two => {
                     let img = self.sys16(e);
-                    let size = self.sys16(e + 2);
-                    let n = usize::from(size.div_ceil(8192)).clamp(1, 8);
                     let image = if img == 0 {
                         [0x333e; 8]
                     } else {
                         self.image_at(img)
                     };
-                    let used = image
-                        .iter()
-                        .copied()
-                        .filter(|&b| b != 0x333e)
-                        .take(n)
-                        .collect();
-                    (self.sys16(e + 4), self.sys16(e + 6), image, used)
+                    (self.sys16(e + 4), self.sys16(e + 6), image)
                 }
             };
             e += step;
@@ -517,10 +507,18 @@ impl<'a> View<'a> {
             if !module_ok(&read, ptr) {
                 continue;
             }
+            let size = u16::from_be_bytes([read(ptr + 2), read(ptr + 3)]);
+            // The physical blocks the module itself occupies, not its whole image.
+            let blocks = if self.level == Level::Two {
+                let last = ptr.saturating_add(size.max(1) - 1);
+                image[usize::from(ptr >> 13)..=usize::from(last >> 13)].to_vec()
+            } else {
+                Vec::new()
+            };
             out.push(Module {
                 name: self.module_name(&read, ptr),
                 addr: ptr,
-                size: u16::from_be_bytes([read(ptr + 2), read(ptr + 3)]),
+                size,
                 kind: read(ptr + 6),
                 revs: read(ptr + 7),
                 links,

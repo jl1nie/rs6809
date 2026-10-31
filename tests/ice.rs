@@ -211,7 +211,8 @@ fn decodes_level2_structures() {
         &[0x87, 0xcd, 0x00, 0x20, 0x00, 0x0d, 0x11, 0x81, 0],
     );
     put(&mut m, 0x2001d, b"Shel\xec");
-    put(&mut m, 0x44, &[0x07, 0x00, 0x07, 0x08]); // D.ModDir..D.ModEnd
+    put(&mut m, 0x44, &[0x07, 0x00, 0x08, 0x00]); // D.ModDir, its DAT image top
+    put(&mut m, 0x58, &be(0x0708)); // D.ModEnd
     put(
         &mut m,
         0x0700,
@@ -292,4 +293,91 @@ fn traces_real_nitros9_shell() {
     );
     let state = ok(&mut d, "/api/state");
     assert!(state.contains("\"level\":1"), "{state}");
+}
+
+/// Boot the Level 2 disk under the ICE and stop when the startup shell's
+/// F$Fork of `echo` returns: requires python3 scripts/build-level2-disk.py.
+#[test]
+#[ignore]
+fn decodes_real_level2_processes_and_modules() {
+    let kit = "reference/nitros9-basic09-starter-kit/nitros9-runtime";
+    let mut m = Machine::multicomp_with_ram(
+        &fs::read(format!("{kit}/6809M.bin")).unwrap(),
+        File::open("artifacts/level2/multicomp09-level2.img").unwrap(),
+        512 * 1024,
+    )
+    .unwrap();
+    let mut c = Cpu::default();
+    c.reset(&mut m);
+    let actions = VecDeque::from([("CamelForth".to_string(), "NITROS9".to_string())]);
+    let mut d = Ice::new(
+        c,
+        m,
+        Options {
+            actions,
+            echo_console: false,
+        },
+    );
+    ok(&mut d, "/api/os9break?code=F$Fork&when=return");
+    ok(&mut d, "/api/run");
+    // SysGo forks the shells first; stop at the fork of `echo LEVEL2-STARTED`.
+    for _ in 0..400 {
+        d.run_steps(1_000_000);
+        if !d.running {
+            let (_, calls) = d.command("GET", "/api/os9/calls?user=1&limit=20", b"");
+            if calls.contains(r#"モジュール\"echo\""#) {
+                break;
+            }
+            ok(&mut d, "/api/run");
+        }
+    }
+    assert!(!d.running);
+    let state = ok(&mut d, "/api/state");
+    assert!(state.contains("\"level\":2"), "{state}");
+
+    let v = View::detect(&d.machine).expect("Level 2 detected");
+    assert_eq!(v.level, Level::Two);
+    let procs = v.processes();
+    let by = |name: &str| procs.iter().find(|p| p.module == name).unwrap_or_else(|| panic!("{name}: {procs:?}"));
+    let echo = by("Echo");
+    let shell = procs.iter().find(|p| p.id == echo.parent).unwrap();
+    assert_eq!(shell.module, "Shell");
+    by("SysGo");
+    // The caller is current and holds a hardware task; the child waits to run.
+    assert_eq!(v.current(), shell.addr);
+    assert_eq!(shell.queue, "running");
+    assert_ne!(shell.task, Some(0));
+    assert_eq!((echo.parent, shell.child), (shell.id, echo.id));
+    assert_eq!(echo.queue, "active");
+    // Each process maps its data at $0000 and its module from the DAT image.
+    for p in [shell, echo] {
+        assert_ne!(p.dat[0], 0x333e, "{p:?}");
+        assert!(p.dat.iter().all(|&b| b == 0x333e || usize::from(b) < 64), "{p:?}");
+    }
+    // The system process owns the system DAT image.
+    let sys = procs.iter().find(|p| p.addr == v.sys16(0x4a)).unwrap();
+    assert_eq!(sys.dat, v.sys_dat());
+
+    let mods = v.modules();
+    let module = |name: &str| mods.iter().find(|m| m.name == name).unwrap_or_else(|| panic!("{name}: {mods:?}"));
+    // Krn lives at $F000: block 7, offset $1000 within its image.
+    let krn = module("Krn");
+    assert_eq!((krn.addr, krn.blocks.as_slice()), (0x1000, &[7][..]));
+    // Boot-file modules: only the blocks each one occupies.
+    for m in &mods {
+        let span = usize::from((m.addr & 0x1fff) + m.size - 1) / 8192 + 1;
+        assert_eq!(m.blocks.len(), span, "{m:?}");
+    }
+    assert_eq!(module("KrnP2").blocks.len(), 1);
+    for name in ["IOMan", "Init", "RBF", "SCF", "mc6850", "Clock", "SysGo", "Shell", "Echo"] {
+        module(name);
+    }
+    // Every module and process block is marked in use in D.BlkMap.
+    let (unit, map) = v.memory_map();
+    assert_eq!((unit, map.len()), (8192, 64));
+    for b in mods.iter().flat_map(|m| m.blocks.iter()).chain(procs.iter().flat_map(|p| p.dat.iter())) {
+        if *b != 0x333e {
+            assert_ne!(map[usize::from(*b)] & 1, 0, "block {b:02X}: {map:?}");
+        }
+    }
 }

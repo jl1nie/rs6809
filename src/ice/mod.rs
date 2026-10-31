@@ -973,15 +973,12 @@ impl Ice {
             .map(|p| {
                 let paths: Vec<String> = p.paths.iter().map(|x| x.to_string()).collect();
                 let dat: Vec<String> = p.dat.iter().map(|x| x.to_string()).collect();
-                let ticks = p.ticks.map_or("null".into(), |(u, s, f, i)| {
-                    format!("{{\"user\":{u},\"system\":{s},\"fcalls\":{f},\"icalls\":{i}}}")
-                });
                 format!(
-                    "{{\"id\":{},\"addr\":{},\"parent\":{},\"sibling\":{},\"child\":{},\"sp\":{},\"task\":{},\"pages\":{},\"user\":{},\"prior\":{},\"age\":{},\"state\":{},\"queue\":\"{}\",\"module\":{},\"signal\":{},\"paths\":[{}],\"dat\":[{}],\"ticks\":{}}}",
+                    "{{\"id\":{},\"addr\":{},\"parent\":{},\"sibling\":{},\"child\":{},\"sp\":{},\"task\":{},\"pages\":{},\"user\":{},\"prior\":{},\"age\":{},\"state\":{},\"queue\":\"{}\",\"module\":{},\"signal\":{},\"paths\":[{}],\"dat\":[{}]}}",
                     p.id, p.addr, p.parent, p.sibling, p.child, p.sp,
                     p.task.map_or("null".into(), |t| t.to_string()),
                     p.pages, p.user, p.prior, p.age, p.state, p.queue,
-                    json_str(&p.module), p.signal, paths.join(","), dat.join(","), ticks
+                    json_str(&p.module), p.signal, paths.join(","), dat.join(",")
                 )
             })
             .collect();
