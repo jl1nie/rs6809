@@ -314,12 +314,14 @@ python3 scripts/benchmark-emulator.py --workload basic09 --runs 7 --output artif
 
 ## 68000 CPUコア
 
-`src/m68k/` に、68000の全命令・例外・割り込みを命令単位のサイクル数で実行するコアと逆アセンブラがあります（ICEへの組み込みは今後）。
+`src/m68k/` に、68000の全命令・例外・割り込みを命令単位のサイクル数で実行するコアと逆アセンブラがあります。
+`--cpu 68000` で、RAMとコンソールだけの素の機械でプログラムを動かし、ICE（ブラウザ・DAP）で調べられます。
 SingleStepTests/680x0の約100万件（アドレスエラーのフレームとサイクル数を含む）で検証しています。詳細は [68000 CPUコア](docs/m68k.md) を参照してください。
 
 ```sh
 python3 scripts/fetch-68000-tests.py
 cargo test --release --test m68k_sst -- --ignored --nocapture
+rs6809 --cpu 68000 --bin prog.s68 --ice --ice-halt   # http://127.0.0.1:6809/
 ```
 
 ## ICE（GUIデバッガ）とOS-9モニタ

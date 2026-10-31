@@ -5,18 +5,18 @@
 //! slot really follows a call to the function; otherwise nearby depths are
 //! searched, so an unknown helper's stack effect cannot misplace variables.
 use super::debuginfo::{Ctx, Loc, Place, Type, Var};
-use super::disasm::{Flow, disassemble};
+use super::target::Target;
 use super::{Ice, json_str};
 
 #[derive(Debug, Clone)]
 pub struct Frame {
-    pub pc: u16,
+    pub pc: u32,
     /// S as seen by this frame.
-    pub s: u16,
+    pub s: u32,
     /// Frame base, when the function is described.
-    pub cfa: Option<u16>,
+    pub cfa: Option<u32>,
     /// The register variable (U) of this frame.
-    pub u: u16,
+    pub u: u32,
     /// (table, function index) when variables are known.
     pub func: Option<(usize, usize)>,
 }
@@ -33,25 +33,12 @@ pub enum VarRef {
     },
 }
 
-impl Ice {
-    /// Is `w` the address after a call to `target` (any call when `None`)?
-    fn returns_from_call_to(&self, w: u16, target: Option<u16>) -> bool {
-        let m = &self.machine;
-        (2..=4u16).any(|k| {
-            let l = disassemble(&|a| m.peek(a), w.wrapping_sub(k));
-            l.len == k
-                && l.flow == Flow::Call
-                && !l.text.starts_with("SWI")
-                && !l.svc
-                && (target.is_none() || l.target.is_none() || l.target == target)
-        })
-    }
-
+impl<T: Target> Ice<T> {
     /// Frames from the current PC outward.
     pub fn frames(&self, max: usize) -> Vec<Frame> {
-        let m = &self.machine;
+        let m = self.t.mem();
         let mut out = Vec::new();
-        let (mut pc, mut s, mut u) = (self.cpu.pc, self.cpu.s, self.cpu.u);
+        let (mut pc, mut s, mut u) = (self.t.pc(), self.t.sp(), self.t.reg("U").unwrap_or(0));
         while out.len() < max {
             let described = self.symbols.locate(m, pc).and_then(|(ti, off)| {
                 let d = self.symbols.tables[ti].debug.as_ref()?;
@@ -95,14 +82,14 @@ impl Ice {
                 });
                 break;
             };
-            let valid = |d: i16| {
-                let cfa = s.wrapping_add(d as u16);
-                let ret = m.peek16(cfa.wrapping_add(ret_at as u16));
-                self.returns_from_call_to(ret, Some(start))
+            let valid = |d: i32| {
+                let cfa = s.wrapping_add(d as u32) & self.amask();
+                let ret = self.read_ret(cfa.wrapping_add(ret_at as u32));
+                self.call_before(ret, Some(start))
                     .then_some((cfa, d))
             };
             let found = valid(depth).or_else(|| {
-                (1..=64i16).find_map(|k| valid(depth + k).or_else(|| valid(depth - k)))
+                (1..=64i32).find_map(|k| valid(depth + k).or_else(|| valid(depth - k)))
             });
             let Some((cfa, d)) = found else {
                 out.push(Frame {
@@ -121,25 +108,27 @@ impl Ice {
                 u,
                 func: Some((ti, fi)),
             });
-            let slot = cfa.wrapping_add(ret_at as u16);
+            let slot = cfa.wrapping_add(ret_at as u32);
             // The caller's U is saved once the prologue ran (depth >= 0).
             if d >= 0
                 && let Some(&(_, o)) = f.saved.iter().find(|r| r.0 == "U")
             {
-                u = m.peek16(cfa.wrapping_add(o as u16));
+                u = self.read_ret(cfa.wrapping_add(o as u32));
             }
-            pc = m.peek16(slot);
-            s = slot.wrapping_add(2);
+            pc = self.read_ret(slot);
+            s = slot.wrapping_add(self.t.ret_size());
         }
         out
     }
 
     /// Return addresses on the stack from `s`, innermost first.
-    pub fn call_chain_from(&self, s: u16, max: usize) -> Vec<(u16, u16)> {
-        let m = &self.machine;
+    pub fn call_chain_from(&self, s: u32, max: usize) -> Vec<(u32, u32)> {
+        let m = self.t.mem();
         let labelled = !self.symbols.tables.is_empty();
+        // A 68000 stack is word aligned; a 6809 stack is not.
+        let step = if self.t.ret_size() == 4 { 2 } else { 1 };
         let mut out = Vec::new();
-        for i in 0..512u16 {
+        for i in (0..512u32).step_by(step) {
             if out.len() >= max {
                 break;
             }
@@ -147,7 +136,7 @@ impl Ice {
             if at < s {
                 break;
             }
-            let w = m.peek16(at);
+            let w = self.read_ret(at);
             if self.is_return_address(w) && (!labelled || self.symbols.locate(m, w).is_some()) {
                 out.push((at, w));
             }
@@ -163,16 +152,16 @@ impl Ice {
             f.pc.wrapping_sub(1)
         };
         self.symbols
-            .line(&self.machine, at)
+            .line(self.t.mem(), at)
             .map(|(ti, l)| (ti, l.src, l.line))
     }
 
     pub fn place_of(&self, f: &Frame, v: &Var) -> Result<Place, &'static str> {
-        let y = self.cpu.y;
+        let y = self.t.reg("Y").unwrap_or(0);
         match &v.loc {
             Loc::Frame(o) => f
                 .cfa
-                .map(|c| Place::Mem(c.wrapping_add(*o as u16)))
+                .map(|c| Place::Mem(c.wrapping_add(*o as u32)))
                 .ok_or("フレームの位置が分かりません"),
             Loc::Reg("U") => Ok(Place::Value(f.u)),
             Loc::Reg(_) => Err("レジスタ"),
@@ -205,9 +194,9 @@ impl Ice {
 
     pub fn with_ctx<R>(&self, table: usize, f: impl FnOnce(&Ctx) -> R) -> Option<R> {
         let info = self.symbols.tables.get(table)?.debug.as_ref()?;
-        let m = &self.machine;
-        let read = |a: u16| m.peek(a);
-        let label = |a: u16| self.symbols.label(m, a);
+        let m = self.t.mem();
+        let read = |a: u32| m.peek(a);
+        let label = |a: u32| self.symbols.label(m, a);
         Some(f(&Ctx {
             read: &read,
             label: &label,
@@ -298,7 +287,7 @@ impl Ice {
             .map(|(i, f)| {
                 let name = self
                     .symbols
-                    .label(&self.machine, f.pc)
+                    .label(self.t.mem(), f.pc)
                     .unwrap_or_else(|| format!("${:04X}", f.pc));
                 let line = self.frame_line(i, f).map(|(ti, si, l)| {
                     let s = &self.symbols.tables[ti].sources[si];

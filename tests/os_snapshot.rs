@@ -71,7 +71,7 @@ fn dump(d: &mut Ice, api: &str, dir: &str, tag: &str) {
     fs::write(format!("{dir}/{tag}-state.json"), &state[os..os + end + 1]).unwrap();
     let (_, dis) = d.command(
         "GET",
-        &format!("/api/disasm?addr={:04X}&back=8&n=24", d.cpu.pc),
+        &format!("/api/disasm?addr={:04X}&back=8&n=24", d.t.cpu.pc),
         b"",
     );
     fs::write(format!("{dir}/{tag}-disasm.json"), dis).unwrap();
@@ -106,9 +106,9 @@ fn ice_speed() {
     d.run_steps(20_000_000); // boot to the shell, then idle in the shell
     let mut best = 0.0f64;
     for _ in 0..5 {
-        let (c0, t0) = (d.cpu.cycles, std::time::Instant::now());
+        let (c0, t0) = (d.t.cpu.cycles, std::time::Instant::now());
         d.run_steps(10_000_000);
-        best = best.max((d.cpu.cycles - c0) as f64 / t0.elapsed().as_secs_f64() / 1e6);
+        best = best.max((d.t.cpu.cycles - c0) as f64 / t0.elapsed().as_secs_f64() / 1e6);
     }
     println!("ice_speed_mhz={best:.1}");
 }

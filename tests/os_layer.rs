@@ -1,7 +1,7 @@
 //! The OS layer with a made-up OS: the HTTP API and DAP must work through
 //! `OsMonitor` alone, without anything from NitrOS-9.
 use rs6809::ice::json::{Json, obj};
-use rs6809::ice::osmon::{Call, Image, OsMonitor, PathNames, Process, Regs, Service, Svc};
+use rs6809::ice::osmon::{Call, CpuRegs, Image, Mem, OsMonitor, PathNames, Process, Service, Svc};
 use rs6809::ice::{Ice, Options};
 use rs6809::{Cpu, Machine};
 use std::collections::VecDeque;
@@ -11,7 +11,7 @@ use std::collections::VecDeque;
 struct ToyOs;
 
 impl OsMonitor for ToyOs {
-    fn detect(&mut self, m: &Machine) -> bool {
+    fn detect(&mut self, m: &dyn Mem) -> bool {
         m.peek(0x10) != 0
     }
     fn info(&self) -> Json {
@@ -31,10 +31,10 @@ impl OsMonitor for ToyOs {
             ("switchLabel", "Toy切り替え".into()),
         ])
     }
-    fn summary(&self, _: &Machine) -> Vec<(&'static str, Json)> {
+    fn summary(&self, _: &dyn Mem) -> Vec<(&'static str, Json)> {
         vec![("ready", Json::Arr(Vec::new()))]
     }
-    fn svc_at(&self, read: &dyn Fn(u16) -> u8, pc: u16) -> Option<Svc> {
+    fn svc_at(&self, read: &dyn Fn(u32) -> u8, pc: u32) -> Option<Svc> {
         (read(pc) == 0x3f).then(|| {
             let code = read(pc.wrapping_add(1));
             Svc {
@@ -88,33 +88,33 @@ impl OsMonitor for ToyOs {
     fn image_calls(&self) -> &'static [u8] {
         &[]
     }
-    fn current(&self, m: &Machine) -> u16 {
-        m.peek16(0x10)
+    fn current(&self, m: &dyn Mem) -> u32 {
+        u32::from(m.peek16(0x10))
     }
     fn current_slot(&self) -> Option<usize> {
         Some(0x10)
     }
-    fn pid_of(&self, _: &Machine, key: u16) -> u8 {
+    fn pid_of(&self, _: &dyn Mem, key: u32) -> u8 {
         key as u8
     }
-    fn in_system(&self, _: &Machine, _: u16) -> bool {
+    fn in_system(&self, _: &dyn Mem, _: u32) -> bool {
         false
     }
-    fn describe_entry(&self, _: &Machine, _: &PathNames, _: u8, code: u8, r: &Regs) -> String {
+    fn describe_entry(&self, _: &dyn Mem, _: &PathNames, _: u8, code: u8, r: &CpuRegs) -> String {
         if code == 1 {
-            format!("文字 '{}'", char::from(r.a))
+            format!("文字 '{}'", char::from(r.m6809().a))
         } else {
             String::new()
         }
     }
-    fn describe_exit(&self, _: &Machine, _: &Call, _: &Regs) -> String {
+    fn describe_exit(&self, _: &dyn Mem, _: &Call, _: &CpuRegs) -> String {
         "OK".into()
     }
-    fn error_of(&self, _: &Regs) -> Option<u8> {
+    fn error_of(&self, _: &CpuRegs) -> Option<u8> {
         None
     }
-    fn learn(&self, _: &Call, _: &Regs, _: u8, _: &mut PathNames) {}
-    fn processes(&self, m: &Machine) -> Vec<Process> {
+    fn learn(&self, _: &Call, _: &CpuRegs, _: u8, _: &mut PathNames) {}
+    fn processes(&self, m: &dyn Mem) -> Vec<Process> {
         vec![Process {
             id: 1,
             parent: 0,
@@ -124,20 +124,20 @@ impl OsMonitor for ToyOs {
             fields: vec![("prio", 5.into())],
         }]
     }
-    fn images(&self, _: &Machine) -> Vec<Image> {
+    fn images(&self, _: &dyn Mem) -> Vec<Image> {
         vec![Image {
             name: "toy".into(),
             fields: vec![("addr", 0x1000.into())],
             chunks: vec![(0x1000, 0x100, 0)],
         }]
     }
-    fn memory_map(&self, _: &Machine) -> Json {
+    fn memory_map(&self, _: &dyn Mem) -> Json {
         obj([
             ("unit", 256.into()),
             ("map", Json::Arr(vec![1.into(), 0.into()])),
         ])
     }
-    fn read_space(&self, m: &Machine, space: &str, addr: u16) -> Option<u8> {
+    fn read_space(&self, m: &dyn Mem, space: &str, addr: u32) -> Option<u8> {
         (space == "sys").then(|| m.peek(addr))
     }
 }
@@ -199,7 +199,7 @@ fn api_through_the_os_layer() {
     );
     d.command("POST", "/api/run", b"");
     d.run_steps(1000);
-    assert_eq!(d.cpu.pc, 0x1002);
+    assert_eq!(d.t.cpu.pc, 0x1002);
     let state = get(&mut d, "/api/state");
     assert_eq!(
         state.get("stop").str(),

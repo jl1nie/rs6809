@@ -28,7 +28,7 @@ sh examples/nitros9-ice.sh 127.0.0.1:8080  # 待ち受けアドレスを変更
                                         │ mpsc（Inbox：HTTP要求・DAPメッセージ）
                                         ▼
                          エミュレータスレッド (ice/mod.rs: Ice)
-                          ├ Cpu / Machine（所有）
+                          ├ target.rs   CPUと機械（Target：6809のMc6809、68000のMc68000）を所有
                           ├ 実行制御・ブレーク判定・命令トレース
                           ├ disasm.rs   6809逆アセンブラ（OS9 F$xxx表記）
                           ├ osmon.rs    OSの差し替え口（OsMonitor）とシステムコールの記録
@@ -209,6 +209,30 @@ ln -s "$PWD/editors/vscode" ~/.vscode/extensions/rs6809.rs6809-debug-0.1.0   # V
 | `source`/`loadedSources` | ホストにないソースはリスト内の本文を返します |
 | `output` イベント | ゲストのコンソール出力（ACIA 1）をデバッグコンソールに出します |
 
+## CPUの差し替え口
+
+ICEは `target.rs` の `Target` トレイトを型引数に取ります（`Ice<T: Target = Mc6809>`）。静的ディスパッチなので、
+命令ごとの処理はCPUを直接呼ぶのと同じ速さです（6809で差し替えの前後とも約140〜148MHz）。
+番地・シンボル・OSの層は32ビットの番地で扱い、CPUの番地の幅（`addr_bits`）で切り詰めます。
+
+| 項目 | 6809（`Mc6809`） | 68000（`Mc68000`） |
+|---|---|---|
+| 機械 | Multicompまたは素の64 KiB（`Machine`） | RAM＋コンソールの素の機械（`m68k::machine::Sim68k`、[68000 CPUコア](m68k.md)） |
+| 番地の幅・戻り番地 | 16ビット・2バイト | 24ビット・4バイト |
+| 呼び出し命令の長さ（戻り番地の判定） | 2・3・4バイト（`JSR`/`BSR`/`LBSR`） | 2・4・6バイト（`BSR`/`JSR`。`TRAP` は除く） |
+| 戻る命令 | `RTS`・`PULS PC`・`RTI` | `RTS`・`RTR`・`RTE` |
+| 文脈（行ステップの同一性） | MMUのタスク | スーパーバイザ状態 |
+| OS | NitrOS-9（`Ice::new`） | なし（`Ice::m68000`、`osmon::NoOs`） |
+
+`/api/state` の `cpu`（`"6809"`・`"68000"`）で、画面はレジスタ欄・番地の桁数・トレースの列を切り替え、MMU欄とOSタブは使わないときに隠します。
+68000のレジスタは `d0`〜`d7`・`a0`〜`a7`・`sr`・`pc`・`usp`・`ssp` です。`/api/reg` は `D0`〜`D7`・`A0`〜`A7`・`SP`・`PC`・`SR`・`CCR`・`USP`・`SSP` を受け付けます。
+DAPのレジスタ表示は `Target::reg_list` の名前・値・ビット幅から作ります（番地レジスタにはシンボルを付けます）。
+
+```sh
+rs6809 --cpu 68000 --bin prog.s68 --ice --ice-halt   # S-recordまたはraw（--load・--pc）
+rs6809 --cpu 68000 --bin prog.s68 --dap             # VS Codeなどから
+```
+
 ## OSの差し替え口
 
 ICEの画面・HTTP API・DAPは、OS固有の処理を `osmon.rs` の `OsMonitor` トレイト経由でだけ使います。
@@ -354,6 +378,7 @@ python3 scripts/c-debug-build.py examples/cvars.c --level2 --out artifacts/cdebu
 cargo test --release --test dap               # DAP（TCP）の一連の操作
 cargo test --release --test os_layer          # 作り物のOS（ToyOS）でAPIとDAP
 cargo test --release --test os_snapshot -- --ignored --nocapture   # OSの表示のスナップショットと速度
+cargo test --release --test m68k_ice          # 68000でHTTP APIとDAP
 ```
 
 - 逆アセンブラ、ステップオーバー／アウト、ブレークポイント、ウォッチポイント、メモリ・レジスタ操作。
@@ -377,6 +402,11 @@ cargo test --release --test os_snapshot -- --ignored --nocapture   # OSの表示
   OSのアドレス空間、イメージへのシンボルの配置、DAPのスレッド名・OSスコープ・例外ブレークが動くことを確認します。
 - OSの層を作る前後で、Level 1・Level 2の決まった停止点（`F$Fork` の復帰）の `procs`・`modules`・`memmap`・`calls`・
   `services`・状態の要約・逆アセンブルのJSONが同じ中身であることを `tests/os_snapshot.rs` で確かめました。
+- CPUの差し替え（段階2b）の前後で、上の `tests/os_snapshot.rs` のJSONが同じ中身で、速度が落ちていないことを確かめました。
+- 68000（`tests/m68k_ice.rs`）：手で組んだ小さなプログラムで、ステップ・ステップオーバー／アウト（4バイトの戻り番地）、
+  ブレークポイント、ウォッチポイント、レジスタの変更（SRでのスタックポインタの切り替え）、逆アセンブル、64 KiBより上のメモリ、
+  トレース、コンソール出力を確認。DAPでは命令ブレークポイント、スタックフレーム、レジスタ・スタックの表示と変更、逆アセンブル、評価、
+  ステップアウト、メモリ読み出し、出力イベントを確認します。
 - DAP：LWASMで組んだ小さなプログラムにTCPで接続し、初期化、アタッチ、ソース行（空行は次の行へ移動）と関数のブレークポイント、
   停止イベント、スタックフレームと戻り番地の行、レジスタの表示と変更、ステップ、ステップアウト、評価、逆アセンブル、メモリ読み出しを確認します。
 

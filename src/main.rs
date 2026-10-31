@@ -38,8 +38,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut persist_disk = false;
     let mut volatile_disk = false;
     let mut bin = None;
-    let mut addr = 0x1000;
-    let mut pc = None;
+    let mut addr: u64 = 0x1000;
+    let mut pc: Option<u64> = None;
+    let mut cpu_kind = String::from("6809");
     let mut max = 0;
     let mut script = None;
     let mut until = None;
@@ -75,8 +76,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 )?)?)
             }
             "--bin" => bin = Some(args.next().ok_or("missing binary path")?),
-            "--load" => addr = u16::try_from(number(&args.next().ok_or("missing load address")?)?)?,
-            "--pc" => pc = Some(u16::try_from(number(&args.next().ok_or("missing PC")?)?)?),
+            "--load" => addr = number(&args.next().ok_or("missing load address")?)?,
+            "--pc" => pc = Some(number(&args.next().ok_or("missing PC")?)?),
+            "--cpu" => cpu_kind = args.next().ok_or("missing CPU")?,
             "--max-cycles" => max = number(&args.next().ok_or("missing cycle limit")?)?,
             "--script" => script = Some(args.next().ok_or("missing script path")?),
             "--until" => until = Some(args.next().ok_or("missing output marker")?),
@@ -105,13 +107,38 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
             "--help" | "-h" => {
                 println!(
-                    "rs6809 [--bin FILE --load 0x1000 --pc 0x1000]\n       [--rom FILE --disk FILE --boot] [--ram-kb N] [--script FILE]\n       [--acia-count N] [--telnet [127.0.0.1:0]] [--persist-disk|--volatile-disk]\n       [--until TEXT] [--max-cycles N] [--stats] [--measure-from TEXT]\n       [--ice [127.0.0.1:6809]] [--ice-halt] [--dap [127.0.0.1:6810]]\n       [--symbols FILE|DIR[@MODULE]]... [--source-dir DIR]...\n\nDefault: 64 KiB RAM, ACIA $8018/$8019, timer $8010.\nROM+disk: 512 KiB RAM (select 64/128/256/512/1024 with --ram-kb).\nMulticomp console $FFD0/$FFD1, SD $FFD8-$FFDC, timer $FFDD.\n--acia-count selects 1..4 Multicomp ACIAs (default 1, or 4 with --telnet).\n--telnet binds localhost on a free TCP port by default; OS-9 opens the available ACIAs.\nOne client per active ACIA; host stdin is disabled. Use the multi-user Level 2 disk.\n--boot types NITROS9 at the CamelForth prompt.\nScripts: lines PROMPT<TAB>RESPONSE, matched sequentially; response ends with CR.\nTelnet disk writes persist by default; --persist-disk also enables this without Telnet.\n--volatile-disk keeps writes in RAM. Cycle limit without --until exits successfully.\n--stats reports guest cycles and host elapsed seconds to stderr.\n--measure-from starts an output-marker interval, ending at --until.\n--ice serves the debugger UI (registers, disassembly, breakpoints, OS-9 views)\n  over HTTP; open the printed URL. ACIA 1 becomes the browser console.\n--ice-halt starts the CPU stopped at the reset vector.\n--dap also serves the Debug Adapter Protocol (VS Code etc.); implies --ice.\n--symbols loads LWASM/RMA listings and LWLINK/c.link maps (repeatable).\n--source-dir adds a directory searched for source files."
+                    "rs6809 [--cpu 6809|68000] [--bin FILE --load 0x1000 --pc 0x1000]\n       [--rom FILE --disk FILE --boot] [--ram-kb N] [--script FILE]\n       [--acia-count N] [--telnet [127.0.0.1:0]] [--persist-disk|--volatile-disk]\n       [--until TEXT] [--max-cycles N] [--stats] [--measure-from TEXT]\n       [--ice [127.0.0.1:6809]] [--ice-halt] [--dap [127.0.0.1:6810]]\n       [--symbols FILE|DIR[@MODULE]]... [--source-dir DIR]...\n\nDefault: 64 KiB RAM, ACIA $8018/$8019, timer $8010.\nROM+disk: 512 KiB RAM (select 64/128/256/512/1024 with --ram-kb).\nMulticomp console $FFD0/$FFD1, SD $FFD8-$FFDC, timer $FFDD.\n--acia-count selects 1..4 Multicomp ACIAs (default 1, or 4 with --telnet).\n--telnet binds localhost on a free TCP port by default; OS-9 opens the available ACIAs.\nOne client per active ACIA; host stdin is disabled. Use the multi-user Level 2 disk.\n--boot types NITROS9 at the CamelForth prompt.\nScripts: lines PROMPT<TAB>RESPONSE, matched sequentially; response ends with CR.\nTelnet disk writes persist by default; --persist-disk also enables this without Telnet.\n--volatile-disk keeps writes in RAM. Cycle limit without --until exits successfully.\n--stats reports guest cycles and host elapsed seconds to stderr.\n--measure-from starts an output-marker interval, ending at --until.\n--ice serves the debugger UI (registers, disassembly, breakpoints, OS-9 views)\n  over HTTP; open the printed URL. ACIA 1 becomes the browser console.\n--ice-halt starts the CPU stopped at the reset vector.\n--dap also serves the Debug Adapter Protocol (VS Code etc.); implies --ice.\n--symbols loads LWASM/RMA listings and LWLINK/c.link maps (repeatable).\n--source-dir adds a directory searched for source files.\n\n--cpu 68000: a plain 68000 machine (docs/m68k.md): RAM from $000000 (1 MiB,\n  --ram-kb up to 16320), console status $FF0000 (bit 0 input ready), data $FF0001.\n  --bin loads a raw binary at --load, or Motorola S-records (S0..S9 text).\n  Without --pc the start is the S-record entry, else the load address\n  (a raw image loaded at 0 keeps its own reset vectors). SSP = top of RAM.\n  Works with --ice, --ice-halt, --dap, --symbols, --until, --max-cycles, --stats."
                 );
                 return Ok(());
             }
             _ => return Err(format!("unknown argument: {a}").into()),
         }
     }
+    match cpu_kind.as_str() {
+        "6809" => {}
+        "68000" | "68k" => {
+            if rom.is_some() || disk.is_some() || telnet.is_some() || boot || script.is_some() || measure_from.is_some() {
+                return Err("--cpu 68000 takes --bin, --load, --pc, --ram-kb, --ice, --dap, --symbols, --until, --max-cycles, --stats".into());
+            }
+            return run68k(M68kArgs {
+                bin,
+                addr,
+                pc,
+                ram_kb,
+                max,
+                until,
+                stats,
+                ice_addr,
+                ice_halt,
+                dap_addr,
+                symbol_specs,
+                source_dirs,
+            });
+        }
+        other => return Err(format!("unknown CPU: {other} (6809 or 68000)").into()),
+    }
+    let addr = u16::try_from(addr)?;
+    let pc = pc.map(u16::try_from).transpose()?;
     if measure_from.as_ref().is_some_and(|s| s.is_empty())
         || (measure_from.is_some() && until.is_none())
     {
@@ -345,6 +372,135 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 }
+struct M68kArgs {
+    bin: Option<String>,
+    addr: u64,
+    pc: Option<u64>,
+    ram_kb: Option<usize>,
+    max: u64,
+    until: Option<String>,
+    stats: bool,
+    ice_addr: Option<String>,
+    ice_halt: bool,
+    dap_addr: Option<String>,
+    symbol_specs: Vec<String>,
+    source_dirs: Vec<String>,
+}
+
+/// The plain 68000 machine: a program, the console on stdin/stdout, or the ICE.
+fn run68k(a: M68kArgs) -> Result<(), Box<dyn std::error::Error>> {
+    use rs6809::m68k::machine::Sim68k;
+    let kb = a.ram_kb.unwrap_or(1024);
+    if kb == 0 || kb > 0xff_0000 / 1024 {
+        return Err("--ram-kb for the 68000 is 1..16320".into());
+    }
+    let mut m = Sim68k::with_ram(kb * 1024);
+    let addr = u32::try_from(a.addr)?;
+    let mut start = a.pc.map(u32::try_from).transpose()?;
+    if let Some(path) = &a.bin {
+        let data = fs::read(path)?;
+        if data.first() == Some(&b'S') && data.get(1).is_some_and(|c| c.is_ascii_digit()) {
+            let entry = m.load_srec(std::str::from_utf8(&data).map_err(|_| "S-record is not text")?)?;
+            start = start.or(entry);
+        } else {
+            m.load(addr, &data)?;
+            if addr != 0 {
+                start = start.or(Some(addr));
+            }
+        }
+    }
+    if let Some(pc) = start {
+        m.set_vectors(m.ram.len() as u32 & !1, pc);
+    }
+    let mut t = ice::Mc68000::new(m);
+    let mut ice_addr = a.ice_addr;
+    if ice_addr.is_none() && (a.dap_addr.is_some() || !a.symbol_specs.is_empty()) {
+        ice_addr = Some("127.0.0.1:6809".to_string());
+    }
+    if let Some(address) = ice_addr {
+        if a.until.is_some() || a.max != 0 {
+            return Err("--ice cannot be combined with --until or --max-cycles".into());
+        }
+        let listener = std::net::TcpListener::bind(&address)?;
+        let mut debugger = ice::Ice::m68000(
+            t,
+            ice::Options {
+                actions: Default::default(),
+                echo_console: true,
+            },
+        );
+        for dir in a.source_dirs {
+            debugger.symbols.add_source_dir(dir.into());
+        }
+        for spec in &a.symbol_specs {
+            debugger.load_symbols(spec).map_err(|e| format!("--symbols: {e}"))?;
+        }
+        eprintln!("rs6809: 68000 ICE UI at http://{}/", listener.local_addr()?);
+        let dap = match a.dap_addr {
+            Some(d) => {
+                let l = std::net::TcpListener::bind(&d)?;
+                eprintln!("rs6809: DAP listening on {}", l.local_addr()?);
+                Some(l)
+            }
+            None => None,
+        };
+        return Ok(debugger.serve(listener, dap, !a.ice_halt)?);
+    }
+    let (tx, rx) = mpsc::sync_channel(1024);
+    thread::spawn(move || {
+        for byte in io::stdin().lock().bytes() {
+            match byte {
+                Ok(b) if tx.send(b).is_ok() => {}
+                _ => break,
+            }
+        }
+    });
+    let mut out = io::stdout().lock();
+    let mut seen = String::new();
+    let started = Instant::now();
+    let mut blocks = 0u32;
+    loop {
+        t.cpu.step(&mut t.machine);
+        if t.cpu.halted {
+            return Err(format!("double fault: CPU halted at ${:06X}", t.cpu.pc).into());
+        }
+        if !t.machine.tx.is_empty() {
+            let bytes = std::mem::take(&mut t.machine.tx);
+            out.write_all(&bytes)?;
+            out.flush()?;
+            if let Some(marker) = &a.until {
+                seen.extend(bytes.iter().map(|&b| char::from(b)));
+                if seen.contains(marker.as_str()) {
+                    if a.stats {
+                        report(t.cpu.cycles, started, None);
+                    }
+                    return Ok(());
+                }
+                if seen.len() > 65536 {
+                    let cut = seen.char_indices().nth(32768).map_or(0, |(i, _)| i);
+                    seen.drain(..cut);
+                }
+            }
+        }
+        blocks += 1;
+        if blocks == 1024 {
+            blocks = 0;
+            while let Ok(b) = rx.try_recv() {
+                t.machine.rx.push_back(if b == 10 { 13 } else { b });
+            }
+        }
+        if a.max != 0 && t.cpu.cycles >= a.max {
+            if a.stats {
+                report(t.cpu.cycles, started, None);
+            }
+            if a.until.is_some() {
+                return Err("cycle limit reached before output marker".into());
+            }
+            return Ok(());
+        }
+    }
+}
+
 fn main() {
     if let Err(e) = run() {
         eprintln!("rs6809: {e}");

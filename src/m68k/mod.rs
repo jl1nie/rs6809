@@ -5,6 +5,7 @@
 //! long accesses at odd addresses raise an address error, as on the chip.
 //! Prefetch is not modelled: the PC points at the next unread word.
 pub mod disasm;
+pub mod machine;
 mod exec;
 
 /// The 68000's memory and I/O.

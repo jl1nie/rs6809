@@ -191,7 +191,7 @@ canvas { width: 100%; display: block; }
           <div class="flags" id="flags"></div>
         </div>
       </div>
-      <div class="panel">
+      <div class="panel" id="mmuPanel">
         <h2>MMU（8KBバンク）<span class="grow"></span><span class="kbd" id="mmuInfo"></span></h2>
         <div class="body"><div class="mmu" id="mmu"></div></div>
       </div>
@@ -259,7 +259,7 @@ canvas { width: 100%; display: block; }
       </div>
       <div class="panel">
         <h2>実行トレース（直近）<span class="grow"></span><select id="traceN"><option>32</option><option selected>64</option><option>256</option></select></h2>
-        <div class="scroll" style="max-height: 360px"><table class="dis"><thead><tr><th>サイクル</th><th>P</th><th>PC</th><th>命令</th><th>A B X Y U S</th></tr></thead><tbody id="trace"></tbody></table></div>
+        <div class="scroll" style="max-height: 360px"><table class="dis"><thead><tr><th>サイクル</th><th>P</th><th>PC</th><th>命令</th><th id="traceRegs">A B X Y U S</th></tr></thead><tbody id="trace"></tbody></table></div>
       </div>
     </div>
   </section>
@@ -336,6 +336,10 @@ canvas { width: 100%; display: block; }
 "use strict";
 const $ = (id) => document.getElementById(id);
 const hex = (v, n) => v.toString(16).toUpperCase().padStart(n, "0");
+// The CPU under the ICE ("6809" or "68000"): address digits and mask.
+const is68k = () => st?.cpu === "68000";
+const AW = () => is68k() ? 6 : 4;
+const AMASK = () => is68k() ? 0xffffff : 0xffff;
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 async function api(path, body) {
   const r = await fetch("/api/" + path, body === undefined ? {} : { method: "POST", body });
@@ -388,19 +392,32 @@ async function act(cmd) {
 function renderRegs() {
   const r = st.regs, p = prevRegs || r;
   const cell = (k, v, w, old) => `<span class="k">${k}</span><span class="v ${v !== old ? "chg" : ""}" data-r="${k.toLowerCase()}">${hex(v, w)}</span>`;
-  $("regs").innerHTML =
-    cell("A", r.a, 2, p.a) + cell("B", r.b, 2, p.b) +
-    cell("D", r.a * 256 + r.b, 4, p.a * 256 + p.b) + cell("DP", r.dp, 2, p.dp) +
-    cell("X", r.x, 4, p.x) + cell("Y", r.y, 4, p.y) +
-    cell("U", r.u, 4, p.u) + cell("S", r.s, 4, p.s) +
-    cell("PC", r.pc, 4, p.pc) + cell("CC", r.cc, 2, p.cc);
-  $("flags").innerHTML = "EFHINZVC".split("").map((f, i) => `<span class="${r.cc & (0x80 >> i) ? "on" : ""}" title="${["全レジスタ退避","FIRQマスク","ハーフキャリー","IRQマスク","負","ゼロ","オーバーフロー","キャリー（OS-9ではエラー）"][i]}">${f}</span>`).join("");
-  $("waitState").textContent = ["", "SYNC待ち", "CWAI待ち"][st.wait] || "";
+  if (is68k()) {
+    // D0–D7 beside A0–A7, then PC, SR and the two stack pointers.
+    let h = "";
+    for (let i = 0; i < 8; i++) h += cell("D" + i, r["d" + i], 8, p["d" + i]) + cell("A" + i, r["a" + i], 8, p["a" + i]);
+    $("regs").innerHTML = h + cell("PC", r.pc, 6, p.pc) + cell("SR", r.sr, 4, p.sr) + cell("USP", r.usp, 8, p.usp) + cell("SSP", r.ssp, 8, p.ssp);
+    const bits = [[15, "T", "トレース"], [13, "S", "スーパーバイザ"], [4, "X", "拡張"], [3, "N", "負"], [2, "Z", "ゼロ"], [1, "V", "オーバーフロー"], [0, "C", "キャリー"]];
+    $("flags").innerHTML = bits.map(([b, f, t]) => `<span class="${r.sr & (1 << b) ? "on" : ""}" title="${t}">${f}</span>`).join("") +
+      `<span class="on" title="割り込みマスク">I${(r.sr >> 8) & 7}</span>`;
+    $("waitState").textContent = st.wait ? "STOP中" : "";
+  } else {
+    $("regs").innerHTML =
+      cell("A", r.a, 2, p.a) + cell("B", r.b, 2, p.b) +
+      cell("D", r.a * 256 + r.b, 4, p.a * 256 + p.b) + cell("DP", r.dp, 2, p.dp) +
+      cell("X", r.x, 4, p.x) + cell("Y", r.y, 4, p.y) +
+      cell("U", r.u, 4, p.u) + cell("S", r.s, 4, p.s) +
+      cell("PC", r.pc, 4, p.pc) + cell("CC", r.cc, 2, p.cc);
+    $("flags").innerHTML = "EFHINZVC".split("").map((f, i) => `<span class="${r.cc & (0x80 >> i) ? "on" : ""}" title="${["全レジスタ退避","FIRQマスク","ハーフキャリー","IRQマスク","負","ゼロ","オーバーフロー","キャリー（OS-9ではエラー）"][i]}">${f}</span>`).join("");
+    $("waitState").textContent = ["", "SYNC待ち", "CWAI待ち"][st.wait] || "";
+  }
   document.querySelectorAll("#regs .v").forEach((el) => el.onclick = async () => {
     if (st.running) return;
     const v = prompt(el.dataset.r.toUpperCase() + " の新しい値（16進）", el.textContent);
     if (v !== null) { await api(`reg?name=${el.dataset.r}&val=${encodeURIComponent(v)}`, ""); await poll(true); }
   });
+  $("mmuPanel").style.display = st.mmu ? "" : "none";
+  if (!st.mmu) return;
   const m = st.mmu;
   $("mmuInfo").textContent = m.enabled ? `有効・タスク${m.task}${m.frt ? "・FRT" : ""}${m.romdis ? "" : "・ROM"}` : "無効";
   let h = '<div class="hd"></div>' + [0, 1, 2, 3, 4, 5, 6, 7].map((i) => `<div class="hd">${hex(i * 0x20, 2)}</div>`).join("");
@@ -416,20 +433,20 @@ function renderRegs() {
 
 // ---------- breakpoints ----------
 function renderBps() {
-  const plain = st.breakpoints.map((a) => `<div class="item">● $${hex(a, 4)}<button data-a="${a}">×</button></div>`);
+  const plain = st.breakpoints.map((a) => `<div class="item">● $${hex(a, AW())}<button data-a="${a}">×</button></div>`);
   // Symbolic breakpoints follow their module; unresolved ones wait for it to load.
   const sym = (st.symBreakpoints || []).map((b) => `<div class="item ${b.resolved ? "" : "mute"}" title="${b.owner ? "エディタ(DAP)から設定" : ""}">${b.resolved ? "●" : "○"} ${esc(b.text)}` +
-    `<span class="mute mono">${b.addrs.map((a) => " $" + hex(a, 4)).join("") || (b.resolved ? " 別空間" : " 未ロード")}</span>${b.owner ? "" : `<button data-s="${b.id}">×</button>`}</div>`);
+    `<span class="mute mono">${b.addrs.map((a) => " $" + hex(a, AW())).join("") || (b.resolved ? " 別空間" : " 未ロード")}</span>${b.owner ? "" : `<button data-s="${b.id}">×</button>`}</div>`);
   $("bpList").innerHTML = plain.length + sym.length ? plain.concat(sym).join("") : '<span class="mute">なし</span>';
-  $("bpList").querySelectorAll("button[data-a]").forEach((b) => b.onclick = async () => { await api(`bp?op=del&addr=${hex(+b.dataset.a, 4)}`, ""); poll(true); });
+  $("bpList").querySelectorAll("button[data-a]").forEach((b) => b.onclick = async () => { await api(`bp?op=del&addr=${hex(+b.dataset.a, AW())}`, ""); poll(true); });
   $("bpList").querySelectorAll("button[data-s]").forEach((b) => b.onclick = async () => { await api(`bp?symdel=${b.dataset.s}`, ""); poll(true); });
-  $("wList").innerHTML = st.watches.length ? st.watches.map((w, i) => `<div class="item">${{ r: "読", w: "書", rw: "読書" }[w.kind]} $${hex(w.start, 4)}${w.end > w.start ? "–$" + hex(w.end, 4) : ""}<button data-i="${i}">×</button></div>`).join("") : '<span class="mute">なし</span>';
+  $("wList").innerHTML = st.watches.length ? st.watches.map((w, i) => `<div class="item">${{ r: "読", w: "書", rw: "読書" }[w.kind]} $${hex(w.start, AW())}${w.end > w.start ? "–$" + hex(w.end, AW()) : ""}<button data-i="${i}">×</button></div>`).join("") : '<span class="mute">なし</span>';
   $("wList").querySelectorAll("button").forEach((b) => b.onclick = async () => { await api(`watch?op=del&index=${b.dataset.i}`, ""); poll(true); });
 }
 $("bpAdd").onclick = async () => {
   const v = $("bpAddr").value.trim();
   // Hex addresses stay plain breakpoints; names and FILE:LINE follow the symbols.
-  const q = /^(\$|0x)?[0-9a-f]{1,4}$/i.test(v) ? `bp?addr=${encodeURIComponent(v)}` : `bp?sym=${encodeURIComponent(v)}`;
+  const q = /^(\$|0x)?[0-9a-f]{1,6}$/i.test(v) ? `bp?addr=${encodeURIComponent(v)}` : `bp?sym=${encodeURIComponent(v)}`;
   await api(q, ""); $("bpAddr").value = ""; poll(true);
 };
 $("bpAddr").onkeydown = (e) => { if (e.key === "Enter") $("bpAdd").onclick(); };
@@ -466,7 +483,7 @@ $("varFrame").onchange = () => { varFrame = +$("varFrame").value; renderVars(); 
 async function renderStack() {
   const d = await api("stack?n=32");
   $("stackWhere").textContent = d.where || "";
-  $("stack").innerHTML = d.words.map((w) => `<tr class="${w.ret ? "ret" : ""}"><td>${hex(w.addr, 4)}</td><td>${hex(w.value, 4)}</td>` +
+  $("stack").innerHTML = d.words.map((w) => `<tr class="${w.ret ? "ret" : ""}"><td>${hex(w.addr, AW())}</td><td>${hex(w.value, is68k() ? 8 : 4)}</td>` +
     `<td>${w.ret ? "↩" : ""}</td><td>${w.label ? esc(w.label) : ""}</td></tr>`).join("");
 }
 $("bpClear").onclick = async () => { await api("bp?op=clear", ""); poll(true); };
@@ -476,7 +493,7 @@ $("wAdd").onclick = async () => { await api(`watch?addr=${encodeURIComponent($("
 async function renderDis() {
   const follow = $("follow").checked;
   const addr = follow || viewAddr === null ? st.regs.pc : viewAddr;
-  const d = await api(`disasm?addr=${hex(addr, 4)}&back=${follow ? 8 : 0}&n=48`);
+  const d = await api(`disasm?addr=${hex(addr, AW())}&back=${follow ? 8 : 0}&n=48`);
   $("dis").innerHTML = d.lines.map((l) => {
     const os9 = l.svc;
     const title = os9 ? (services[l.text.split(" ")[1]]?.desc || "") + (l.note ? "\n" + l.note : "") : "";
@@ -484,12 +501,12 @@ async function renderDis() {
     const src = l.src ? `<tr class="src"><td></td><td colspan="4">${esc(l.src.file.split("/").pop())}:${l.src.line}  ${esc(l.src.text.trim())}</td></tr>` : "";
     const lbl = l.label ? `<tr class="lbl"><td></td><td colspan="4">${esc(l.label)}:</td></tr>` : "";
     return lbl + src + `<tr class="${l.addr === st.regs.pc ? "pc" : ""} ${l.bp ? "bp" : ""} ${os9 ? "os9" : ""}" data-a="${l.addr}" title="${esc(title)}">` +
-      `<td class="g"></td><td>${hex(l.addr, 4)}</td><td class="b">${l.bytes}</td><td class="t">${esc(l.text)}${l.tsym ? ` <span class="sym">&lt;${esc(l.tsym)}&gt;</span>` : ""}</td>` +
-      `<td class="mute">${l.phys >= 0 ? "物理 " + hex(l.phys, 5) : "ROM/IO"}</td></tr>`;
+      `<td class="g"></td><td>${hex(l.addr, AW())}</td><td class="b">${l.bytes}</td><td class="t">${esc(l.text)}${l.tsym ? ` <span class="sym">&lt;${esc(l.tsym)}&gt;</span>` : ""}</td>` +
+      `<td class="mute">${l.phys >= 0 ? (is68k() ? "RAM" : "物理 " + hex(l.phys, 5)) : (is68k() ? "I/O" : "ROM/IO")}</td></tr>`;
   }).join("");
   $("dis").querySelectorAll("tr[data-a]").forEach((tr) => {
-    tr.querySelector(".g").onclick = async () => { await api(`bp?op=toggle&addr=${hex(+tr.dataset.a, 4)}`, ""); poll(true); };
-    tr.ondblclick = () => act(`runto?addr=${hex(+tr.dataset.a, 4)}`);
+    tr.querySelector(".g").onclick = async () => { await api(`bp?op=toggle&addr=${hex(+tr.dataset.a, AW())}`, ""); poll(true); };
+    tr.ondblclick = () => act(`runto?addr=${hex(+tr.dataset.a, AW())}`);
   });
 }
 $("disGo").onclick = async () => {
@@ -504,28 +521,28 @@ $("disAddr").onkeydown = (e) => { if (e.key === "Enter") $("disGo").onclick(); }
 async function renderMem() {
   const addr = parseInt($("memAddr").value, 16) || 0;
   const space = $("memSpace").value;
-  const d = await api(`mem?addr=${hex(addr, 4)}&len=256&space=${space}`);
+  const d = await api(`mem?addr=${hex(addr, AW())}&len=256&space=${space}`);
   const key = space + addr;
   const prev = memPrev[key];
   let out = "";
   for (let row = 0; row < 16; row++) {
-    const a = (addr + row * 16) & 0xffff;
+    const a = (addr + row * 16) & AMASK();
     let h = "", s = "";
     for (let i = 0; i < 16; i++) {
       const off = (row * 16 + i) * 2;
       const b = parseInt(d.hex.substr(off, 2), 16);
       const chg = prev && prev.substr(off, 2) !== d.hex.substr(off, 2);
-      h += `<span class="byte ${chg ? "chg" : ""}" data-a="${(a + i) & 0xffff}">${d.hex.substr(off, 2)}</span>${i === 7 ? "  " : " "}`;
+      h += `<span class="byte ${chg ? "chg" : ""}" data-a="${(a + i) & AMASK()}">${d.hex.substr(off, 2)}</span>${i === 7 ? "  " : " "}`;
       const c = b & 0x7f;
       s += c >= 32 && c < 127 ? esc(String.fromCharCode(c)) : ".";
     }
-    out += `<span class="a">${hex(a, 4)}</span>  ${h} ${s}\n`;
+    out += `<span class="a">${hex(a, AW())}</span>  ${h} ${s}\n`;
   }
   memPrev[key] = d.hex;
   $("mem").innerHTML = out;
   if (space === "cpu") $("mem").querySelectorAll(".byte").forEach((el) => el.ondblclick = async () => {
-    const v = prompt(`$${hex(+el.dataset.a, 4)} に書き込む値（16進、複数バイト可）`, el.textContent);
-    if (v !== null) { await api(`mem?addr=${hex(+el.dataset.a, 4)}&val=${v.replace(/\s/g, "")}`, ""); renderMem(); }
+    const v = prompt(`$${hex(+el.dataset.a, AW())} に書き込む値（16進、複数バイト可）`, el.textContent);
+    if (v !== null) { await api(`mem?addr=${hex(+el.dataset.a, AW())}&val=${v.replace(/\s/g, "")}`, ""); renderMem(); }
   });
 }
 $("memGo").onclick = renderMem;
@@ -534,10 +551,14 @@ $("memAddr").onkeydown = (e) => { if (e.key === "Enter") renderMem(); };
 
 async function renderTrace() {
   const d = await api(`trace?n=${$("traceN").value}`);
+  $("traceRegs").textContent = is68k() ? "D0 D1 A0 A7" : "A B X Y U S";
   $("trace").innerHTML = d.trace.slice().reverse().map((t) => {
     const r = t.regs;
-    return `<tr><td class="mute">${t.cycle}</td><td>${t.pid ? pidChip(t.pid) : ""}</td><td>${hex(r.pc, 4)}</td><td>${esc(t.text)}</td>` +
-      `<td class="mute">${hex(r.a, 2)} ${hex(r.b, 2)} ${hex(r.x, 4)} ${hex(r.y, 4)} ${hex(r.u, 4)} ${hex(r.s, 4)}</td></tr>`;
+    const regs = is68k()
+      ? `${hex(r.d0, 8)} ${hex(r.d1, 8)} ${hex(r.a0, 8)} ${hex(r.a7, 8)}`
+      : `${hex(r.a, 2)} ${hex(r.b, 2)} ${hex(r.x, 4)} ${hex(r.y, 4)} ${hex(r.u, 4)} ${hex(r.s, 4)}`;
+    return `<tr><td class="mute">${t.cycle}</td><td>${t.pid ? pidChip(t.pid) : ""}</td><td>${hex(r.pc, AW())}</td><td>${esc(t.text)}</td>` +
+      `<td class="mute">${regs}</td></tr>`;
   }).join("");
 }
 $("traceN").onchange = renderTrace;
@@ -587,6 +608,8 @@ let osInfo = null;
 async function loadOsInfo() {
   osInfo = await api("os/info");
   $("osTab").textContent = `${osInfo.name} モニタ`;
+  // A bare program (no OS) has no OS monitor tab.
+  $("osTab").style.display = osInfo.os === "none" ? "none" : "";
   $("osBreakTitle").textContent = `${osInfo.name} ブレーク条件`;
   const sys = (osInfo.spaces || []).find((x) => x.key === "sys");
   $("sysSpace").textContent = sys ? sys.label : "OSのシステム空間";

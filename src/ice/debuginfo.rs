@@ -44,12 +44,12 @@ pub struct StructDef {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Loc {
     /// Relative to the frame base (CFA) of the function.
-    Frame(i16),
+    Frame(i32),
     /// Kept in a register (the value, not an address).
     Reg(&'static str),
     /// Relative to the data base register of the program.
-    Data(u16),
-    Abs(u16),
+    Data(u32),
+    Abs(u32),
     /// Placement not known; the reason is shown.
     Unknown(&'static str),
 }
@@ -76,22 +76,22 @@ pub struct Var {
 pub struct Function {
     pub name: String,
     /// Code range in table offsets.
-    pub start: u16,
-    pub end: u16,
+    pub start: u32,
+    pub end: u32,
     /// Source file name as recorded in the line table.
     pub file: String,
     pub vars: Vec<Var>,
     /// (offset, depth): before the instruction at `offset`, the frame base
     /// is S + depth. Sorted by offset.
-    pub cfa: Vec<(u16, i16)>,
+    pub cfa: Vec<(u32, i32)>,
     /// Frame-base offset of the return address.
-    pub ret_at: Option<i16>,
+    pub ret_at: Option<i32>,
     /// Registers of the caller saved in this frame: (name, frame offset).
-    pub saved: Vec<(&'static str, i16)>,
+    pub saved: Vec<(&'static str, i32)>,
 }
 
 impl Function {
-    pub fn depth_at(&self, off: u16) -> Option<i16> {
+    pub fn depth_at(&self, off: u32) -> Option<i32> {
         let i = self.cfa.partition_point(|c| c.0 <= off);
         i.checked_sub(1).map(|i| self.cfa[i].1)
     }
@@ -104,10 +104,15 @@ pub struct DebugInfo {
     pub structs: Vec<StructDef>,
     /// Register holding the base of `Loc::Data` (Microware C: Y).
     pub data_reg: &'static str,
+    /// Pointer size in bytes (0 means 2, as on the 6809).
+    pub ptr_size: u8,
 }
 
 impl DebugInfo {
-    pub fn function_at(&self, off: u16) -> Option<&Function> {
+    pub fn psize(&self) -> u8 {
+        if self.ptr_size == 0 { 2 } else { self.ptr_size }
+    }
+    pub fn function_at(&self, off: u32) -> Option<&Function> {
         self.functions
             .iter()
             .find(|f| off >= f.start && off < f.end)
@@ -117,7 +122,7 @@ impl DebugInfo {
             Type::Void | Type::Func(_) | Type::Unknown => None,
             Type::Char { .. } => Some(1),
             Type::Int { size, .. } | Type::Float(size) => Some(u16::from(*size)),
-            Type::Ptr(_) => Some(2),
+            Type::Ptr(_) => Some(u16::from(self.psize())),
             Type::Array(e, n) => Some(self.size_of(e)?.checked_mul((*n)?)?),
             Type::Struct(i) => self.structs.get(*i)?.size,
         }
@@ -165,29 +170,26 @@ fn inner_ret(t: &Type) -> &Type {
 /// Where a value can be read from at run time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Place {
-    Mem(u16),
+    Mem(u32),
     /// A register value (register variables).
-    Value(u16),
+    Value(u32),
 }
 
 /// Machine access for formatting and expressions.
 pub struct Ctx<'a> {
-    pub read: &'a dyn Fn(u16) -> u8,
+    pub read: &'a dyn Fn(u32) -> u8,
     /// Code label for an address (`name+$off`), for pointers.
-    pub label: &'a dyn Fn(u16) -> Option<String>,
+    pub label: &'a dyn Fn(u32) -> Option<String>,
     pub info: &'a DebugInfo,
 }
 
 impl Ctx<'_> {
     fn bytes(&self, p: Place, n: u16) -> Vec<u8> {
         match p {
-            Place::Mem(a) => (0..n).map(|i| (self.read)(a.wrapping_add(i))).collect(),
+            Place::Mem(a) => (0..n).map(|i| (self.read)(a.wrapping_add(u32::from(i)))).collect(),
             Place::Value(v) => {
                 let b = v.to_be_bytes();
-                match n {
-                    1 => vec![b[1]],
-                    _ => b.to_vec(),
-                }
+                b[4 - usize::from(n.min(4))..].to_vec()
             }
         }
     }
@@ -195,10 +197,14 @@ impl Ctx<'_> {
         let b = self.bytes(p, 2);
         u16::from_be_bytes([b[0], b[1]])
     }
-    fn string_at(&self, a: u16, max: u16) -> String {
+    /// A pointer of the target's size.
+    fn ptr(&self, p: Place) -> u32 {
+        self.bytes(p, u16::from(self.info.psize())).iter().fold(0, |a, &b| a << 8 | u32::from(b))
+    }
+    fn string_at(&self, a: u32, max: u16) -> String {
         let mut s = String::from("\"");
         for i in 0..max {
-            let c = (self.read)(a.wrapping_add(i));
+            let c = (self.read)(a.wrapping_add(u32::from(i)));
             match c {
                 0 => {
                     s.push('"');
@@ -260,8 +266,9 @@ impl Ctx<'_> {
                 format!("${hex}（浮動小数点は未対応）")
             }
             Type::Ptr(inner) => {
-                let a = self.word(p);
-                let mut s = format!("${a:04X}");
+                let a = self.ptr(p);
+                let w = usize::from(self.info.psize()) * 2;
+                let mut s = format!("${a:0w$X}");
                 if a == 0 {
                     s.push_str(" NULL");
                 } else if matches!(**inner, Type::Char { .. }) {
@@ -283,7 +290,7 @@ impl Ctx<'_> {
                 let size = self.info.size_of(e).unwrap_or(0).max(1);
                 let shown = n.unwrap_or(0).min(8);
                 let items: Vec<String> = (0..shown)
-                    .map(|i| self.format_depth(e, Place::Mem(a.wrapping_add(i * size)), depth + 1))
+                    .map(|i| self.format_depth(e, Place::Mem(a.wrapping_add(u32::from(i) * u32::from(size))), depth + 1))
                     .collect();
                 let more = if n.unwrap_or(0) > shown { ", …" } else { "" };
                 format!("{{{}{more}}}", items.join(", "))
@@ -302,7 +309,7 @@ impl Ctx<'_> {
                         format!(
                             "{}={}",
                             f.name,
-                            self.format_depth(&f.ty, Place::Mem(a.wrapping_add(f.off)), depth + 1)
+                            self.format_depth(&f.ty, Place::Mem(a.wrapping_add(u32::from(f.off))), depth + 1)
                         )
                     })
                     .collect();
@@ -324,7 +331,7 @@ impl Ctx<'_> {
                         (
                             format!("[{i}]"),
                             (**e).clone(),
-                            Place::Mem(a.wrapping_add(i * size)),
+                            Place::Mem(a.wrapping_add(u32::from(i) * u32::from(size))),
                         )
                     })
                     .collect()
@@ -336,14 +343,14 @@ impl Ctx<'_> {
                     (
                         f.name.clone(),
                         f.ty.clone(),
-                        Place::Mem(a.wrapping_add(f.off)),
+                        Place::Mem(a.wrapping_add(u32::from(f.off))),
                     )
                 })
                 .collect(),
             (Type::Ptr(inner), _)
                 if !matches!(**inner, Type::Void | Type::Func(_) | Type::Unknown) =>
             {
-                let a = self.word(p);
+                let a = self.ptr(p);
                 if a == 0 {
                     return Vec::new();
                 }
@@ -393,12 +400,12 @@ impl Ctx<'_> {
                 let idx: i32 = r[..close].trim().parse().ok()?;
                 let (elem, base) = match (&t, p) {
                     (Type::Array(e, _), Place::Mem(a)) => ((**e).clone(), a),
-                    (Type::Ptr(e), _) => ((**e).clone(), self.word(p)),
+                    (Type::Ptr(e), _) => ((**e).clone(), self.ptr(p)),
                     _ => return None,
                 };
                 let size = self.info.size_of(&elem)? as i32;
                 t = elem;
-                p = Place::Mem(base.wrapping_add((idx * size) as u16));
+                p = Place::Mem(base.wrapping_add((idx * size) as u32));
                 rest = &r[close + 1..];
             }
         }
@@ -406,7 +413,7 @@ impl Ctx<'_> {
     }
     fn deref(&self, t: &Type, p: Place) -> Option<(Type, Place)> {
         match t {
-            Type::Ptr(inner) => Some(((**inner).clone(), Place::Mem(self.word(p)))),
+            Type::Ptr(inner) => Some(((**inner).clone(), Place::Mem(self.ptr(p)))),
             Type::Array(e, _) => match p {
                 Place::Mem(a) => Some(((**e).clone(), Place::Mem(a))),
                 Place::Value(_) => None,
@@ -428,7 +435,7 @@ impl Ctx<'_> {
             .find(|f| f.name == rest[..end])?;
         Some((
             f.ty.clone(),
-            Place::Mem(a.wrapping_add(f.off)),
+            Place::Mem(a.wrapping_add(u32::from(f.off))),
             &rest[end..],
         ))
     }
@@ -483,7 +490,7 @@ mod tests {
             ..Default::default()
         };
         let mem = [b'T', 0xff, 0xfe, 0x10, 0x00, b'h', b'i', 0];
-        let read = |a: u16| mem.get(usize::from(a)).copied().unwrap_or(0);
+        let read = |a: u32| mem.get(a as usize).copied().unwrap_or(0);
         let ctx = Ctx {
             read: &read,
             label: &|_| None,

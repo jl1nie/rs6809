@@ -40,17 +40,17 @@ const PROGRAM: &[u8] = &[
 fn step_over_and_out() {
     let mut d = ice(PROGRAM, 0x1000, |_| ());
     ok(&mut d, "/api/step");
-    assert_eq!(d.cpu.pc, 0x1003);
+    assert_eq!(d.t.cpu.pc, 0x1003);
     ok(&mut d, "/api/over");
     d.run_steps(100);
-    assert_eq!((d.cpu.pc, d.cpu.a, d.running), (0x1006, 0x42, false));
+    assert_eq!((d.t.cpu.pc, d.t.cpu.a, d.running), (0x1006, 0x42, false));
 
-    d.cpu.pc = 0x1003;
+    d.t.cpu.pc = 0x1003;
     ok(&mut d, "/api/step");
-    assert_eq!(d.cpu.pc, 0x1010);
+    assert_eq!(d.t.cpu.pc, 0x1010);
     ok(&mut d, "/api/out");
     d.run_steps(100);
-    assert_eq!((d.cpu.pc, d.cpu.s), (0x1006, 0x7000));
+    assert_eq!((d.t.cpu.pc, d.t.cpu.s), (0x1006, 0x7000));
 }
 
 #[test]
@@ -61,21 +61,21 @@ fn breakpoints_and_watchpoints() {
     ok(&mut d, "/api/run");
     d.run_steps(100);
     // The store hits the watchpoint first; the write itself has completed.
-    assert_eq!(d.cpu.pc, 0x1009);
-    assert_eq!(d.machine.peek(0x3000), 0x42);
+    assert_eq!(d.t.cpu.pc, 0x1009);
+    assert_eq!(d.t.machine.peek(0x3000), 0x42);
     let state = ok(&mut d, "/api/state");
     assert!(state.contains("ウォッチ $3000 書き込み $42"), "{state}");
 
     // Resuming skips the breakpoint at the current PC only once.
     ok(&mut d, "/api/watch?op=clear");
-    d.cpu.pc = 0x1000;
+    d.t.cpu.pc = 0x1000;
     ok(&mut d, "/api/run");
     d.run_steps(100);
-    assert_eq!(d.cpu.pc, 0x1009);
+    assert_eq!(d.t.cpu.pc, 0x1009);
     assert!(ok(&mut d, "/api/state").contains("ブレークポイント $1009"));
     ok(&mut d, "/api/run");
     d.run_steps(10);
-    assert_eq!(d.cpu.pc, 0x1009);
+    assert_eq!(d.t.cpu.pc, 0x1009);
     assert!(!d.running);
 }
 
@@ -93,7 +93,7 @@ fn disassembly_and_memory_api() {
     let (_, mem) = d.command("GET", "/api/mem?addr=2000&len=2", b"");
     assert!(mem.contains("\"hex\":\"CAFE\""), "{mem}");
     ok(&mut d, "/api/reg?name=x&val=1234");
-    assert_eq!(d.cpu.x, 0x1234);
+    assert_eq!(d.t.cpu.x, 0x1234);
 }
 
 /// A minimal Level 1 layout: Init module, one user process, and an SWI2
@@ -142,14 +142,14 @@ fn traces_and_breaks_on_os9_calls() {
     ok(&mut d, "/api/os/break?code=I$WritLn&when=call");
     ok(&mut d, "/api/run");
     d.run_steps(100);
-    assert_eq!(d.cpu.pc, 0x1009);
+    assert_eq!(d.t.cpu.pc, 0x1009);
     assert!(ok(&mut d, "/api/state").contains("システムコール呼び出し I$WritLn (プロセス1)"));
 
     ok(&mut d, "/api/os/break?code=I$WritLn&op=del");
     ok(&mut d, "/api/os/break?code=I$WritLn&when=return");
     ok(&mut d, "/api/run");
     d.run_steps(100);
-    assert_eq!(d.cpu.pc, 0x100c);
+    assert_eq!(d.t.cpu.pc, 0x100c);
     assert!(ok(&mut d, "/api/state").contains("システムコール復帰 I$WritLn"));
 
     let (_, calls) = d.command("GET", "/api/os/calls?user=1", b"");
@@ -335,7 +335,7 @@ fn decodes_real_level2_processes_and_modules() {
     let state = ok(&mut d, "/api/state");
     assert!(state.contains("\"level\":2"), "{state}");
 
-    let v = View::detect(&d.machine).expect("Level 2 detected");
+    let v = View::detect(&d.t.machine).expect("Level 2 detected");
     assert_eq!(v.level, Level::Two);
     let procs = v.processes();
     let by = |name: &str| procs.iter().find(|p| p.module == name).unwrap_or_else(|| panic!("{name}: {procs:?}"));
@@ -415,14 +415,14 @@ fn debug_hello(disk: &str, symbols: &str, level2: bool) {
     let state = ok(&mut d, "/api/state");
     assert!(state.contains("ブレークポイント"), "{state}");
     let line = |d: &Ice| {
-        let (t, l) = d.symbols.line(&d.machine, d.cpu.pc).expect("line info");
+        let (t, l) = d.symbols.line(&d.t.machine, u32::from(d.t.cpu.pc)).expect("line info");
         (d.symbols.tables[t].sources[l.src].name.clone(), l.line)
     };
     assert_eq!(line(&d), ("hello.c".into(), 19));
-    assert!(d.symbols.label(&d.machine, d.cpu.pc).unwrap().starts_with("main"));
+    assert!(d.symbols.label(&d.t.machine, u32::from(d.t.cpu.pc)).unwrap().starts_with("main"));
 
     // The call to sum is labelled; the stack shows main's caller in cstart.
-    let (_, dis) = d.command("GET", &format!("/api/disasm?addr={:04X}&n=8", d.cpu.pc), b"");
+    let (_, dis) = d.command("GET", &format!("/api/disasm?addr={:04X}&n=8", d.t.cpu.pc), b"");
     assert!(dis.contains(r#""tsym":"sum""#), "{dis}");
     assert!(dis.contains(r#""src":{"file":"hello.c","line":19"#), "{dis}");
     let (_, stack) = d.command("GET", "/api/stack", b"");
@@ -432,7 +432,7 @@ fn debug_hello(disk: &str, symbols: &str, level2: bool) {
     d.step_source(true);
     d.run_steps(10_000_000);
     assert_eq!(line(&d), ("hello.c".into(), 6));
-    assert_eq!(d.symbols.exact(&d.machine, d.cpu.pc), Some("sum"));
+    assert_eq!(d.symbols.exact(&d.t.machine, u32::from(d.t.cpu.pc)), Some("sum"));
     ok(&mut d, "/api/out");
     d.run_steps(10_000_000);
     d.step_source(false);
@@ -447,8 +447,8 @@ fn debug_hello(disk: &str, symbols: &str, level2: bool) {
     // which has no lines.
     d.step_source(false);
     d.run_steps(1_000_000);
-    assert!(d.symbols.line(&d.machine, d.cpu.pc).is_none());
-    assert!(d.symbols.label(&d.machine, d.cpu.pc).unwrap().starts_with("_cstart+"));
+    assert!(d.symbols.line(&d.t.machine, u32::from(d.t.cpu.pc)).is_none());
+    assert!(d.symbols.label(&d.t.machine, u32::from(d.t.cpu.pc)).unwrap().starts_with("_cstart+"));
 }
 
 #[test]

@@ -1,9 +1,8 @@
 //! NitrOS-9 awareness for the ICE: service names, kernel structures and a
 //! system-call tracer. Offsets follow `defs/os9.d` of the reference kit.
 use super::json::{Json, obj};
-use super::osmon::{Call, Image, OsMonitor, PathNames, Process as OsProcess, Regs, Service, Svc};
+use super::osmon::{Call, CpuRegs, Image, Mem, OsMonitor, PathNames, Process as OsProcess, Regs, Service, Svc};
 use super::tables::{ERRORS, SERVICES, STATUS_CODES};
-use crate::Machine;
 
 pub fn service_name(code: u8) -> String {
     SERVICES
@@ -230,7 +229,7 @@ pub struct Module {
 
 /// Read-only view of OS-9 structures in a paused (or running) machine.
 pub struct View<'a> {
-    pub m: &'a Machine,
+    pub m: &'a dyn Mem,
     pub level: Level,
     sysdat: [u16; 8],
 }
@@ -256,8 +255,9 @@ fn name_at(read: &dyn Fn(u16) -> u8, at: u16) -> String {
 
 impl<'a> View<'a> {
     /// Detect the OS from the Init module pointer; `None` before OS-9 runs.
-    pub fn detect(m: &'a Machine) -> Option<Self> {
-        let phys16 = |a: usize| u16::from_be_bytes([m.ram[a], m.ram[a + 1]]);
+    pub fn detect(m: &'a dyn Mem) -> Option<Self> {
+        let ram = m.ram();
+        let phys16 = |a: usize| u16::from_be_bytes([ram[a], ram[a + 1]]);
         for level in [Level::One, Level::Two] {
             let v = Self::new(m, level);
             let init = phys16(usize::from(v.g().init));
@@ -267,7 +267,7 @@ impl<'a> View<'a> {
         }
         None
     }
-    pub fn new(m: &'a Machine, level: Level) -> Self {
+    pub fn new(m: &'a dyn Mem, level: Level) -> Self {
         let mut v = Self {
             m,
             level,
@@ -278,7 +278,7 @@ impl<'a> View<'a> {
             for (i, b) in v.sysdat.iter_mut().enumerate() {
                 let a = usize::from(ptr.wrapping_add(i as u16 * 2));
                 if a < 0x1fff {
-                    *b = u16::from_be_bytes([m.ram[a], m.ram[a + 1]]);
+                    *b = u16::from_be_bytes([m.ram()[a], m.ram()[a + 1]]);
                 }
             }
         }
@@ -297,7 +297,7 @@ impl<'a> View<'a> {
         }
     }
     fn phys(&self, p: usize) -> u8 {
-        self.m.ram.get(p).copied().unwrap_or(0xff)
+        self.m.ram().get(p).copied().unwrap_or(0xff)
     }
     /// Read through a DAT image: one 16-bit block number per 8 KiB slot.
     fn dat_read(&self, image: &[u16], addr: u16) -> u8 {
@@ -309,7 +309,7 @@ impl<'a> View<'a> {
     /// The system address space. Level 2 keeps system block 0 at physical 0.
     pub fn sys(&self, addr: u16) -> u8 {
         match self.level {
-            Level::One => self.m.peek(addr),
+            Level::One => self.m.peek(u32::from(addr)),
             Level::Two => {
                 if addr < 0x2000 {
                     return self.phys(usize::from(addr));
@@ -330,7 +330,7 @@ impl<'a> View<'a> {
     /// A process' own address space (Level 2 DAT image, flat in Level 1).
     pub fn proc_read(&self, desc: u16, addr: u16) -> u8 {
         match self.level {
-            Level::One => self.m.peek(addr),
+            Level::One => self.m.peek(u32::from(addr)),
             Level::Two => {
                 let img = self.image_at(desc.wrapping_add(0x40));
                 self.dat_read(&img, addr)
@@ -471,7 +471,7 @@ impl<'a> View<'a> {
                 continue;
             }
             let read = |a: u16| match self.level {
-                Level::One => self.m.peek(a),
+                Level::One => self.m.peek(u32::from(a)),
                 Level::Two => self.dat_read(&image, a),
             };
             if !module_ok(&read, ptr) {
@@ -535,10 +535,10 @@ fn printable(bytes: &[u8]) -> String {
     }
     s
 }
-fn path_string(m: &Machine, at: u16) -> String {
+fn path_string(m: &dyn Mem, at: u16) -> String {
     let mut v = Vec::new();
     for i in 0..48u16 {
-        let c = m.peek(at.wrapping_add(i));
+        let c = m.peek(u32::from(at.wrapping_add(i)));
         let ch = c & 0x7f;
         if ch <= 0x20 || ch == 0x7f {
             break;
@@ -550,9 +550,9 @@ fn path_string(m: &Machine, at: u16) -> String {
     }
     String::from_utf8_lossy(&v).into_owned()
 }
-fn preview(m: &Machine, at: u16, len: u16) -> String {
+fn preview(m: &dyn Mem, at: u16, len: u16) -> String {
     let n = len.min(64);
-    let mut bytes: Vec<u8> = (0..n).map(|i| m.peek(at.wrapping_add(i))).collect();
+    let mut bytes: Vec<u8> = (0..n).map(|i| m.peek(u32::from(at.wrapping_add(i)))).collect();
     if let Some(cr) = bytes.iter().position(|&b| b == b'\r') {
         bytes.truncate(cr + 1);
         let mut s = printable(&bytes);
@@ -584,7 +584,7 @@ impl Describe<'_> {
             },
         }
     }
-    fn describe_entry(&self, m: &Machine, pid: u8, code: u8, r: &Regs) -> String {
+    fn describe_entry(&self, m: &dyn Mem, pid: u8, code: u8, r: &Regs) -> String {
         let path = |p| self.path_label(pid, p);
         match code {
             0x00 | 0x01 => format!("X→\"{}\" 種別A=${:02X}", path_string(m, r.x), r.a),
@@ -613,7 +613,7 @@ impl Describe<'_> {
             0x0D => format!("プロセス{} 優先度{}", r.a, r.b),
             0x0F => format!("パス{} {}", path(r.a), error_name(r.b)),
             0x16 => {
-                let t: Vec<u8> = (0..6).map(|i| m.peek(r.x.wrapping_add(i))).collect();
+                let t: Vec<u8> = (0..6).map(|i| m.peek(u32::from(r.x.wrapping_add(i)))).collect();
                 format!(
                     "{}/{:02}/{:02} {:02}:{:02}:{:02}",
                     1900 + u32::from(t[0]),
@@ -650,11 +650,11 @@ impl Describe<'_> {
             ),
         }
     }
-    fn describe_exit(&self, m: &Machine, call: &Call, r: &Regs) -> String {
+    fn describe_exit(&self, m: &dyn Mem, call: &Call, r: &Regs) -> String {
         if r.cc & 1 != 0 {
             return format!("エラー {}", error_name(r.b));
         }
-        let i = &call.inp;
+        let i = &call.inp.m6809();
         match call.code {
             0x00 | 0x01 => format!("ヘッダU=${:04X} 実行Y=${:04X}", r.u, r.y),
             0x03 => format!("子プロセスID={}", r.a),
@@ -664,7 +664,7 @@ impl Describe<'_> {
             0x0C => format!("ID={} ユーザー{}", r.a, r.y),
             0x10 => format!("長さB={}", r.b),
             0x15 => {
-                let t: Vec<u8> = (0..6).map(|k| m.peek(i.x.wrapping_add(k))).collect();
+                let t: Vec<u8> = (0..6).map(|k| m.peek(u32::from(i.x.wrapping_add(k)))).collect();
                 format!(
                     "{}/{:02}/{:02} {:02}:{:02}:{:02}",
                     1900 + u32::from(t[0]),
@@ -693,7 +693,7 @@ pub struct Nitros9 {
 }
 
 impl Nitros9 {
-    fn view<'m>(&self, m: &'m Machine) -> Option<View<'m>> {
+    fn view<'m>(&self, m: &'m dyn Mem) -> Option<View<'m>> {
         self.level.map(|l| View::new(m, l))
     }
     pub fn level(&self) -> Option<Level> {
@@ -706,7 +706,7 @@ fn blocks_json(v: &[u16]) -> Json {
 }
 
 impl OsMonitor for Nitros9 {
-    fn detect(&mut self, m: &Machine) -> bool {
+    fn detect(&mut self, m: &dyn Mem) -> bool {
         if self.level.is_none() {
             self.level = View::detect(m).map(|v| v.level);
         }
@@ -739,7 +739,7 @@ impl OsMonitor for Nitros9 {
             ),
         ])
     }
-    fn summary(&self, m: &Machine) -> Vec<(&'static str, Json)> {
+    fn summary(&self, m: &dyn Mem) -> Vec<(&'static str, Json)> {
         let Some(v) = self.view(m) else { return Vec::new() };
         let [aq, wq, sq] = v.queues();
         let ids = |q: Vec<u8>| Json::Arr(q.into_iter().map(Json::from).collect());
@@ -750,7 +750,7 @@ impl OsMonitor for Nitros9 {
             ("sleeping", ids(sq)),
         ]
     }
-    fn svc_at(&self, read: &dyn Fn(u16) -> u8, pc: u16) -> Option<Svc> {
+    fn svc_at(&self, read: &dyn Fn(u32) -> u8, pc: u32) -> Option<Svc> {
         if read(pc) != 0x10 || read(pc.wrapping_add(1)) != 0x3f {
             return None;
         }
@@ -786,33 +786,36 @@ impl OsMonitor for Nitros9 {
         // F$Link, F$Load, F$UnLink, F$Fork, F$Chain, F$Exit, F$UnLoad, F$NMLink, F$NMLoad, F$VModul.
         &[0x00, 0x01, 0x02, 0x03, 0x05, 0x06, 0x1d, 0x21, 0x22, 0x2e]
     }
-    fn current(&self, m: &Machine) -> u16 {
-        self.view(m).map_or(0, |v| v.current())
+    fn current(&self, m: &dyn Mem) -> u32 {
+        self.view(m).map_or(0, |v| u32::from(v.current()))
     }
-    fn pid_of(&self, m: &Machine, key: u16) -> u8 {
-        self.view(m).map_or(0, |v| v.pid_of(key))
+    fn pid_of(&self, m: &dyn Mem, key: u32) -> u8 {
+        self.view(m).map_or(0, |v| v.pid_of(key as u16))
     }
     fn current_slot(&self) -> Option<usize> {
         // D.Proc in the direct page; system block 0 is physical 0 in Level 2,
         // and Level 1 maps low memory one to one.
         self.level.map(|l| if l == Level::One { 0x4b } else { 0x50 })
     }
-    fn in_system(&self, m: &Machine, key: u16) -> bool {
+    fn in_system(&self, m: &dyn Mem, key: u32) -> bool {
+        let key = key as u16;
         let Some(v) = self.view(m) else { return false };
         let state_off = if v.level == Level::One { 0x0d } else { 0x0c };
         v.sys(key.wrapping_add(state_off)) & 0x80 != 0
     }
-    fn describe_entry(&self, m: &Machine, paths: &PathNames, pid: u8, code: u8, r: &Regs) -> String {
-        Describe { paths }.describe_entry(m, pid, code, r)
+    fn describe_entry(&self, m: &dyn Mem, paths: &PathNames, pid: u8, code: u8, r: &CpuRegs) -> String {
+        Describe { paths }.describe_entry(m, pid, code, &r.m6809())
     }
-    fn describe_exit(&self, m: &Machine, call: &Call, r: &Regs) -> String {
-        Describe { paths: &PathNames::new() }.describe_exit(m, call, r)
+    fn describe_exit(&self, m: &dyn Mem, call: &Call, r: &CpuRegs) -> String {
+        Describe { paths: &PathNames::new() }.describe_exit(m, call, &r.m6809())
     }
-    fn error_of(&self, r: &Regs) -> Option<u8> {
+    fn error_of(&self, r: &CpuRegs) -> Option<u8> {
+        let r = r.m6809();
         (r.cc & 1 != 0).then_some(r.b)
     }
-    fn learn(&self, call: &Call, out: &Regs, pid: u8, paths: &mut PathNames) {
-        let inp = &call.inp;
+    fn learn(&self, call: &Call, out: &CpuRegs, pid: u8, paths: &mut PathNames) {
+        let inp = &call.inp.m6809();
+        let out = &out.m6809();
         match call.code {
             0x83 | 0x84 => {
                 if let Some(name) = call.args.split('"').nth(1) {
@@ -836,14 +839,14 @@ impl OsMonitor for Nitros9 {
             _ => (),
         }
     }
-    fn processes(&self, m: &Machine) -> Vec<OsProcess> {
+    fn processes(&self, m: &dyn Mem) -> Vec<OsProcess> {
         let Some(v) = self.view(m) else { return Vec::new() };
         v.processes()
             .into_iter()
             .map(|p| OsProcess {
                 id: p.id,
                 parent: p.parent,
-                key: p.addr,
+                key: u32::from(p.addr),
                 name: p.module.clone(),
                 queue: p.queue,
                 fields: vec![
@@ -865,7 +868,7 @@ impl OsMonitor for Nitros9 {
             })
             .collect()
     }
-    fn images(&self, m: &Machine) -> Vec<Image> {
+    fn images(&self, m: &dyn Mem) -> Vec<Image> {
         let Some(v) = self.view(m) else { return Vec::new() };
         v.modules()
             .into_iter()
@@ -877,14 +880,14 @@ impl OsMonitor for Nitros9 {
                 while a < end {
                     let stop = (((a >> 13) + 1) << 13).min(end);
                     let phys = match v.level {
-                        Level::One => m.translate(a as u16),
+                        Level::One => m.translate(a),
                         Level::Two => md
                             .blocks
                             .get(((a >> 13) - (start >> 13)) as usize)
                             .map(|&b| usize::from(b) * 8192 + (a as usize & 8191)),
                     };
                     if let Some(p) = phys {
-                        chunks.push((p, (stop - a) as usize, (a - start) as u16));
+                        chunks.push((p, (stop - a) as usize, a - start));
                     }
                     a = stop;
                 }
@@ -903,7 +906,7 @@ impl OsMonitor for Nitros9 {
             })
             .collect()
     }
-    fn memory_map(&self, m: &Machine) -> Json {
+    fn memory_map(&self, m: &dyn Mem) -> Json {
         let Some(v) = self.view(m) else {
             return obj([("unit", 0.into()), ("map", Json::Arr(Vec::new()))]);
         };
@@ -915,7 +918,8 @@ impl OsMonitor for Nitros9 {
             ("sysdat", blocks_json(&sys)),
         ])
     }
-    fn read_space(&self, m: &Machine, space: &str, addr: u16) -> Option<u8> {
+    fn read_space(&self, m: &dyn Mem, space: &str, addr: u32) -> Option<u8> {
+        let addr = addr as u16;
         let v = self.view(m)?;
         if space == "sys" {
             return Some(v.sys(addr));
@@ -941,9 +945,11 @@ mod tests {
     fn decodes_service_requests() {
         let os = Nitros9::default();
         let bytes = [0x10u8, 0x3f, 0x03];
-        let read = |a: u16| bytes.get(usize::from(a)).copied().unwrap_or(0);
-        let l = super::super::disasm::disassemble_with(&read, 0, &|r, at| {
-            os.svc_at(r, at).map(|s| (s.len, format!("{} {}", os.svc_mnemonic(), os.service_name(s.code)), u16::from(s.code)))
+        let read = |a: u32| bytes.get(a as usize).copied().unwrap_or(0);
+        let read16 = |a: u16| read(u32::from(a));
+        let l = super::super::disasm::disassemble_with(&read16, 0, &|r, at| {
+            let r32 = |a: u32| r(a as u16);
+            os.svc_at(&r32, u32::from(at)).map(|s| (s.len as u16, format!("{} {}", os.svc_mnemonic(), os.service_name(s.code)), u16::from(s.code)))
         });
         assert_eq!((l.text.as_str(), l.len, l.svc), ("OS9 F$Fork", 3, true));
         assert_eq!(os.svc_at(&read, 0), Some(Svc { code: 3, len: 3, no_return: false }));

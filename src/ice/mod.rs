@@ -14,14 +14,15 @@ pub mod os9;
 pub mod osmon;
 pub mod symbols;
 mod tables;
+pub mod target;
 
-use crate::cpu::I;
 use crate::telnet::TelnetServer;
-use crate::{Bus, Cpu, Machine};
-use disasm::{Flow, disassemble};
-use osmon::{OsMonitor, Regs, Tracer};
+use crate::{Cpu, Machine};
+use osmon::{CpuRegs, OsMonitor, Tracer};
 use std::collections::{BTreeSet, VecDeque};
-use symbols::{Symbols, Target};
+use symbols::{Symbols, Target as BpTarget};
+use target::{Flow, Mc6809, Target};
+pub use target::Mc68000;
 use std::fmt::Write as _;
 use std::io;
 use std::net::TcpListener;
@@ -59,14 +60,14 @@ fn parse_num(s: &str) -> Option<u32> {
         s.parse().ok()
     }
 }
-fn parse_addr(s: &str) -> Option<u16> {
+fn parse_addr(s: &str) -> Option<u32> {
     let s = s.trim();
     // Addresses default to hexadecimal, as on a monitor.
     let h = s
         .strip_prefix("0x")
         .or_else(|| s.strip_prefix('$'))
         .unwrap_or(s);
-    u16::from_str_radix(h, 16).ok()
+    u32::from_str_radix(h, 16).ok()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -78,8 +79,8 @@ pub enum WatchKind {
 
 #[derive(Debug, Clone, Copy)]
 pub struct Watch {
-    pub start: u16,
-    pub end: u16,
+    pub start: u32,
+    pub end: u32,
     pub kind: WatchKind,
 }
 
@@ -96,7 +97,7 @@ pub enum Inbox {
 pub enum BpSpec {
     Line { file: String, line: u32 },
     Symbol(String),
-    Addr(u16),
+    Addr(u32),
 }
 /// A breakpoint on a source line, symbol or address, re-resolved whenever
 /// the OS-9 module directory changes (modules load at varying addresses).
@@ -108,7 +109,7 @@ pub struct SymBp {
     pub spec: BpSpec,
     /// The line actually used (the next line with code).
     pub line: Option<u32>,
-    pub targets: Vec<Target>,
+    pub targets: Vec<BpTarget>,
 }
 impl SymBp {
     pub fn text(&self) -> String {
@@ -124,8 +125,8 @@ impl SymBp {
 pub enum Stop {
     Pause,
     Step,
-    Breakpoint(u16),
-    Watch { addr: u16, write: bool, value: u8 },
+    Breakpoint(u32),
+    Watch { addr: u32, write: bool, value: u8 },
     SysCall { code: u8, pid: u8 },
     SysReturn(u64),
     Switch { from: u8, to: u8 },
@@ -176,14 +177,14 @@ enum Goal {
     None,
     /// Stop at `pc` once S has unwound to at least `s` in the same process.
     At {
-        pc: u16,
-        s: u16,
-        proc_: Option<u16>,
+        pc: u32,
+        s: u32,
+        proc_: Option<u32>,
     },
     /// Stop after a return instruction that leaves S above `s`.
     Out {
-        s: u16,
-        proc_: Option<u16>,
+        s: u32,
+        proc_: Option<u32>,
     },
     /// Source-level step: stop on another source line. Without `into`,
     /// deeper frames (S below `s`) are skipped.
@@ -191,11 +192,11 @@ enum Goal {
         table: usize,
         src: usize,
         line: u32,
-        s: u16,
-        proc_: Option<u16>,
+        s: u32,
+        proc_: Option<u32>,
         /// Hardware task: Level 2 runs interrupts and service requests in
         /// the system task on another stack, which must not end the step.
-        task: u8,
+        task: u32,
         into: bool,
         /// An RTS/PULS PC left the starting frame.
         left: bool,
@@ -203,46 +204,11 @@ enum Goal {
 }
 
 #[derive(Clone, Copy)]
-pub struct TraceEntry {
+pub struct TraceEntry<S> {
     pub cycle: u64,
-    pub regs: Regs,
-    pub bytes: [u8; 5],
+    pub regs: S,
+    pub bytes: [u8; 10],
     pub pid: u8,
-}
-
-struct Probe<'a> {
-    m: &'a mut Machine,
-    watches: &'a [Watch],
-    hit: Option<(u16, bool, u8)>,
-}
-impl Probe<'_> {
-    fn check(&mut self, addr: u16, write: bool, value: u8) {
-        if self.hit.is_some() {
-            return;
-        }
-        for w in self.watches {
-            let kind_ok = match w.kind {
-                WatchKind::Read => !write,
-                WatchKind::Write => write,
-                WatchKind::Access => true,
-            };
-            if kind_ok && (w.start..=w.end).contains(&addr) {
-                self.hit = Some((addr, write, value));
-                return;
-            }
-        }
-    }
-}
-impl Bus for Probe<'_> {
-    fn read(&mut self, addr: u16) -> u8 {
-        let v = self.m.read(addr);
-        self.check(addr, false, v);
-        v
-    }
-    fn write(&mut self, addr: u16, v: u8) {
-        self.check(addr, true, v);
-        self.m.write(addr, v)
-    }
 }
 
 pub struct Options {
@@ -250,10 +216,10 @@ pub struct Options {
     pub echo_console: bool,
 }
 
-pub struct Ice {
-    pub cpu: Cpu,
-    pub machine: Machine,
-    pub breakpoints: BTreeSet<u16>,
+pub struct Ice<T: Target = Mc6809> {
+    /// The CPU and machine (for the 6809: `t.cpu`, `t.machine`).
+    pub t: T,
+    pub breakpoints: BTreeSet<u32>,
     bp_bits: Vec<u64>,
     pub watches: Vec<Watch>,
     pub break_calls: BTreeSet<u8>,
@@ -264,7 +230,7 @@ pub struct Ice {
     /// Record OS-9 service requests and context switches.
     pub trace_os9: bool,
     pub tracer: Tracer,
-    pub trace: VecDeque<TraceEntry>,
+    pub trace: VecDeque<TraceEntry<T::Snap>>,
     pub console: Vec<u8>,
     console_base: u64,
     pub running: bool,
@@ -300,19 +266,32 @@ pub struct Ice {
     var_refs: Vec<frames::VarRef>,
 }
 
-impl Ice {
-    /// An ICE for NitrOS-9 (the OS of the Multicomp images).
+impl Ice<Mc6809> {
+    /// An ICE for a 6809 running NitrOS-9 (the OS of the Multicomp images).
     pub fn new(cpu: Cpu, machine: Machine, options: Options) -> Self {
         Self::with_os(cpu, machine, options, Box::new(os9::Nitros9::default()))
     }
     pub fn with_os(cpu: Cpu, machine: Machine, options: Options, os: Box<dyn OsMonitor>) -> Self {
+        Ice::for_target(Mc6809 { cpu, machine }, options, os)
+    }
+}
+
+impl Ice<Mc68000> {
+    /// An ICE for a bare 68000 program (no OS).
+    pub fn m68000(t: Mc68000, options: Options) -> Self {
+        Ice::for_target(t, options, Box::new(osmon::NoOs))
+    }
+}
+
+impl<T: Target> Ice<T> {
+    pub fn for_target(t: T, options: Options, os: Box<dyn OsMonitor>) -> Self {
+        let bits = 1usize << t.addr_bits();
         Self {
             svc_prefix: os.svc_prefix(),
             os_slot: None,
-            cpu,
-            machine,
+            t,
             breakpoints: BTreeSet::new(),
-            bp_bits: vec![0; 1024],
+            bp_bits: vec![0; bits.div_ceil(64)],
             watches: Vec::new(),
             break_calls: BTreeSet::new(),
             break_returns: BTreeSet::new(),
@@ -351,7 +330,8 @@ impl Ice {
     pub fn set_telnet(&mut self, server: TelnetServer) {
         self.telnet = Some(server);
     }
-    fn set_bp(&mut self, a: u16, on: bool) {
+    fn set_bp(&mut self, a: u32, on: bool) {
+        let a = a & self.amask();
         if on {
             self.breakpoints.insert(a);
         } else {
@@ -359,36 +339,39 @@ impl Ice {
         }
         self.rebuild_bps();
     }
-    fn bp_at(&self, a: u16) -> bool {
-        self.bp_bits[usize::from(a >> 6)] & (1 << (a & 63)) != 0
+    fn bp_at(&self, a: u32) -> bool {
+        self.bp_bits.get((a >> 6) as usize).is_some_and(|w| w & (1 << (a & 63)) != 0)
     }
-    fn phys_bp_at(&self, pc: u16) -> bool {
+    fn phys_bp_at(&self, pc: u32) -> bool {
         self.phys_count > 0
             && self
-                .machine
+                .t
+                .mem()
                 .translate(pc)
                 .is_some_and(|p| self.phys_bits.get(p >> 6).is_some_and(|w| w & (1 << (p & 63)) != 0))
     }
     /// Recompute the bit tables from user and symbolic breakpoints.
     fn rebuild_bps(&mut self) {
         self.bp_bits.iter_mut().for_each(|w| *w = 0);
-        self.phys_bits = vec![0; self.machine.ram.len().div_ceil(64)];
+        self.phys_bits = vec![0; self.t.ram_len().div_ceil(64)];
         self.phys_count = 0;
         let logical = self.breakpoints.iter().copied().chain(
             self.sym_bps
                 .iter()
                 .flat_map(|b| b.targets.iter())
                 .filter_map(|t| match t {
-                    Target::Logical(a) => Some(*a),
-                    Target::Phys(_) => None,
+                    BpTarget::Logical(a) => Some(*a),
+                    BpTarget::Phys(_) => None,
                 }),
         );
         for a in logical.collect::<Vec<_>>() {
-            self.bp_bits[usize::from(a >> 6)] |= 1 << (a & 63);
+            if let Some(w) = self.bp_bits.get_mut((a >> 6) as usize) {
+                *w |= 1 << (a & 63);
+            }
         }
         for b in &self.sym_bps {
             for t in &b.targets {
-                if let Target::Phys(p) = *t
+                if let BpTarget::Phys(p) = *t
                     && let Some(w) = self.phys_bits.get_mut(p >> 6)
                 {
                     *w |= 1 << (p & 63);
@@ -398,20 +381,20 @@ impl Ice {
         }
         self.bp_version += 1;
     }
-    fn resolve_bp(&self, spec: &BpSpec) -> (Option<u32>, Vec<Target>) {
+    fn resolve_bp(&self, spec: &BpSpec) -> (Option<u32>, Vec<BpTarget>) {
         match spec {
             BpSpec::Line { file, line } => self.symbols.line_targets(file, *line),
             BpSpec::Symbol(name) => {
                 let t = self.symbols.symbol_targets(name);
                 if t.is_empty()
                     && let Some(a) = name.strip_prefix('$').or_else(|| name.strip_prefix("0x"))
-                    && let Ok(a) = u16::from_str_radix(a, 16)
+                    && let Ok(a) = u32::from_str_radix(a, 16)
                 {
-                    return (None, vec![Target::Logical(a)]);
+                    return (None, vec![BpTarget::Logical(a)]);
                 }
                 (None, t)
             }
-            BpSpec::Addr(a) => (None, vec![Target::Logical(*a)]),
+            BpSpec::Addr(a) => (None, vec![BpTarget::Logical(*a)]),
         }
     }
     pub fn add_sym_bp(&mut self, owner: u32, spec: BpSpec) -> u32 {
@@ -455,26 +438,40 @@ impl Ice {
             return;
         }
         if !self.os_ready {
-            self.os_ready = self.os.detect(&self.machine);
+            self.os_ready = self.os.detect(self.t.mem());
             self.os_slot = self.os.current_slot();
         }
-        let images = if self.os_ready { self.os.images(&self.machine) } else { Vec::new() };
+        let images = if self.os_ready { self.os.images(self.t.mem()) } else { Vec::new() };
         if self.symbols.place(&images) {
             self.reresolve();
         }
     }
-    /// The return address heuristic: the word follows a call instruction.
-    pub fn is_return_address(&self, w: u16) -> bool {
-        let m = &self.machine;
-        (2..=4u16).any(|k| {
+    /// The return address heuristic: the value follows a call instruction.
+    pub fn is_return_address(&self, w: u32) -> bool {
+        self.call_before(w, None)
+    }
+    /// Is `w` the address after a call (to `target`, when known)?
+    pub(crate) fn call_before(&self, w: u32, target: Option<u32>) -> bool {
+        let m = self.t.mem();
+        T::CALL_LENS.iter().any(|&k| {
             let at = w.wrapping_sub(k);
-            let l = disassemble(&|a| m.peek(a), at);
-            l.len == k && l.flow == Flow::Call && !l.text.starts_with("SWI") && !l.svc
+            let l = self.t.disasm(&|a| m.peek(a), at, &|_, _| None);
+            l.len == k
+                && l.flow == Flow::Call
+                && !l.text.starts_with("SWI")
+                && !l.text.starts_with("TRAP")
+                && !l.svc
+                && (target.is_none() || l.target.is_none() || l.target == target)
         })
     }
+    /// A return address stored on the stack.
+    pub fn read_ret(&self, at: u32) -> u32 {
+        let m = self.t.mem();
+        if self.t.ret_size() == 4 { m.peek32(at) } else { u32::from(m.peek16(at)) }
+    }
     /// Return addresses on the stack, innermost first: (stack address, value).
-    pub fn call_chain(&self, max: usize) -> Vec<(u16, u16)> {
-        self.call_chain_from(self.cpu.s, max)
+    pub fn call_chain(&self, max: usize) -> Vec<(u32, u32)> {
+        self.call_chain_from(self.t.sp(), max)
     }
     /// The OS layer, once the OS has been found in memory.
     pub fn os(&self) -> Option<&dyn OsMonitor> {
@@ -484,48 +481,43 @@ impl Ice {
     pub fn os_layer(&self) -> &dyn OsMonitor {
         &*self.os
     }
-    fn current_proc(&self) -> Option<u16> {
-        self.os().map(|o| o.current(&self.machine))
+    fn current_proc(&self) -> Option<u32> {
+        self.os().map(|o| o.current(self.t.mem()))
     }
     fn detect(&mut self) {
-        if !self.os_ready && self.cpu.cycles >= self.detect_at {
-            self.os_ready = self.os.detect(&self.machine);
+        if !self.os_ready && self.t.cycles() >= self.detect_at {
+            self.os_ready = self.os.detect(self.t.mem());
             self.os_slot = self.os.current_slot();
-            self.detect_at = self.cpu.cycles + 200_000;
+            self.detect_at = self.t.cycles() + 200_000;
         }
     }
     /// Disassemble with the OS's service-request convention.
-    pub fn dis(&self, addr: u16) -> disasm::Line {
-        let m = &self.machine;
+    pub fn dis(&self, addr: u32) -> target::Line {
+        let m = self.t.mem();
         self.dis_with(&|a| m.peek(a), addr)
     }
-    pub fn dis_with(&self, read: &dyn Fn(u16) -> u8, addr: u16) -> disasm::Line {
+    pub fn dis_with(&self, read: &dyn Fn(u32) -> u8, addr: u32) -> target::Line {
         let os = &*self.os;
-        disasm::disassemble_with(read, addr, &|read, at| {
-            os.svc_at(read, at).map(|s| (s.len, format!("{} {}", os.svc_mnemonic(), os.service_name(s.code)), u16::from(s.code)))
+        self.t.disasm(read, addr, &|read, at| {
+            os.svc_at(read, at)
+                .map(|s| (s.len, format!("{} {}", os.svc_mnemonic(), os.service_name(s.code)), u32::from(s.code)))
         })
     }
 
     /// Execute one instruction (or interrupt entry) with all debug checks.
     pub fn step_one(&mut self) -> Option<Stop> {
         self.detect();
-        let irq = self.machine.irq();
-        let wait = self.cpu.waiting();
-        let executes = (wait == 0 || (wait == 1 && irq)) && !(irq && self.cpu.cc & I == 0);
-        let pc = self.cpu.pc;
+        let executes = self.t.executes();
+        let pc = self.t.pc();
         let skip = std::mem::take(&mut self.skip_checks);
         if !skip && (self.bp_at(pc) || self.phys_bp_at(pc)) {
             return Some(Stop::Breakpoint(pc));
         }
         let tracing = self.trace_os9 && self.os_ready;
         let current = tracing.then(|| self.tracer.current());
-        if let Goal::At {
-            pc: target,
-            s,
-            proc_,
-        } = self.goal
+        if let Goal::At { pc: target, s, proc_ } = self.goal
             && pc == target
-            && self.cpu.s >= s
+            && self.t.sp() >= s
             && (proc_.is_none() || self.current_proc() == proc_)
         {
             self.goal = Goal::None;
@@ -541,14 +533,14 @@ impl Ice {
             into,
             left,
         } = self.goal
-            && self.machine.mmu().task == task
+            && self.t.context() == task
             && (proc_.is_none() || self.current_proc() == proc_)
         {
-            let here = self.symbols.line(&self.machine, pc);
+            let here = self.symbols.line(self.t.mem(), pc);
             let other = here.is_some_and(|(t, l)| !(t == table && l.src == src && l.line == line));
             // Returned from the starting frame into code without line information.
             let returned = here.is_none() && left;
-            if (other && (into || self.cpu.s >= s)) || returned {
+            if (other && (into || self.t.sp() >= s)) || returned {
                 self.goal = Goal::None;
                 return Some(Stop::Step);
             }
@@ -557,14 +549,19 @@ impl Ice {
         let mut return_insn = false;
         let mut rts = false;
         if executes {
-            let m = &self.machine;
-            let bytes = [0u16, 1, 2, 3, 4].map(|i| m.peek(pc.wrapping_add(i)));
-            rts = bytes[0] == 0x39 || (bytes[0] == 0x35 && bytes[1] & 0x80 != 0);
-            return_insn = rts || bytes[0] == 0x3b;
+            let m = self.t.mem();
+            let mut bytes = [0u8; 10];
+            for (i, b) in bytes.iter_mut().enumerate().take(T::MAX_INSN) {
+                *b = m.peek(pc.wrapping_add(i as u32));
+            }
+            (rts, return_insn) = self.t.returns(&bytes);
             let pid = current.map_or(0, |c| c.1);
-            // Decode from the bytes already fetched (a request fits in five).
+            // Decode from the bytes already fetched.
             let svc = if bytes.starts_with(self.svc_prefix) {
-                self.os.svc_at(&|a| bytes.get(usize::from(a.wrapping_sub(pc))).map_or_else(|| m.peek(a), |&b| b), pc)
+                self.os.svc_at(
+                    &|a| bytes.get(a.wrapping_sub(pc) as usize).filter(|_| (a.wrapping_sub(pc) as usize) < T::MAX_INSN).map_or_else(|| m.peek(a), |&b| b),
+                    pc,
+                )
             } else {
                 None
             };
@@ -579,47 +576,32 @@ impl Ice {
                 self.trace.pop_front();
             }
             self.trace.push_back(TraceEntry {
-                cycle: self.cpu.cycles,
-                regs: Regs::of(&self.cpu),
+                cycle: self.t.cycles(),
+                regs: self.t.snap(),
                 bytes,
                 pid,
             });
             if tracing && svc.is_some() {
-                self.tracer.before(&self.machine, &*self.os, &self.cpu);
+                let state = self.t.cpu_state();
+                self.tracer.before(self.t.mem(), &*self.os, &state);
             }
         }
-        let old = self.cpu.cycles;
-        let result = if self.watches.is_empty() {
-            self.machine.step(&mut self.cpu).map(|_| ())
-        } else {
-            let mut probe = Probe {
-                m: &mut self.machine,
-                watches: &self.watches,
-                hit: None,
-            };
-            let r = if !self.cpu.interrupt(&mut probe, irq, false, false) {
-                self.cpu.step(&mut probe).map(|_| ())
-            } else {
-                Ok(())
-            };
-            if let Some((addr, write, value)) = probe.hit {
-                stop = Some(Stop::Watch { addr, write, value });
-            }
-            self.machine.tick(self.cpu.cycles - old);
-            r
-        };
-        if let Err(e) = result {
-            return Some(Stop::Error(e.to_string()));
+        match self.t.step(&self.watches) {
+            Err(e) => return Some(Stop::Error(e)),
+            Ok(Some((addr, write, value))) => stop = Some(Stop::Watch { addr, write, value }),
+            Ok(None) => {}
         }
-        if let Some(e) = self.machine.disk_error() {
+        if let Some(e) = self.t.disk_error() {
             return Some(Stop::Error(e.to_string()));
         }
         if tracing {
-            let (done, switch) = self.tracer.after(&self.machine, &*self.os, self.os_slot, &self.cpu);
+            let t = &self.t;
+            let (done, switch) = self.tracer.after_with(t.mem(), &*self.os, self.os_slot, t.pc(), t.sp(), t.cycles(), || {
+                t.cpu_state().regs
+            });
             if let Some(id) = done
                 && let Some(c) = self.tracer.call(id)
-                && (self.break_returns.contains(&c.code)
-                    || (self.break_errors && c.error.is_some()))
+                && (self.break_returns.contains(&c.code) || (self.break_errors && c.error.is_some()))
                 && self.break_pid.is_none_or(|p| p == c.pid)
             {
                 stop = stop.or(Some(Stop::SysReturn(id)));
@@ -633,26 +615,23 @@ impl Ice {
             if let Some(s) = switch
                 && self.break_switch
             {
-                stop = stop.or(Some(Stop::Switch {
-                    from: s.from,
-                    to: s.to,
-                }));
+                stop = stop.or(Some(Stop::Switch { from: s.from, to: s.to }));
             }
         }
         // The debugged code's own return (kernel code may also RTS on
         // another stack in the same task).
         if rts
             && let Goal::Line { s, proc_, .. } = self.goal
-            && self.cpu.s > s
+            && self.t.sp() > s
             && (proc_.is_none() || self.current_proc() == proc_)
-            && self.symbols.locate(&self.machine, pc).is_some()
+            && self.symbols.locate(self.t.mem(), pc).is_some()
             && let Goal::Line { left, .. } = &mut self.goal
         {
             *left = true;
         }
         if let Goal::Out { s, proc_ } = self.goal
             && return_insn
-            && self.cpu.s > s
+            && self.t.sp() > s
             && (proc_.is_none() || self.current_proc() == proc_)
         {
             self.goal = Goal::None;
@@ -663,10 +642,12 @@ impl Ice {
     }
 
     fn pump_console(&mut self) {
-        if !self.machine.acia.tx.is_empty() {
-            let bytes = std::mem::take(&mut self.machine.acia.tx);
-            if let Some(t) = &mut self.telnet {
-                t.send(0, &bytes, &mut self.machine);
+        let bytes = self.t.console_take();
+        if !bytes.is_empty() {
+            if let Some(t) = &mut self.telnet
+                && let Some(m) = self.t.multicomp()
+            {
+                t.send(0, &bytes, m);
             }
             if self.echo_console {
                 use std::io::Write;
@@ -691,7 +672,7 @@ impl Ice {
                 self.pending_input.extend(response.bytes());
                 self.pending_input.push_back(13);
                 self.seen.clear();
-                self.next_input = self.cpu.cycles + 100_000;
+                self.next_input = self.t.cycles() + 100_000;
             }
             if self.seen.len() > 4096 {
                 let cut = self.seen.len() - 2048;
@@ -701,12 +682,12 @@ impl Ice {
                 self.seen.drain(..cut);
             }
         }
-        if self.cpu.cycles >= self.next_input
-            && self.machine.acia.rx.is_empty()
+        if self.t.cycles() >= self.next_input
+            && self.t.console_ready()
             && let Some(b) = self.pending_input.pop_front()
         {
-            self.machine.acia.rx.push_back(b);
-            self.next_input = self.cpu.cycles + 30_000;
+            self.t.console_put(b);
+            self.next_input = self.t.cycles() + 30_000;
         }
     }
 
@@ -738,15 +719,15 @@ impl Ice {
     }
     /// Step to the next source line, or one instruction without line info.
     fn step_line(&mut self, into: bool) {
-        match self.symbols.line(&self.machine, self.cpu.pc) {
+        match self.symbols.line(self.t.mem(), self.t.pc()) {
             Some((table, l)) => {
                 let goal = Goal::Line {
                     table,
                     src: l.src,
                     line: l.line,
-                    s: self.cpu.s,
+                    s: self.t.sp(),
                     proc_: self.current_proc(),
-                    task: self.machine.mmu().task,
+                    task: self.t.context(),
                     into,
                     left: false,
                 };
@@ -760,7 +741,7 @@ impl Ice {
     /// Run for up to `budget` host time; returns when stopped or out of time.
     pub fn run_slice(&mut self, budget: Duration) {
         let start = Instant::now();
-        let c0 = self.cpu.cycles;
+        let c0 = self.t.cycles();
         let limit = if self.speed == 0 {
             u64::MAX
         } else {
@@ -780,7 +761,7 @@ impl Ice {
                 }
                 self.poll_telnet();
             }
-            if self.cpu.cycles - c0 >= limit {
+            if self.t.cycles() - c0 >= limit {
                 let rest = budget.saturating_sub(start.elapsed());
                 std::thread::sleep(rest);
                 break;
@@ -788,17 +769,19 @@ impl Ice {
         }
     }
     fn poll_telnet(&mut self) {
-        if let Some(t) = &mut self.telnet {
-            let _ = t.poll(&mut self.machine);
+        if let Some(t) = &mut self.telnet
+            && let Some(m) = self.t.multicomp()
+        {
+            let _ = t.poll(m);
         }
     }
 
     fn step_over(&mut self) {
-        let l = self.dis(self.cpu.pc);
+        let l = self.dis(self.t.pc());
         if l.flow == Flow::Call {
             let goal = Goal::At {
-                pc: self.cpu.pc.wrapping_add(l.len),
-                s: self.cpu.s,
+                pc: self.t.pc().wrapping_add(l.len),
+                s: self.t.sp(),
                 proc_: self.current_proc(),
             };
             self.resume(goal);
@@ -849,7 +832,7 @@ impl Ice {
             }
             "/api/out" => {
                 let goal = Goal::Out {
-                    s: self.cpu.s,
+                    s: self.t.sp(),
                     proc_: self.current_proc(),
                 };
                 self.resume(goal);
@@ -875,19 +858,8 @@ impl Ice {
                 let (Some(name), Some(v)) = (p("name"), p("val").and_then(parse_addr)) else {
                     return bad("name/val");
                 };
-                let c = &mut self.cpu;
-                match name.to_ascii_lowercase().as_str() {
-                    "a" => c.a = v as u8,
-                    "b" => c.b = v as u8,
-                    "d" => c.set_d(v),
-                    "dp" => c.dp = v as u8,
-                    "cc" => c.cc = v as u8,
-                    "x" => c.x = v,
-                    "y" => c.y = v,
-                    "u" => c.u = v,
-                    "s" => c.s = v,
-                    "pc" => c.pc = v,
-                    _ => return bad("register"),
+                if !self.t.set_reg(name, v) {
+                    return bad("register");
                 }
                 ok()
             }
@@ -940,7 +912,7 @@ impl Ice {
                             Some("rw") => WatchKind::Access,
                             _ => WatchKind::Write,
                         };
-                        let end = start.saturating_add((len - 1).min(0xffff) as u16);
+                        let end = start.saturating_add((len - 1).min(0xffff)) & self.amask();
                         self.watches.push(Watch { start, end, kind });
                     }
                 }
@@ -980,16 +952,16 @@ impl Ice {
                 http::Response::json(self.state_json())
             }
             "/api/disasm" => {
-                let addr = p("addr").and_then(parse_addr).unwrap_or(self.cpu.pc);
+                let addr = p("addr").and_then(parse_addr).unwrap_or(self.t.pc());
                 let n = p("n").and_then(parse_num).unwrap_or(32).min(256);
                 // Start a few instructions early by resynchronizing from before PC.
-                let back = p("back").and_then(parse_num).unwrap_or(0).min(64) as u16;
+                let back = p("back").and_then(parse_num).unwrap_or(0).min(64);
                 let start = self.resync(addr, back);
                 http::Response::json(self.disasm_json(start, n as usize))
             }
             "/api/mem" => {
                 let addr = p("addr").and_then(parse_addr).unwrap_or(0);
-                let len = p("len").and_then(parse_num).unwrap_or(256).min(4096) as u16;
+                let len = p("len").and_then(parse_num).unwrap_or(256).min(4096);
                 if req.method == "POST" {
                     let Some(hex) = p("val") else {
                         return bad("val");
@@ -1000,7 +972,7 @@ impl Ice {
                         .filter_map(|c| u8::from_str_radix(std::str::from_utf8(c).ok()?, 16).ok())
                         .collect();
                     for (i, b) in bytes.into_iter().enumerate() {
-                        self.machine.poke(addr.wrapping_add(i as u16), b);
+                        self.t.poke(addr.wrapping_add(i as u32), b);
                     }
                     return ok();
                 }
@@ -1013,7 +985,7 @@ impl Ice {
             "/api/console" => {
                 if req.method == "POST" {
                     for &b in &req.body {
-                        self.machine.acia.rx.push_back(match b {
+                        self.t.console_put(match b {
                             10 => 13,
                             127 => 8,
                             _ => b,
@@ -1067,7 +1039,7 @@ impl Ice {
             }
             "/api/resolve" => {
                 self.refresh_symbols();
-                match p("expr").and_then(|e| self.symbols.resolve(&self.machine, e)) {
+                match p("expr").and_then(|e| self.symbols.resolve(self.t.mem(), e)) {
                     Some(a) => http::Response::json(format!("{{\"addr\":{a}}}")),
                     None => bad("expr"),
                 }
@@ -1079,7 +1051,7 @@ impl Ice {
             }
             "/api/stack" => {
                 self.refresh_symbols();
-                let n = p("n").and_then(parse_num).unwrap_or(32).clamp(1, 256) as u16;
+                let n = p("n").and_then(parse_num).unwrap_or(32).clamp(1, 256);
                 http::Response::json(self.stack_json(n))
             }
             "/api/source" => {
@@ -1099,22 +1071,28 @@ impl Ice {
     }
 
     /// Find an instruction boundary about `back` instructions before `addr`.
-    fn resync(&self, addr: u16, back: u16) -> u16 {
+    /// Mask of the CPU's address bits.
+    pub fn amask(&self) -> u32 {
+        ((1u64 << self.t.addr_bits()) - 1) as u32
+    }
+
+    fn resync(&self, addr: u32, back: u32) -> u32 {
+        let mask = self.amask();
         if back == 0 {
             return addr;
         }
         // Try start points and keep one whose decode lands exactly on addr.
         for dist in (back..=back * 4).rev() {
-            let mut a = addr.wrapping_sub(dist);
+            let mut a = addr.wrapping_sub(dist) & mask;
             let mut count = 0;
-            while a != addr && addr.wrapping_sub(a) <= dist {
-                a = a.wrapping_add(self.dis(a).len.max(1));
+            while a != addr && addr.wrapping_sub(a) & mask <= dist {
+                a = a.wrapping_add(self.dis(a).len.max(1)) & mask;
                 count += 1;
             }
             if a == addr && count >= back {
-                let mut a = addr.wrapping_sub(dist);
+                let mut a = addr.wrapping_sub(dist) & mask;
                 for _ in 0..count - back {
-                    a = a.wrapping_add(self.dis(a).len.max(1));
+                    a = a.wrapping_add(self.dis(a).len.max(1)) & mask;
                 }
                 return a;
             }
@@ -1122,15 +1100,15 @@ impl Ice {
         addr
     }
 
-    fn regs_json(r: &Regs) -> String {
-        format!(
-            "{{\"a\":{},\"b\":{},\"dp\":{},\"cc\":{},\"x\":{},\"y\":{},\"u\":{},\"s\":{},\"pc\":{}}}",
-            r.a, r.b, r.dp, r.cc, r.x, r.y, r.u, r.s, r.pc
-        )
+    /// Registers of a traced service request.
+    fn call_regs_json(r: &CpuRegs) -> String {
+        match r {
+            CpuRegs::M6809(r) => Mc6809::snap_json(r),
+            CpuRegs::M68k(r) => target::regs68k_json(&r.d, &r.a, r.sr, r.pc, r.a[7], r.a[7]),
+        }
     }
 
     fn state_json(&self) -> String {
-        let mmu = self.machine.mmu();
         let mut o = String::new();
         let stop = self
             .stop
@@ -1139,25 +1117,16 @@ impl Ice {
             .unwrap_or_default();
         let _ = write!(
             o,
-            "{{\"running\":{},\"stop\":{},\"cycles\":{},\"speed\":{},\"wait\":{},\"regs\":{},",
+            "{{\"cpu\":\"{}\",\"running\":{},\"stop\":{},\"cycles\":{},\"speed\":{},\"wait\":{},\"regs\":{},",
+            T::CPU,
             self.running,
             json_str(&stop),
-            self.cpu.cycles,
+            self.t.cycles(),
             self.speed,
-            self.cpu.waiting(),
-            Self::regs_json(&Regs::of(&self.cpu))
+            self.t.wait_state(),
+            self.t.regs_json()
         );
-        let maps: Vec<String> = mmu.maps.iter().map(|m| m.to_string()).collect();
-        let _ = write!(
-            o,
-            "\"mmu\":{{\"enabled\":{},\"task\":{},\"romdis\":{},\"frt\":{},\"maps\":[{}]}},\"ram\":{},",
-            mmu.enabled,
-            mmu.task,
-            mmu.rom_disabled,
-            mmu.fixed_top,
-            maps.join(","),
-            self.machine.ram.len()
-        );
+        let _ = write!(o, "\"mmu\":{},\"ram\":{},", self.t.mmu_json(), self.t.ram_len());
         let bps: Vec<String> = self.breakpoints.iter().map(|a| a.to_string()).collect();
         let sym_bps: Vec<String> = self
             .sym_bps
@@ -1166,7 +1135,7 @@ impl Ice {
                 let at: Vec<String> = b
                     .targets
                     .iter()
-                    .filter_map(|t| self.symbols.logical(&self.machine, *t))
+                    .filter_map(|t| self.symbols.logical(self.t.mem(), *t))
                     .map(|a| a.to_string())
                     .collect();
                 format!(
@@ -1215,7 +1184,7 @@ impl Ice {
         );
         match self.os() {
             Some(os) => {
-                let m = &self.machine;
+                let m = self.t.mem();
                 // OS-specific fields (e.g. level and queues), then the trace counters.
                 let mut fields: Vec<String> = os
                     .summary(m)
@@ -1238,8 +1207,8 @@ impl Ice {
         o
     }
 
-    fn disasm_json(&self, start: u16, n: usize) -> String {
-        let m = &self.machine;
+    fn disasm_json(&self, start: u32, n: usize) -> String {
+        let m = self.t.mem();
         let mut a = start;
         let mut items = Vec::new();
         for _ in 0..n {
@@ -1260,7 +1229,7 @@ impl Ice {
                 _ => None,
             };
             let src = match sym.line(m, a) {
-                Some((ti, r)) if r.off == sym.locate(m, a).map_or(u16::MAX, |x| x.1) => {
+                Some((ti, r)) if r.off == sym.locate(m, a).map_or(u32::MAX, |x| x.1) => {
                     let s = &sym.tables[ti].sources[r.src];
                     let text = s.text.get(&r.line).map_or("", String::as_str);
                     format!(
@@ -1285,7 +1254,7 @@ impl Ice {
                 src,
                 l.svc
             ));
-            a = a.wrapping_add(l.len.max(1));
+            a = a.wrapping_add(l.len.max(1)) & self.amask();
         }
         format!("{{\"lines\":[{}]}}", items.join(","))
     }
@@ -1324,13 +1293,14 @@ impl Ice {
         format!("{{\"tables\":[{}]}}", tables.join(","))
     }
 
-    fn stack_json(&self, n: u16) -> String {
-        let m = &self.machine;
-        let s = self.cpu.s;
+    fn stack_json(&self, n: u32) -> String {
+        let m = self.t.mem();
+        let s = self.t.sp();
+        let step = self.t.ret_size();
         let items: Vec<String> = (0..n)
             .map(|i| {
-                let at = s.wrapping_add(i * 2);
-                let w = m.peek16(at);
+                let at = s.wrapping_add(i * step) & self.amask();
+                let w = self.read_ret(at);
                 let ret = self.is_return_address(w);
                 let label = self.symbols.label(m, w);
                 format!(
@@ -1351,23 +1321,23 @@ impl Ice {
             .collect();
         format!(
             "{{\"s\":{s},\"pc\":{},\"where\":{},\"words\":[{}],\"chain\":[{}]}}",
-            self.cpu.pc,
-            self.symbols.label(m, self.cpu.pc).map_or("null".into(), |l| json_str(&l)),
+            self.t.pc(),
+            self.symbols.label(m, self.t.pc()).map_or("null".into(), |l| json_str(&l)),
             items.join(","),
             chain.join(",")
         )
     }
 
-    fn mem_json(&self, addr: u16, len: u16, space: &str) -> String {
-        let m = &self.machine;
+    fn mem_json(&self, addr: u32, len: u32, space: &str) -> String {
+        let m = self.t.mem();
         let bytes: Vec<u8> = match space {
             "phys" => {
                 // Physical addresses use the 16-bit address as a page within
                 // the bank given by `bank`.
                 (0..len)
                     .map(|i| {
-                        m.ram
-                            .get(usize::from(addr) + usize::from(i))
+                        m.ram()
+                            .get(addr as usize + i as usize)
                             .copied()
                             .unwrap_or(0xff)
                     })
@@ -1379,7 +1349,7 @@ impl Ice {
                     .map(|i| os.read_space(m, space, addr.wrapping_add(i)).unwrap_or(0xff))
                     .collect(),
                 None if space == "sys" => (0..len).map(|i| m.peek(addr.wrapping_add(i))).collect(),
-                _ if space == "sys" || space.starts_with("pid") => vec![0xff; usize::from(len)],
+                _ if space == "sys" || space.starts_with("pid") => vec![0xff; len as usize],
                 _ => (0..len).map(|i| m.peek(addr.wrapping_add(i))).collect(),
             },
         };
@@ -1394,14 +1364,14 @@ impl Ice {
             .iter()
             .skip(skip)
             .map(|t| {
-                let pc = t.regs.pc;
+                let pc = T::snap_pc(&t.regs);
                 let b = t.bytes;
-                let l = self.dis_with(&|a| b.get(usize::from(a.wrapping_sub(pc))).copied().unwrap_or(0), pc);
+                let l = self.dis_with(&|a| b.get(a.wrapping_sub(pc) as usize).copied().unwrap_or(0), pc);
                 format!(
                     "{{\"cycle\":{},\"pid\":{},\"regs\":{},\"text\":{}}}",
                     t.cycle,
                     t.pid,
-                    Self::regs_json(&t.regs),
+                    T::snap_json(&t.regs),
                     json_str(&l.text)
                 )
             })
@@ -1414,7 +1384,7 @@ impl Ice {
             return "{\"procs\":[]}".into();
         };
         let items: Vec<String> = os
-            .processes(&self.machine)
+            .processes(self.t.mem())
             .iter()
             .map(|p| {
                 let mut f = vec![
@@ -1434,7 +1404,7 @@ impl Ice {
             return "{\"modules\":[]}".into();
         };
         let items: Vec<String> = os
-            .images(&self.machine)
+            .images(self.t.mem())
             .iter()
             .map(|m| {
                 let mut f = vec![format!("\"name\":{}", json_str(&m.name))];
@@ -1447,17 +1417,19 @@ impl Ice {
 
     fn memmap_json(&self) -> String {
         match self.os() {
-            Some(os) => os.memory_map(&self.machine).to_string(),
+            Some(os) => os.memory_map(self.t.mem()).to_string(),
             None => "{\"unit\":0,\"map\":[]}".into(),
         }
     }
 
     fn calls_json(&self, since: u64, limit: usize, filter: &dyn Fn(&osmon::Call) -> bool) -> String {
-        let generic = |r: &Regs| {
-            format!(
-                "A=${:02X} B=${:02X} X=${:04X} Y=${:04X} U=${:04X}",
-                r.a, r.b, r.x, r.y, r.u
-            )
+        // Kernel-internal requests are shown with their raw registers.
+        let generic = |r: &CpuRegs| match r {
+            CpuRegs::M6809(r) => format!("A=${:02X} B=${:02X} X=${:04X} Y=${:04X} U=${:04X}", r.a, r.b, r.x, r.y, r.u),
+            CpuRegs::M68k(r) => format!(
+                "D0=${:08X} D1=${:08X} A0=${:08X} A1=${:08X}",
+                r.d[0], r.d[1], r.a[0], r.a[1]
+            ),
         };
         let items: Vec<String> = self
             .tracer
@@ -1478,8 +1450,8 @@ impl Ice {
                     json_str(&self.os.service_name(c.code)),
                     c.system,
                     c.depth,
-                    Self::regs_json(&c.inp),
-                    c.out.as_ref().map_or("null".into(), Self::regs_json),
+                    Self::call_regs_json(&c.inp),
+                    c.out.as_ref().map_or("null".into(), Self::call_regs_json),
                     json_str(&if c.args.is_empty() && c.system { generic(&c.inp) } else { c.args.clone() }),
                     json_str(&if c.result.is_empty() && c.out.is_some() { "OK".to_string() } else { c.result.clone() }),
                     c.error.map_or("null".into(), |e| e.to_string()),

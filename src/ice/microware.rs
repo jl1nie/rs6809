@@ -22,7 +22,7 @@ use std::collections::HashMap;
 
 #[derive(Debug, Clone)]
 pub struct Insn {
-    pub off: u16,
+    pub off: u32,
     pub label: Option<String>,
     pub op: String,
     pub operand: String,
@@ -41,7 +41,7 @@ pub struct DataLabel {
     pub name: String,
     pub kind: DataKind,
     /// Section-relative offset.
-    pub off: u16,
+    pub off: u32,
     /// The C source line being compiled when the label was emitted.
     pub line: Option<(String, u32)>,
 }
@@ -49,14 +49,14 @@ pub struct DataLabel {
 /// Section bases from the link map: code, idat, udat, idpd, udpd.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Bases {
-    pub code: u16,
-    pub idat: u16,
-    pub udat: u16,
-    pub idpd: u16,
-    pub udpd: u16,
+    pub code: u32,
+    pub idat: u32,
+    pub udat: u32,
+    pub idpd: u32,
+    pub udpd: u32,
 }
 impl Bases {
-    fn data(&self, k: DataKind) -> u16 {
+    fn data(&self, k: DataKind) -> u32 {
         match k {
             DataKind::Udat => self.udat,
             DataKind::Idat => self.idat,
@@ -69,21 +69,21 @@ impl Bases {
 pub struct Input<'a> {
     pub insns: &'a [Insn],
     /// Function name and start offset, from `ttl` + label.
-    pub functions: &'a [(String, u16)],
+    pub functions: &'a [(String, u32)],
     /// End of the code section (table offset).
-    pub code_end: u16,
+    pub code_end: u32,
     pub data: &'a [DataLabel],
     pub bases: Bases,
     /// Exported data symbols from the map: name → Y offset.
-    pub map_data: &'a HashMap<String, u16>,
+    pub map_data: &'a HashMap<String, u32>,
     pub program: CProgram,
 }
 
 /// Runtime routines that pop their stack argument (checked: `_lmove`).
 /// Unknown effects are caught at run time by validating the return address.
-const CALLEE_POPS: [(&str, i16); 1] = [("_lmove", 2)];
+const CALLEE_POPS: [(&str, i32); 1] = [("_lmove", 2)];
 
-fn reg_bytes(list: &str) -> (i16, bool) {
+fn reg_bytes(list: &str) -> (i32, bool) {
     let mut n = 0;
     let mut pc = false;
     for r in list.split(',') {
@@ -101,18 +101,18 @@ fn reg_bytes(list: &str) -> (i16, bool) {
 }
 
 /// Frame-base depth (bytes from S up to F) before each instruction.
-fn frame_depths(insns: &[Insn], start: u16, end: u16) -> Vec<(u16, i16)> {
+fn frame_depths(insns: &[Insn], start: u32, end: u32) -> Vec<(u32, i32)> {
     let body: Vec<&Insn> = insns
         .iter()
         .filter(|i| i.off >= start && i.off < end)
         .collect();
-    let local: HashMap<&str, u16> = body
+    let local: HashMap<&str, u32> = body
         .iter()
         .filter_map(|i| i.label.as_deref().map(|l| (l.trim_end_matches(':'), i.off)))
         .collect();
-    let mut at_label: HashMap<String, i16> = HashMap::new();
+    let mut at_label: HashMap<String, i32> = HashMap::new();
     let mut out = Vec::new();
-    let mut depth: i16 = if body
+    let mut depth: i32 = if body
         .first()
         .is_some_and(|i| i.op == "pshs" && i.operand.eq_ignore_ascii_case("u"))
     {
@@ -146,7 +146,7 @@ fn frame_depths(insns: &[Insn], start: u16, end: u16) -> Vec<(u16, i16)> {
                 }
             }
             "leas" => {
-                if let Some(k) = s.strip_suffix(",s").and_then(|k| k.parse::<i16>().ok()) {
+                if let Some(k) = s.strip_suffix(",s").and_then(|k| k.parse::<i32>().ok()) {
                     depth -= k;
                 }
             }
@@ -245,7 +245,7 @@ impl Layout<'_> {
                     (Some(c), Some(sz)) => {
                         let c = c + sz;
                         cum = Some(c);
-                        (Loc::Frame(-(c as i16)), VarKind::Local)
+                        (Loc::Frame(-i32::from(c)), VarKind::Local)
                     }
                     _ => {
                         cum = None;
@@ -277,7 +277,7 @@ pub fn build(input: Input) -> DebugInfo {
         ..Default::default()
     };
     let mut layout_used = vec![false; input.data.len()];
-    let mut starts: Vec<(String, u16)> = input.functions.to_vec();
+    let mut starts: Vec<(String, u32)> = input.functions.to_vec();
     starts.sort_by_key(|f| f.1);
     for (i, (name, start)) in starts.iter().enumerate() {
         let end = starts.get(i + 1).map_or(input.code_end, |n| n.1);
@@ -313,9 +313,9 @@ pub fn build(input: Input) -> DebugInfo {
                     match (off, slot) {
                         // A widened char keeps its value in the low byte.
                         (Some(o), Some(_)) if matches!(p.ty, Type::Char { .. }) => {
-                            Loc::Frame(o as i16 + 1)
+                            Loc::Frame(i32::from(o) + 1)
                         }
-                        (Some(o), Some(_)) => Loc::Frame(o as i16),
+                        (Some(o), Some(_)) => Loc::Frame(i32::from(o)),
                         _ => Loc::Unknown("引数の位置が分かりません"),
                     }
                 };
@@ -387,7 +387,7 @@ pub fn build(input: Input) -> DebugInfo {
 mod tests {
     use super::*;
 
-    fn insn(off: u16, label: Option<&str>, op: &str, operand: &str) -> Insn {
+    fn insn(off: u32, label: Option<&str>, op: &str, operand: &str) -> Insn {
         Insn {
             off,
             label: label.map(str::to_string),
@@ -420,7 +420,7 @@ mod tests {
             insn(0xc1, None, "leas", "21,s"),
             insn(0xc4, None, "puls", "u,pc"),
         ];
-        let d: HashMap<u16, i16> = frame_depths(&code, 0x1d, 0xc6).into_iter().collect();
+        let d: HashMap<u32, i32> = frame_depths(&code, 0x1d, 0xc6).into_iter().collect();
         assert_eq!(d[&0x1d], -2);
         assert_eq!(d[&0x25], 0);
         assert_eq!(d[&0x34], 21);

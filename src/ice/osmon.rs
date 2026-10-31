@@ -9,6 +9,90 @@ use super::json::Json;
 use crate::{Cpu, Machine};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 
+/// Memory as the OS layer and symbols read it: CPU (logical) addresses,
+/// their physical RAM location, and RAM itself.
+pub trait Mem {
+    /// Read without side effects at a CPU address.
+    fn peek(&self, addr: u32) -> u8;
+    fn peek16(&self, addr: u32) -> u16 {
+        u16::from_be_bytes([self.peek(addr), self.peek(addr.wrapping_add(1))])
+    }
+    fn peek32(&self, addr: u32) -> u32 {
+        u32::from(self.peek16(addr)) << 16 | u32::from(self.peek16(addr.wrapping_add(2)))
+    }
+    /// Physical RAM index of a CPU address under the current mapping.
+    fn translate(&self, addr: u32) -> Option<usize>;
+    /// The CPU address that maps a physical RAM index now, if any.
+    fn logical(&self, phys: usize) -> Option<u32>;
+    fn ram(&self) -> &[u8];
+}
+
+impl Mem for Machine {
+    fn peek(&self, addr: u32) -> u8 {
+        Machine::peek(self, addr as u16)
+    }
+    fn translate(&self, addr: u32) -> Option<usize> {
+        Machine::translate(self, addr as u16)
+    }
+    fn logical(&self, phys: usize) -> Option<u32> {
+        // Eight 8 KiB slots under the current MMU task.
+        (0..8u16).find_map(|slot| {
+            let base = Machine::translate(self, slot << 13)?;
+            (phys >= base && phys < base + 8192).then(|| u32::from(slot << 13) | (phys - base) as u32)
+        })
+    }
+    fn ram(&self) -> &[u8] {
+        &self.ram
+    }
+}
+
+/// Registers at a service request, by CPU.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CpuRegs {
+    M6809(Regs),
+    M68k(Regs68k),
+}
+impl CpuRegs {
+    /// The 6809 registers (zero for another CPU).
+    pub fn m6809(&self) -> Regs {
+        match self {
+            CpuRegs::M6809(r) => *r,
+            CpuRegs::M68k(_) => Regs::default(),
+        }
+    }
+}
+
+/// 68000 registers at a service request.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Regs68k {
+    pub d: [u32; 8],
+    pub a: [u32; 8],
+    pub sr: u16,
+    pub pc: u32,
+}
+
+/// The CPU state the tracer needs at an instruction boundary.
+pub struct CpuState {
+    pub pc: u32,
+    pub sp: u32,
+    pub cycles: u64,
+    pub regs: CpuRegs,
+}
+impl CpuState {
+    pub fn of6809(c: &Cpu) -> Self {
+        Self {
+            pc: u32::from(c.pc),
+            sp: u32::from(c.s),
+            cycles: c.cycles,
+            regs: CpuRegs::M6809(Regs::of(c)),
+        }
+    }
+}
+
+fn hint(pc: u32) -> usize {
+    (pc & 0xffff) as usize
+}
+
 /// CPU registers at a service request (entry or return).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Regs {
@@ -46,7 +130,7 @@ impl Regs {
 pub struct Svc {
     pub code: u8,
     /// Instruction length: the request returns to PC + len.
-    pub len: u16,
+    pub len: u32,
     /// Never returns to the caller (exit, chain, ...).
     pub no_return: bool,
 }
@@ -56,7 +140,7 @@ pub struct Process {
     pub id: u8,
     pub parent: u8,
     /// The OS's handle (e.g. descriptor address), as returned by `current`.
-    pub key: u16,
+    pub key: u32,
     pub name: String,
     /// `running`, `-` or a queue key from `info().queues`.
     pub queue: &'static str,
@@ -70,7 +154,7 @@ pub struct Image {
     pub name: String,
     pub fields: Vec<(&'static str, Json)>,
     /// (physical start, length, image offset of the start)
-    pub chunks: Vec<(usize, usize, u16)>,
+    pub chunks: Vec<(usize, usize, u32)>,
 }
 
 #[derive(Debug, Clone)]
@@ -86,15 +170,15 @@ pub type PathNames = HashMap<(u8, u8), String>;
 
 pub trait OsMonitor: Send {
     /// Look for the OS in memory; true once it is running.
-    fn detect(&mut self, m: &Machine) -> bool;
+    fn detect(&mut self, m: &dyn Mem) -> bool;
     /// Name, terms, process columns, queue names and memory-map kind for the UI.
     fn info(&self) -> Json;
     /// OS-specific fields of the state summary (e.g. level, queues).
-    fn summary(&self, m: &Machine) -> Vec<(&'static str, Json)>;
+    fn summary(&self, m: &dyn Mem) -> Vec<(&'static str, Json)>;
 
     /// The service request at `pc`, if the instruction is one. Also used
     /// before the OS is detected, by the disassembler.
-    fn svc_at(&self, read: &dyn Fn(u16) -> u8, pc: u16) -> Option<Svc>;
+    fn svc_at(&self, read: &dyn Fn(u32) -> u8, pc: u32) -> Option<Svc>;
     /// Leading bytes every service request starts with (OS-9: `$10 $3F`),
     /// so the per-instruction check stays cheap; empty to always ask.
     fn svc_prefix(&self) -> &'static [u8] {
@@ -111,8 +195,8 @@ pub trait OsMonitor: Send {
     fn image_calls(&self) -> &'static [u8];
 
     /// The running process (an OS handle; 0 for none).
-    fn current(&self, m: &Machine) -> u16;
-    fn pid_of(&self, m: &Machine, key: u16) -> u8;
+    fn current(&self, m: &dyn Mem) -> u32;
+    fn pid_of(&self, m: &dyn Mem, key: u32) -> u8;
     /// Physical RAM address of the big-endian 16-bit `current` handle,
     /// when it has a fixed home (OS-9: `D.Proc`). Lets the tracer follow
     /// process switches with a memory read per instruction.
@@ -120,19 +204,18 @@ pub trait OsMonitor: Send {
         None
     }
     /// The process is in system state (requests are kernel-internal).
-    fn in_system(&self, m: &Machine, key: u16) -> bool;
-    fn describe_entry(&self, m: &Machine, paths: &PathNames, pid: u8, code: u8, r: &Regs)
-    -> String;
-    fn describe_exit(&self, m: &Machine, call: &Call, r: &Regs) -> String;
-    fn error_of(&self, r: &Regs) -> Option<u8>;
+    fn in_system(&self, m: &dyn Mem, key: u32) -> bool;
+    fn describe_entry(&self, m: &dyn Mem, paths: &PathNames, pid: u8, code: u8, r: &CpuRegs) -> String;
+    fn describe_exit(&self, m: &dyn Mem, call: &Call, r: &CpuRegs) -> String;
+    fn error_of(&self, r: &CpuRegs) -> Option<u8>;
     /// Learn from a completed user request (e.g. names of opened paths).
-    fn learn(&self, call: &Call, out: &Regs, pid: u8, paths: &mut PathNames);
+    fn learn(&self, call: &Call, out: &CpuRegs, pid: u8, paths: &mut PathNames);
 
-    fn processes(&self, m: &Machine) -> Vec<Process>;
-    fn images(&self, m: &Machine) -> Vec<Image>;
-    fn memory_map(&self, m: &Machine) -> Json;
+    fn processes(&self, m: &dyn Mem) -> Vec<Process>;
+    fn images(&self, m: &dyn Mem) -> Vec<Image>;
+    fn memory_map(&self, m: &dyn Mem) -> Json;
     /// Read an OS address space other than the CPU's (`sys`, `pidN`).
-    fn read_space(&self, m: &Machine, space: &str, addr: u16) -> Option<u8>;
+    fn read_space(&self, m: &dyn Mem, space: &str, addr: u32) -> Option<u8>;
 }
 
 /// One traced service request, filled in on entry and completed on return.
@@ -151,8 +234,8 @@ pub struct Call {
     /// Kernel-internal requests made while this user call ran, by code.
     /// Kept even after the individual internal calls leave the log.
     pub inner: Vec<(u8, u32)>,
-    pub inp: Regs,
-    pub out: Option<Regs>,
+    pub inp: CpuRegs,
+    pub out: Option<CpuRegs>,
     pub args: String,
     pub result: String,
     pub error: Option<u8>,
@@ -171,8 +254,8 @@ struct Pending {
     index: u64,
     /// The outermost user-state call this request runs on behalf of.
     root: u64,
-    ret_pc: u16,
-    s: u16,
+    ret_pc: u32,
+    s: u32,
     pid: u8,
 }
 
@@ -186,7 +269,7 @@ pub struct Tracer {
     pub version: u64,
     pending: Vec<Pending>,
     ret_hint: Vec<u8>,
-    last_proc: u16,
+    last_proc: u32,
     /// The ID of `last_proc`, read when it became current.
     last_pid: u8,
     paths: PathNames,
@@ -236,13 +319,13 @@ impl Tracer {
     }
     /// Call before executing the instruction at `cpu.pc`. Returns the new
     /// call id when the instruction is a service request.
-    pub fn before(&mut self, m: &Machine, os: &dyn OsMonitor, cpu: &Cpu) -> Option<u64> {
+    pub fn before(&mut self, m: &dyn Mem, os: &dyn OsMonitor, cpu: &CpuState) -> Option<u64> {
         let svc = os.svc_at(&|a| m.peek(a), cpu.pc)?;
         let code = svc.code;
         let desc = os.current(m);
         let pid = os.pid_of(m, desc);
         let system = desc != 0 && os.in_system(m, desc);
-        let inp = Regs::of(cpu);
+        let inp = cpu.regs;
         // Kernel-internal requests are frequent; their registers are formatted on demand.
         let args = if system {
             String::new()
@@ -258,7 +341,7 @@ impl Tracer {
                 if p.pid != pid {
                     return true;
                 }
-                ret_hint[usize::from(p.ret_pc)] -= 1;
+                ret_hint[hint(p.ret_pc)] -= 1;
                 if let Some(c) = calls.get_mut(&p.index) {
                     c.no_return = true;
                 }
@@ -314,24 +397,24 @@ impl Tracer {
             if let Some(i) = self
                 .pending
                 .iter()
-                .position(|p| p.ret_pc == ret_pc && p.s == cpu.s && p.pid == pid)
+                .position(|p| p.ret_pc == ret_pc && p.s == cpu.sp && p.pid == pid)
             {
                 let old = self.pending.remove(i);
-                self.ret_hint[usize::from(old.ret_pc)] -= 1;
+                self.ret_hint[hint(old.ret_pc)] -= 1;
                 if let Some(c) = self.get_mut(old.index) {
                     c.no_return = true;
                 }
             }
             if self.pending.len() >= 256 {
                 let old = self.pending.remove(0);
-                self.ret_hint[usize::from(old.ret_pc)] -= 1;
+                self.ret_hint[hint(old.ret_pc)] -= 1;
             }
-            self.ret_hint[usize::from(ret_pc)] += 1;
+            self.ret_hint[hint(ret_pc)] += 1;
             self.pending.push(Pending {
                 index: id,
                 root,
                 ret_pc,
-                s: cpu.s,
+                s: cpu.sp,
                 pid,
             });
         }
@@ -339,7 +422,7 @@ impl Tracer {
     }
 
     /// The running process and its ID as of the last instruction.
-    pub fn current(&self) -> (u16, u8) {
+    pub fn current(&self) -> (u32, u8) {
         (self.last_proc, self.last_pid)
     }
 
@@ -347,23 +430,37 @@ impl Tracer {
     /// context switch. `slot` is `os.current_slot()`.
     pub fn after(
         &mut self,
-        m: &Machine,
+        m: &dyn Mem,
         os: &dyn OsMonitor,
         slot: Option<usize>,
-        cpu: &Cpu,
+        cpu: &CpuState,
+    ) -> (Option<u64>, Option<Switch>) {
+        self.after_with(m, os, slot, cpu.pc, cpu.sp, cpu.cycles, || cpu.regs)
+    }
+    /// `after` with the registers read only when a request returns.
+    #[allow(clippy::too_many_arguments)]
+    pub fn after_with(
+        &mut self,
+        m: &dyn Mem,
+        os: &dyn OsMonitor,
+        slot: Option<usize>,
+        pc: u32,
+        sp: u32,
+        cycles: u64,
+        regs: impl FnOnce() -> CpuRegs,
     ) -> (Option<u64>, Option<Switch>) {
         let mut switch = None;
         let desc = match slot {
-            Some(a) => u16::from_be_bytes([
-                m.ram.get(a).copied().unwrap_or(0),
-                m.ram.get(a + 1).copied().unwrap_or(0),
-            ]),
+            Some(a) => {
+                let ram = m.ram();
+                u32::from(u16::from_be_bytes([ram.get(a).copied().unwrap_or(0), ram.get(a + 1).copied().unwrap_or(0)]))
+            }
             None => os.current(m),
         };
         if desc != self.last_proc {
             let to = os.pid_of(m, desc);
             let s = Switch {
-                cycle: cpu.cycles,
+                cycle: cycles,
                 from: os.pid_of(m, self.last_proc),
                 to,
             };
@@ -377,20 +474,20 @@ impl Tracer {
                 switch = Some(s);
             }
         }
-        if self.ret_hint[usize::from(cpu.pc)] == 0 {
+        if self.ret_hint[hint(pc)] == 0 {
             return (None, switch);
         }
         let pid = self.last_pid;
         let Some(i) = self
             .pending
             .iter()
-            .rposition(|p| p.ret_pc == cpu.pc && p.s == cpu.s && p.pid == pid)
+            .rposition(|p| p.ret_pc == pc && p.s == sp && p.pid == pid)
         else {
             return (None, switch);
         };
         let p = self.pending.remove(i);
-        self.ret_hint[usize::from(p.ret_pc)] -= 1;
-        let out = Regs::of(cpu);
+        self.ret_hint[hint(p.ret_pc)] -= 1;
+        let out = regs();
         let Some(call) = self.calls.get(&p.index) else {
             return (None, switch);
         };
@@ -408,7 +505,7 @@ impl Tracer {
         self.version += 1;
         let version = self.version;
         if let Some(c) = self.get_mut(p.index) {
-            c.end = Some(cpu.cycles);
+            c.end = Some(cycles);
             c.out = Some(out);
             c.result = result;
             c.error = error;
@@ -418,5 +515,82 @@ impl Tracer {
     }
     pub fn call(&self, id: u64) -> Option<&Call> {
         self.calls.get(&id)
+    }
+}
+
+/// No operating system: a bare program. Nothing is ever detected, so the
+/// OS views stay empty and no service requests are traced.
+#[derive(Default)]
+pub struct NoOs;
+
+impl OsMonitor for NoOs {
+    fn detect(&mut self, _: &dyn Mem) -> bool {
+        false
+    }
+    fn info(&self) -> Json {
+        super::json::obj([("os", "none".into()), ("name", "OSなし".into()), ("title", "OSなし".into())])
+    }
+    fn summary(&self, _: &dyn Mem) -> Vec<(&'static str, Json)> {
+        Vec::new()
+    }
+    fn svc_at(&self, _: &dyn Fn(u32) -> u8, _: u32) -> Option<Svc> {
+        None
+    }
+    /// Longer than the bytes fetched per instruction, so it never matches
+    /// and `svc_at` is not asked.
+    fn svc_prefix(&self) -> &'static [u8] {
+        &[0; 11]
+    }
+    fn svc_mnemonic(&self) -> &'static str {
+        "SVC"
+    }
+    fn service_name(&self, code: u8) -> String {
+        format!("${code:02X}")
+    }
+    fn service_code(&self, _: &str) -> Option<u8> {
+        None
+    }
+    fn explain(&self, _: u8) -> &'static str {
+        ""
+    }
+    fn error_name(&self, code: u8) -> String {
+        format!("${code:02X}")
+    }
+    fn services(&self) -> Vec<Service> {
+        Vec::new()
+    }
+    fn image_calls(&self) -> &'static [u8] {
+        &[]
+    }
+    fn current(&self, _: &dyn Mem) -> u32 {
+        0
+    }
+    fn pid_of(&self, _: &dyn Mem, _: u32) -> u8 {
+        0
+    }
+    fn in_system(&self, _: &dyn Mem, _: u32) -> bool {
+        false
+    }
+    fn describe_entry(&self, _: &dyn Mem, _: &PathNames, _: u8, _: u8, _: &CpuRegs) -> String {
+        String::new()
+    }
+    fn describe_exit(&self, _: &dyn Mem, _: &Call, _: &CpuRegs) -> String {
+        String::new()
+    }
+    fn error_of(&self, _: &CpuRegs) -> Option<u8> {
+        None
+    }
+    fn learn(&self, _: &Call, _: &CpuRegs, _: u8, _: &mut PathNames) {}
+    fn processes(&self, _: &dyn Mem) -> Vec<Process> {
+        Vec::new()
+    }
+    fn images(&self, _: &dyn Mem) -> Vec<Image> {
+        Vec::new()
+    }
+    fn memory_map(&self, _: &dyn Mem) -> Json {
+        Json::Null
+    }
+    fn read_space(&self, _: &dyn Mem, _: &str, _: u32) -> Option<u8> {
+        None
     }
 }

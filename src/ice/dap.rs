@@ -5,8 +5,8 @@
 use super::debuginfo::{Place, encode};
 use super::frames::VarRef;
 use super::json::{Json, base64, obj, unbase64};
-use super::osmon::Regs;
-use super::symbols::Target;
+use super::symbols::Target as BpTarget;
+use super::target::Target;
 use super::{BpSpec, Goal, Ice, Inbox, Stop};
 use std::collections::HashMap;
 use std::io::{self, BufRead, BufReader, Write};
@@ -138,23 +138,23 @@ impl Hub {
     }
 }
 
-fn hex_ref(a: u16) -> Json {
+fn hex_ref(a: u32) -> Json {
     format!("0x{a:04X}").into()
 }
-fn parse_ref(v: &Json) -> Option<u16> {
+fn parse_ref(v: &Json) -> Option<u32> {
     let s = v.str()?.trim();
     let h = s
         .strip_prefix("0x")
         .or_else(|| s.strip_prefix("0X"))
         .or_else(|| s.strip_prefix('$'))?;
-    u32::from_str_radix(h, 16).ok().map(|v| v as u16)
+    u32::from_str_radix(h, 16).ok()
 }
-fn parse_value(s: &str) -> Option<u16> {
+fn parse_value(s: &str) -> Option<u32> {
     let s = s.trim();
     if let Some(h) = s.strip_prefix('$').or_else(|| s.strip_prefix("0x")) {
-        return u32::from_str_radix(h, 16).ok().map(|v| v as u16);
+        return u32::from_str_radix(h, 16).ok();
     }
-    s.parse::<i32>().ok().map(|v| v as u16)
+    s.parse::<i64>().ok().map(|v| v as u32)
 }
 fn cc_flags(cc: u8) -> String {
     "EFHINZVC"
@@ -167,7 +167,7 @@ fn source_ref(table: usize, src: usize) -> i64 {
     (table as i64) * 65536 + src as i64 + 1
 }
 
-impl Ice {
+impl<T: Target> Ice<T> {
     /// Handle one DAP message from session `id`; replies go to `out`.
     pub fn dap_message(&mut self, id: u32, msg: &Json, out: Sender<String>) {
         if !self.dap.sessions.iter().any(|s| s.id == id) {
@@ -256,14 +256,14 @@ impl Ice {
     }
 
     /// Breakpoint ids that stop at this PC.
-    pub(super) fn hit_ids(&self, pc: u16) -> Vec<u32> {
-        let phys = self.machine.translate(pc);
+    pub(super) fn hit_ids(&self, pc: u32) -> Vec<u32> {
+        let phys = self.t.mem().translate(pc);
         self.sym_bps
             .iter()
             .filter(|b| {
                 b.targets.iter().any(|t| match *t {
-                    Target::Logical(a) => a == pc,
-                    Target::Phys(p) => Some(p) == phys,
+                    BpTarget::Logical(a) => a == pc,
+                    BpTarget::Phys(p) => Some(p) == phys,
                 })
             })
             .map(|b| b.id)
@@ -290,8 +290,8 @@ impl Ice {
     }
 
     /// Source location of an address, as (source, line).
-    fn dap_location(&self, addr: u16) -> Option<(Json, u32)> {
-        let (ti, l) = self.symbols.line(&self.machine, addr)?;
+    fn dap_location(&self, addr: u32) -> Option<(Json, u32)> {
+        let (ti, l) = self.symbols.line(self.t.mem(), addr)?;
         Some((self.dap_source(ti, l.src), l.line))
     }
 
@@ -415,7 +415,7 @@ impl Ice {
                     let Some(a) = parse_ref(b.get("instructionReference")) else {
                         continue;
                     };
-                    let a = a.wrapping_add(b.get("offset").int().unwrap_or(0) as u16);
+                    let a = a.wrapping_add(b.get("offset").int().unwrap_or(0) as u32);
                     let bid = self.add_sym_bp(id, BpSpec::Addr(a));
                     out.push(self.dap_bp(bid, None));
                 }
@@ -435,9 +435,9 @@ impl Ice {
             "threads" => {
                 let mut name = "6809".to_string();
                 if let Some(os) = self.os() {
-                    let cur = os.current(&self.machine);
+                    let cur = os.current(self.t.mem());
                     let osname = os.info().get("name").str().unwrap_or("OS").to_string();
-                    if let Some(p) = os.processes(&self.machine).into_iter().find(|p| p.key == cur) {
+                    if let Some(p) = os.processes(self.t.mem()).into_iter().find(|p| p.key == cur) {
                         name = format!("6809 ({osname} プロセス{} {})", p.id, p.name);
                     }
                 }
@@ -449,13 +449,13 @@ impl Ice {
             "stackTrace" => {
                 self.refresh_symbols();
                 let mut frames = Vec::new();
-                let pcs: Vec<u16> = self.frames(32).iter().map(|f| f.pc).collect();
+                let pcs: Vec<u32> = self.frames(32).iter().map(|f| f.pc).collect();
                 for (i, &pc) in pcs.iter().enumerate() {
                     // A return address belongs to the line of its call.
                     let at = if i == 0 { pc } else { pc.wrapping_sub(1) };
                     let name = self
                         .symbols
-                        .label(&self.machine, at)
+                        .label(self.t.mem(), at)
                         .unwrap_or_else(|| format!("${pc:04X}"));
                     let (source, line) = self.dap_location(at).unwrap_or((Json::Null, 0));
                     frames.push(obj([
@@ -549,13 +549,13 @@ impl Ice {
                 match place {
                     Place::Mem(a) => {
                         for (i, b) in bytes.iter().enumerate() {
-                            self.machine.poke(a.wrapping_add(i as u16), *b);
+                            self.t.poke(a.wrapping_add(i as u32), *b);
                         }
                     }
                     Place::Value(_) => {
                         // A register variable of the current frame.
-                        let v = bytes.iter().fold(0u16, |acc, b| acc << 8 | u16::from(*b));
-                        self.cpu.u = v;
+                        let v = bytes.iter().fold(0u32, |acc, b| acc << 8 | u32::from(*b));
+                        self.t.set_reg("U", v);
                     }
                 }
                 let shown = self
@@ -563,7 +563,7 @@ impl Ice {
                         c.format(
                             &ty,
                             match place {
-                                Place::Value(_) => Place::Value(self.cpu.u),
+                                Place::Value(_) => Place::Value(self.t.reg("U").unwrap_or(0)),
                                 p => p,
                             },
                         )
@@ -577,19 +577,8 @@ impl Ice {
                 }
                 let name = args.get("name").str().unwrap_or("").to_ascii_lowercase();
                 let v = args.get("value").str().and_then(parse_value).ok_or("値")?;
-                let c = &mut self.cpu;
-                match name.as_str() {
-                    "a" => c.a = v as u8,
-                    "b" => c.b = v as u8,
-                    "d" => c.set_d(v),
-                    "dp" => c.dp = v as u8,
-                    "cc" => c.cc = v as u8,
-                    "x" => c.x = v,
-                    "y" => c.y = v,
-                    "u" => c.u = v,
-                    "s" => c.s = v,
-                    "pc" => c.pc = v,
-                    _ => return Err("レジスタ名".into()),
+                if !self.t.set_reg(&name, v) {
+                    return Err("レジスタ名".into());
                 }
                 let shown = self.dap_variables(REGISTERS).into_iter().find(|x| {
                     x.get("name").str().map(str::to_ascii_lowercase) == Some(name.clone())
@@ -617,7 +606,7 @@ impl Ice {
             }
             "stepOut" => {
                 let goal = Goal::Out {
-                    s: self.cpu.s,
+                    s: self.t.sp(),
                     proc_: self.current_proc(),
                 };
                 self.resume(goal);
@@ -677,16 +666,16 @@ impl Ice {
             "disassemble" => {
                 self.refresh_symbols();
                 let base = parse_ref(args.get("memoryReference")).ok_or("memoryReference")?;
-                let mut a = base.wrapping_add(args.get("offset").int().unwrap_or(0) as u16);
+                let mut a = base.wrapping_add(args.get("offset").int().unwrap_or(0) as u32) & self.amask();
                 let skip = args.get("instructionOffset").int().unwrap_or(0);
                 let count = args
                     .get("instructionCount")
                     .int()
                     .unwrap_or(0)
                     .clamp(0, 4096) as usize;
-                let m = &self.machine;
+                let m = self.t.mem();
                 if skip < 0 {
-                    a = self.resync(a, (-skip).min(4096) as u16);
+                    a = self.resync(a, (-skip).min(4096) as u32);
                 } else {
                     for _ in 0..skip {
                         a = a.wrapping_add(self.dis(a).len.max(1));
@@ -735,10 +724,10 @@ impl Ice {
             }
             "readMemory" => {
                 let base = parse_ref(args.get("memoryReference")).ok_or("memoryReference")?;
-                let a = base.wrapping_add(args.get("offset").int().unwrap_or(0) as u16);
+                let a = base.wrapping_add(args.get("offset").int().unwrap_or(0) as u32) & self.amask();
                 let n = args.get("count").int().unwrap_or(0).clamp(0, 65536) as usize;
                 let bytes: Vec<u8> = (0..n)
-                    .map(|i| self.machine.peek(a.wrapping_add(i as u16)))
+                    .map(|i| self.t.mem().peek(a.wrapping_add(i as u32)))
                     .collect();
                 Ok(obj([
                     ("address", hex_ref(a)),
@@ -747,10 +736,10 @@ impl Ice {
             }
             "writeMemory" => {
                 let base = parse_ref(args.get("memoryReference")).ok_or("memoryReference")?;
-                let a = base.wrapping_add(args.get("offset").int().unwrap_or(0) as u16);
+                let a = base.wrapping_add(args.get("offset").int().unwrap_or(0) as u32) & self.amask();
                 let data = unbase64(args.get("data").str().unwrap_or("")).ok_or("data")?;
                 for (i, b) in data.iter().enumerate() {
-                    self.machine.poke(a.wrapping_add(i as u16), *b);
+                    self.t.poke(a.wrapping_add(i as u32), *b);
                 }
                 Ok(obj([("bytesWritten", data.len().into())]))
             }
@@ -922,7 +911,7 @@ impl Ice {
         let addr = b
             .targets
             .iter()
-            .find_map(|t| self.symbols.logical(&self.machine, *t));
+            .find_map(|t| self.symbols.logical(self.t.mem(), *t));
         obj([
             ("id", id.into()),
             ("verified", verified.into()),
@@ -945,7 +934,7 @@ impl Ice {
     }
 
     fn dap_variables(&self, reference: i64) -> Vec<Json> {
-        let var = |name: &str, value: String, mem: Option<u16>| {
+        let var = |name: &str, value: String, mem: Option<u32>| {
             obj([
                 ("name", name.into()),
                 ("value", value.into()),
@@ -953,44 +942,39 @@ impl Ice {
                 ("memoryReference", mem.map(hex_ref).unwrap_or(Json::Null)),
             ])
         };
-        let m = &self.machine;
-        let label = |a: u16| {
-            self.symbols
-                .label(m, a)
-                .map_or(String::new(), |l| format!("  <{l}>"))
-        };
+        let m = self.t.mem();
+        let label = |a: u32| self.symbols.label(m, a).map_or(String::new(), |l| format!("  <{l}>"));
         match reference {
-            REGISTERS => {
-                let r = Regs::of(&self.cpu);
-                vec![
-                    var("A", format!("${:02X}", r.a), None),
-                    var("B", format!("${:02X}", r.b), None),
-                    var("D", format!("${:04X}", r.d()), Some(r.d())),
-                    var("X", format!("${:04X}{}", r.x, label(r.x)), Some(r.x)),
-                    var("Y", format!("${:04X}{}", r.y, label(r.y)), Some(r.y)),
-                    var("U", format!("${:04X}{}", r.u, label(r.u)), Some(r.u)),
-                    var("S", format!("${:04X}", r.s), Some(r.s)),
-                    var("PC", format!("${:04X}{}", r.pc, label(r.pc)), Some(r.pc)),
-                    var("DP", format!("${:02X}", r.dp), None),
-                    var("CC", format!("${:02X} {}", r.cc, cc_flags(r.cc)), None),
-                ]
-            }
-            STACK => (0..32u16)
-                .map(|i| {
-                    let at = self.cpu.s.wrapping_add(i * 2);
-                    let w = m.peek16(at);
-                    let ret = if self.is_return_address(w) {
-                        " ↩"
-                    } else {
-                        ""
-                    };
-                    var(
-                        &format!("S+${:02X}", i * 2),
-                        format!("${w:04X}{}{ret}", label(w)),
-                        Some(at),
-                    )
+            REGISTERS => self
+                .t
+                .reg_list()
+                .into_iter()
+                .map(|(name, v, bits)| {
+                    let w = usize::from(bits / 4);
+                    let mut text = format!("${v:0w$X}");
+                    // Address registers name what they point at.
+                    let addr = matches!(name, "X" | "Y" | "U" | "PC") || (name.len() == 2 && name.starts_with('A'));
+                    if addr {
+                        text.push_str(&label(v));
+                    }
+                    if name == "CC" {
+                        text = format!("{text} {}", cc_flags(v as u8));
+                    }
+                    var(name, text, (bits >= 16).then_some(v))
                 })
                 .collect(),
+            STACK => {
+                let step = self.t.ret_size();
+                (0..32u32)
+                    .map(|i| {
+                        let at = self.t.sp().wrapping_add(i * step) & self.amask();
+                        let w = self.read_ret(at);
+                        let ret = if self.is_return_address(w) { " ↩" } else { "" };
+                        let wd = step as usize * 2;
+                        var(&format!("S+${:02X}", i * step), format!("${w:0wd$X}{}{ret}", label(w)), Some(at))
+                    })
+                    .collect()
+            }
             PROCESS => {
                 let Some(os) = self.os() else {
                     return vec![var("OS", "未検出".into(), None)];
@@ -1036,26 +1020,13 @@ impl Ice {
             ]));
         }
         self.refresh_symbols();
-        let m = &self.machine;
-        let r = Regs::of(&self.cpu);
-        let reg = match e.to_ascii_lowercase().as_str() {
-            "a" => Some(u16::from(r.a)),
-            "b" => Some(u16::from(r.b)),
-            "d" => Some(r.d()),
-            "x" => Some(r.x),
-            "y" => Some(r.y),
-            "u" => Some(r.u),
-            "s" => Some(r.s),
-            "pc" => Some(r.pc),
-            "dp" => Some(u16::from(r.dp)),
-            "cc" => Some(u16::from(r.cc)),
-            _ => None,
-        };
+        let m = self.t.mem();
+        let reg = self.t.reg(e);
         // `[expr]` reads the word at an address.
         let (value, indirect) =
             if let Some(inner) = e.strip_prefix('[').and_then(|x| x.strip_suffix(']')) {
                 let a = self.symbols.resolve(m, inner).ok_or("式を評価できません")?;
-                (m.peek16(a), Some(a))
+                (self.read_ret(a), Some(a))
             } else if let Some(v) = reg {
                 (v, None)
             } else if let Some(v) = self.symbols.resolve(m, e) {
@@ -1067,9 +1038,10 @@ impl Ice {
             .symbols
             .label(m, value)
             .map_or(String::new(), |l| format!("  <{l}>"));
+        let w = (self.t.addr_bits() as usize).div_ceil(4);
         let text = match indirect {
-            Some(a) => format!("${value:04X} ({value}){label}  ← [${a:04X}]"),
-            None => format!("${value:04X} ({value}){label}"),
+            Some(a) => format!("${value:0w$X} ({value}){label}  ← [${a:0w$X}]"),
+            None => format!("${value:0w$X} ({value}){label}"),
         };
         Ok(obj([
             ("result", text.into()),

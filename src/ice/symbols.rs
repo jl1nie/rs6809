@@ -15,8 +15,7 @@
 //! Level 2 address space that maps the module.
 use super::debuginfo::DebugInfo;
 use super::microware::{self, Bases, DataKind, DataLabel, Insn};
-use super::osmon::Image;
-use crate::Machine;
+use super::osmon::{Image, Mem};
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -34,8 +33,8 @@ pub struct Source {
 /// Code bytes `[off, end)` generated for one source line.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LineRec {
-    pub off: u16,
-    pub end: u16,
+    pub off: u32,
+    pub end: u32,
     pub src: usize,
     pub line: u32,
 }
@@ -47,7 +46,7 @@ pub struct Table {
     /// OS-9 module these offsets belong to; `None` for absolute addresses.
     pub module: Option<String>,
     /// Sorted by offset.
-    pub symbols: Vec<(u16, String)>,
+    pub symbols: Vec<(u32, String)>,
     /// Sorted by offset.
     pub lines: Vec<LineRec>,
     pub sources: Vec<Source>,
@@ -84,18 +83,18 @@ impl Table {
         self.lines.sort_by_key(|l| (l.off, l.end));
         self.lines.retain(|l| l.end > l.off);
     }
-    pub fn line_at(&self, off: u16) -> Option<&LineRec> {
+    pub fn line_at(&self, off: u32) -> Option<&LineRec> {
         let i = self.lines.partition_point(|l| l.off <= off);
         self.lines[..i].iter().rev().take(8).find(|l| off < l.end)
     }
-    pub fn symbol_at(&self, off: u16) -> Option<(u16, &str)> {
+    pub fn symbol_at(&self, off: u32) -> Option<(u32, &str)> {
         let i = self.symbols.partition_point(|s| s.0 <= off);
         i.checked_sub(1)
             .map(|i| (self.symbols[i].0, self.symbols[i].1.as_str()))
     }
     /// The nearest global symbol at or below `off`; local labels (`l@`,
     /// numeric, compiler `_123`) are only used when exact.
-    pub fn base_symbol(&self, off: u16) -> Option<(u16, &str)> {
+    pub fn base_symbol(&self, off: u32) -> Option<(u32, &str)> {
         let local = |n: &str| {
             n.contains('@')
                 || n.starts_with(|c: char| c.is_ascii_digit())
@@ -109,12 +108,12 @@ impl Table {
             .map(|s| (s.0, s.1.as_str()))
     }
     /// Whether an absolute table describes this address.
-    fn covers(&self, addr: u16) -> bool {
+    fn covers(&self, addr: u32) -> bool {
         if self.line_at(addr).is_some() {
             return true;
         }
         match (self.symbols.first(), self.symbols.last()) {
-            (Some(a), Some(b)) => addr >= a.0 && u32::from(addr) < u32::from(b.0) + 256,
+            (Some(a), Some(b)) => addr >= a.0 && addr < b.0 + 256,
             _ => false,
         }
     }
@@ -149,10 +148,10 @@ fn parse_lwasm(path: &Path, text: &str) -> Result<Table, String> {
                 let l = &mut t.lines[i];
                 for k in 0..h.len() / 2 {
                     if let Ok(b) = u8::from_str_radix(&h[k * 2..k * 2 + 2], 16) {
-                        bytes.insert(l.end.wrapping_add(k as u16), b);
+                        bytes.insert((l.end as u16).wrapping_add(k as u16), b);
                     }
                 }
-                l.end = l.end.wrapping_add((h.len() / 2) as u16);
+                l.end += (h.len() / 2) as u32;
             }
             continue;
         };
@@ -189,8 +188,8 @@ fn parse_lwasm(path: &Path, text: &str) -> Result<Table, String> {
         }
         if n > 0 {
             t.lines.push(LineRec {
-                off: addr,
-                end: addr.wrapping_add(n),
+                off: u32::from(addr),
+                end: u32::from(addr) + u32::from(n),
                 src,
                 line: lineno,
             });
@@ -204,7 +203,7 @@ fn parse_lwasm(path: &Path, text: &str) -> Result<Table, String> {
             // Code labels: lines that emit bytes, or a label alone on its line.
             // Structure definitions (`org 0` + `rmb`) give data offsets.
             if !label.is_empty() && (n > 0 || op.is_empty()) {
-                t.symbols.push((addr, label.to_string()));
+                t.symbols.push((u32::from(addr), label.to_string()));
             }
         }
     }
@@ -240,7 +239,7 @@ fn parse_lwlink(path: &Path, text: &str) -> Table {
             && let Ok(v) = u16::from_str_radix(value.trim(), 16)
         {
             let name = name.split(" (").next().unwrap_or(name).trim();
-            t.symbols.push((v, name.to_string()));
+            t.symbols.push((u32::from(v), name.to_string()));
         }
     }
     t.finish();
@@ -251,9 +250,9 @@ fn parse_lwlink(path: &Path, text: &str) -> Table {
 struct LinkMap {
     module: Option<String>,
     sections: HashMap<String, Bases>,
-    symbols: Vec<(u16, String)>,
+    symbols: Vec<(u32, String)>,
     /// Data symbols (udat/idat/udpd/idpd) as offsets from the data base.
-    data: HashMap<String, u16>,
+    data: HashMap<String, u32>,
 }
 fn parse_linkmap(text: &str) -> LinkMap {
     let mut m = LinkMap {
@@ -273,9 +272,9 @@ fn parse_linkmap(text: &str) -> LinkMap {
                 && let Some(v) = hex16(w[2])
             {
                 match w[1] {
-                    "code" => m.symbols.push((v, w[0].to_string())),
+                    "code" => m.symbols.push((u32::from(v), w[0].to_string())),
                     "udat" | "idat" | "udpd" | "idpd" => {
-                        m.data.insert(w[0].to_string(), v);
+                        m.data.insert(w[0].to_string(), u32::from(v));
                     }
                     _ => {}
                 }
@@ -285,7 +284,7 @@ fn parse_linkmap(text: &str) -> LinkMap {
                 .iter()
                 .all(|x| x.bytes().all(|c| c.is_ascii_hexdigit()))
         {
-            let h = |x: &str| u16::from_str_radix(x, 16).unwrap_or(0);
+            let h = |x: &str| u32::from_str_radix(x, 16).unwrap_or(0);
             m.sections.insert(
                 w[0].to_string(),
                 Bases {
@@ -376,19 +375,19 @@ fn parse_rma(path: &Path, text: &str) -> Result<Table, String> {
     }
     let listing = t.source(&path.file_name().unwrap_or_default().to_string_lossy());
     t.sources[listing].path = Some(path.to_path_buf());
-    let mut base: Option<u16> = None;
+    let mut base: Option<u32> = None;
     let mut bases = Bases::default();
     let mut data = false;
     let mut data_dp = false;
     // Inputs for variable information.
     let mut insns: Vec<Insn> = Vec::new();
-    let mut functions: Vec<(String, u16)> = Vec::new();
+    let mut functions: Vec<(String, u32)> = Vec::new();
     let mut data_labels: Vec<DataLabel> = Vec::new();
-    let mut code_end = 0u16;
+    let mut code_end = 0u32;
     let mut comment = 0usize;
     let mut current: Option<(usize, u32)> = None;
     // (offset, source, line) for each code line; ends come from the next one.
-    let mut code: Vec<(u16, usize, u32)> = Vec::new();
+    let mut code: Vec<(u32, usize, u32)> = Vec::new();
     for (n, line) in text.lines().enumerate() {
         let lst_line = n as u32 + 1;
         t.sources[listing].text.insert(lst_line, line.to_string());
@@ -405,7 +404,7 @@ fn parse_rma(path: &Path, text: &str) -> Result<Table, String> {
             comment += 1;
             continue;
         }
-        let addr = rest.get(..4).and_then(hex16);
+        let addr = rest.get(..4).and_then(hex16).map(u32::from);
         let fields = rest.get(16..).unwrap_or("");
         let labelled = fields.starts_with(|c: char| !c.is_whitespace());
         let mut words = fields.split_whitespace();
@@ -542,8 +541,8 @@ fn parse_rma(path: &Path, text: &str) -> Result<Table, String> {
 /// after the comment of the next statement. Code that ends in a backward
 /// conditional branch and is entered by a forward jump from the loop
 /// header belongs to the header's line (`for`/`while`), not the next one.
-fn loop_tails(code: &mut [(u16, usize, u32)], insns: &[Insn]) {
-    let labels: HashMap<&str, u16> = insns
+fn loop_tails(code: &mut [(u32, usize, u32)], insns: &[Insn]) {
+    let labels: HashMap<&str, u32> = insns
         .iter()
         .filter_map(|i| i.label.as_deref().map(|l| (l.trim_end_matches(':'), i.off)))
         .collect();
@@ -595,7 +594,7 @@ fn loop_tails(code: &mut [(u16, usize, u32)], insns: &[Insn]) {
 pub struct Placement {
     pub table: usize,
     /// (physical start, length, module offset of the start)
-    pub chunks: Vec<(usize, usize, u16)>,
+    pub chunks: Vec<(usize, usize, u32)>,
 }
 
 #[derive(Debug, Default)]
@@ -609,7 +608,7 @@ pub struct Symbols {
 /// A breakpoint target: CPU address (absolute tables) or physical RAM.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Target {
-    Logical(u16),
+    Logical(u32),
     Phys(usize),
 }
 
@@ -746,12 +745,12 @@ impl Symbols {
     }
 
     /// The table and offset describing a CPU address under the current map.
-    pub fn locate(&self, m: &Machine, addr: u16) -> Option<(usize, u16)> {
+    pub fn locate(&self, m: &dyn Mem, addr: u32) -> Option<(usize, u32)> {
         if let Some(p) = m.translate(addr) {
             for pl in &self.placements {
                 for &(start, len, off) in &pl.chunks {
                     if p >= start && p < start + len {
-                        return Some((pl.table, off + (p - start) as u16));
+                        return Some((pl.table, off + (p - start) as u32));
                     }
                 }
             }
@@ -763,7 +762,7 @@ impl Symbols {
     }
 
     /// `name` or `name+$off` for an address, if any table covers it.
-    pub fn label(&self, m: &Machine, addr: u16) -> Option<String> {
+    pub fn label(&self, m: &dyn Mem, addr: u32) -> Option<String> {
         let (ti, off) = self.locate(m, addr)?;
         let t = &self.tables[ti];
         match t.base_symbol(off) {
@@ -773,27 +772,27 @@ impl Symbols {
         }
     }
     /// A symbol defined exactly at this address.
-    pub fn exact(&self, m: &Machine, addr: u16) -> Option<&str> {
+    pub fn exact(&self, m: &dyn Mem, addr: u32) -> Option<&str> {
         let (ti, off) = self.locate(m, addr)?;
         match self.tables[ti].symbol_at(off) {
             Some((at, name)) if at == off => Some(name),
             _ => None,
         }
     }
-    pub fn line(&self, m: &Machine, addr: u16) -> Option<(usize, LineRec)> {
+    pub fn line(&self, m: &dyn Mem, addr: u32) -> Option<(usize, LineRec)> {
         let (ti, off) = self.locate(m, addr)?;
         self.tables[ti].line_at(off).map(|l| (ti, *l))
     }
 
-    fn target(&self, ti: usize, off: u16) -> Vec<Target> {
+    fn target(&self, ti: usize, off: u32) -> Vec<Target> {
         if self.tables[ti].module.is_none() {
             return vec![Target::Logical(off)];
         }
         let mut out = Vec::new();
         for pl in self.placements.iter().filter(|p| p.table == ti) {
             for &(start, len, o) in &pl.chunks {
-                if off >= o && usize::from(off - o) < len {
-                    out.push(Target::Phys(start + usize::from(off - o)));
+                if off >= o && ((off - o) as usize) < len {
+                    out.push(Target::Phys(start + (off - o) as usize));
                 }
             }
         }
@@ -817,7 +816,7 @@ impl Symbols {
     /// code, in every table that compiled the file. Returns the actual line.
     pub fn line_targets(&self, file: &str, line: u32) -> (Option<u32>, Vec<Target>) {
         let mut best: Option<u32> = None;
-        let mut found: Vec<(usize, u16, u32)> = Vec::new();
+        let mut found: Vec<(usize, u32, u32)> = Vec::new();
         for (ti, t) in self.tables.iter().enumerate() {
             for (si, s) in t.sources.iter().enumerate() {
                 if !source_matches(s, file) {
@@ -858,21 +857,18 @@ impl Symbols {
     }
 
     /// The CPU address for a target under the current map.
-    pub fn logical(&self, m: &Machine, t: Target) -> Option<u16> {
+    pub fn logical(&self, m: &dyn Mem, t: Target) -> Option<u32> {
         match t {
             Target::Logical(a) => Some(a),
-            Target::Phys(p) => (0..8u16).find_map(|slot| {
-                let base = m.translate(slot << 13)?;
-                (p >= base && p < base + 8192).then(|| (slot << 13) | (p - base) as u16)
-            }),
+            Target::Phys(p) => m.logical(p),
         }
     }
 
     /// Resolve an expression: hex/decimal number or symbol name.
-    pub fn resolve(&self, m: &Machine, expr: &str) -> Option<u16> {
+    pub fn resolve(&self, m: &dyn Mem, expr: &str) -> Option<u32> {
         let e = expr.trim();
         if let Some(h) = e.strip_prefix('$').or_else(|| e.strip_prefix("0x")) {
-            return u16::from_str_radix(h, 16).ok();
+            return u32::from_str_radix(h, 16).ok();
         }
         if let Some(t) = self
             .symbol_targets(e)
@@ -881,7 +877,7 @@ impl Symbols {
         {
             return Some(t);
         }
-        u16::from_str_radix(e, 16).ok()
+        u32::from_str_radix(e, 16).ok()
     }
 }
 
