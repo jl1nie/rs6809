@@ -1,0 +1,231 @@
+--- a/mc6850.asm
++++ b/mc6850.asm
+@@ -309,6 +309,9 @@
+                     sta       CtlReg,x
+                     lda       #$15
+                     sta       CtlReg,x
++                    lda       StatReg,x           remember initial carrier state
++                    anda      #4
++                    sta       <CpyDCDSR
+                     clr       <Cpy.Stat
+                     clr       <Mask.DCD            no DCD/DSR flow control
+                     clr       <Mask.DSR
+@@ -492,13 +495,32 @@
+ PollRx              andcc     #^IntMasks          allow timer IRQ while waiting
+                     ldx       <V.PORT
+                     lda       StatReg,x
++                    bita      #4                   MC6850 DCD: carrier absent
++                    beq       CarrierPresent
++                    tst       <CpyDCDSR            has this open path seen carrier?
++                    lbeq      CarrierGone          yes: let OS-9 handle the hangup
++                    bra       PollWait             no: wait for the first connection
++CarrierPresent      clr       <CpyDCDSR
+                     bita      #Stat.RxF           character available?
+                     bne       TakeRx
+-                    lbsr      Sleep1              yield until next tick
++PollWait            lbsr      Sleep1              yield until next tick
+                     bra       PollRx
+ TakeRx              orcc      #IntMasks
+                     lda       DataReg,x           read data register
+                     puls      cc,dp,pc
++* Signal the process using this terminal. Login and Shell already have
++* native S$HUP intercept handlers; the emulator only changes the DCD line.
++CarrierGone         lda       #PST.DCD
++                    ldx       <V.PDLHd
++GonePaths           beq       GoneSignal
++                    sta       PD.PST,x            old paths stay hung up across reuse
++                    ldx       PD.PLP,x
++                    bra       GonePaths
++GoneSignal          lda       PD.CPR,y
++                    ldb       #S$HUP
++                    os9       F$Send
++                    ldb       #E$HangUp
++                    lbra      ErrExit
+ GotData             equ       *
+                   ELSE
+                     beq       ReadSlp             none, go sleep while waiting for new Rx data...
+@@ -522,8 +544,7 @@
+ * Module jump table
+ *
+ ModEntry            lbra      Init
+-                    bra       Read
+-                    nop
++                    lbra      Read
+                     bra       Write
+                     nop
+                     ifne      H6309
+@@ -709,6 +730,22 @@
+                     puls      a
+                     endc
+                     ldx       PD.RGS,y
++                    cmpa      #SS.Reset
++                    bne       SetNormal
++* TSMon explicitly restores its newly opened path, including /term where
++* the kernel still holds a console reference. This is the reconnect ACK.
++                    ldx       <V.PORT
++                    lda       #3
++                    sta       CtlReg,x
++                    sta       CtlReg,x            second reset marks TSMon readiness
++                    lda       #$15
++                    sta       CtlReg,x
++                    lda       StatReg,x
++                    anda      #4
++                    sta       <CpyDCDSR
++                    clr       PD.PST,y
++                    puls      cc,dp,pc
++SetNormal           equ       *
+                     cmpa      #SS.HngUp
+                     bne       SetBreak
+                     lda       #^Cmd.DTR           cleared (disabled) DTR bit
+--- a/tsmon.asm
++++ b/tsmon.asm
+@@ -49,25 +49,35 @@
+                     lda       ,x                  get byte at command line
+                     cmpa      #C$CR               cr?
+                     beq       L0052               if so, branch
+-                    clra                          stdin
+-                    os9       I$Close             close it
++* Close every old path before reopening. The last close lets the serial
++* driver terminate; the subsequent master reset acknowledges session cleanup.
++                    clra
++                    os9       I$Close
++                    lda       #1
++                    os9       I$Close
++                    lda       #2
++                    os9       I$Close
+                     lda       #UPDAT.
+-                    os9       I$Open              open device on command line
+-                    bcs       Exit                branch if error
+-                    inca                          A = 1
+-                    os9       I$Close             close stdout
+-                    inca                          A = 2
+-                    os9       I$Close             close stderr
+-                    clra                          stdin path
+-                    os9       I$Dup               dup to stdout
+-                    bcs       Exit                branch if error
+-                    os9       I$Dup               dup to stderr
+-                    bcs       Exit                branch if error
++                    ldx       <parmptr
++                    os9       I$Open
++                    bcs       Exit
++                    clra
++                    ldb       #SS.Reset
++                    os9       I$SetStt             acknowledge a fresh terminal session
++                    clra
++                    os9       I$Dup
++                    bcs       Exit
++                    os9       I$Dup
++                    bcs       Exit
+ L0052               clra                          stdin
+                     leax      inbuff,u            point to buffer
+                     ldy       #$0001              read 1 byte
+                     os9       I$ReadLn            read line
+-                    bcs       L0024               branch if error
++                    bcc       StartLogin
++                    ldx       #1                  yield while carrier is absent
++                    os9       F$Sleep
++                    lbra      L0024
++StartLogin          equ       *
+                     lda       #Objct              object
+                     clrb                          no additional mem
+                     leax      <Login,pcr          point to login
+--- a/sysgo.asm
++++ b/sysgo.asm
+@@ -83,6 +83,8 @@
+                     fcb       C$CR
+                     endc
+ 
++Monitor             fcc       "Tsmon"
++                    fcb       C$CR
+ Shell               fcc       "Shell"
+                     fcb       C$CR
+ AutoEx              fcc       "AutoEx"
+@@ -99,7 +101,7 @@
+ 
+ ShellPrm            equ       *
+                     ifgt      Level-1
+-                    fcc       "i=/1"
++                    fcc       "/term"
+                     endc
+ CRtn                fcb       C$CR
+ ShellPL             equ       *-ShellPrm
+@@ -279,7 +281,7 @@
+                     decb
+                     bne       L0190
+ * Fork final shell here
+-                    leax      >Shell,pcr
++                    leax      >Monitor,pcr
+                     lda       #$01                D = 256 (B already 0 from above)
+                     ldy       #ShellPL
+                     ifgt      Level-1
+--- a/login.asm
++++ b/login.asm
+@@ -406,24 +406,24 @@
+  clra for stdin
+  os9 I$GetStt get status
+  bcs notscf branch if error
+- lda (PD.OPT-PD.FST),x get path type
++ lda (PD.OPT-PD.OPT),x get path type
+  cmpa #DT.SCF SCF device?
+  bne notscf branch if not
+- lda (PD.EKO-PD.FST),x get echo option
++ lda (PD.EKO-PD.OPT),x get echo option
+  pshs a save path echo flag
+- clr (PD.EKO-PD.FST),x disable SCF's auto-Echo
++ clr (PD.EKO-PD.OPT),x disable SCF's auto-Echo
+  bsr setopts re-write path options
+  puls a restore echo control
+- sta (PD.EKO-PD.FST),x
++ sta (PD.EKO-PD.OPT),x
+  puls pc,x,b,a return
+  
+ notscf lda #$FF
+- sta (PD.OPT-PD.FST),x set unknown device type
++ sta (PD.OPT-PD.OPT),x set unknown device type
+  puls pc,x,b,a return
+  
+ setopts pshs x,b,a,cc save regs
+  leax >popts,u
+- lda (PD.OPT-PD.FST),x
++ lda (PD.OPT-PD.OPT),x
+  cmpa #DT.SCF SCF device?
+  bne KILECH10 ..no; exit
+  ldb #SS.Opt re-write options
+--- a/term_mc6850.asm
++++ b/term_mc6850.asm
+@@ -72,12 +72,7 @@
+ initsize            equ       *
+ 
+                     ifdef     TNum                from makefile
+-                    ifeq      TNum
+-name                fcs       /T0/
+-                    endif
+-                    ifeq      TNum-1
+-name                fcs       /T1/
+-                    endif
++name                fcb       'T,'0+TNum+$80
+                     else
+ name                fcs       /Term/
+                     endif     match               IFDEF TNum
+--- a/krnp2.asm
++++ b/krnp2.asm
+@@ -248,7 +248,9 @@
+ 
+ Krnp2ControlDcrash  jmp       <D.Crash  ; transfer control to <D.Crash
+ 
+-svctab              fcb       F$UnLink  ; define byte value(s) F$UnLink
++svctab              fcb       F$CpyMem
++                    fdb       FCpyMem-*-2
++                    fcb       F$UnLink  ; define byte value(s) F$UnLink
+                     fdb       FUnLink-*-2 ; define word value(s) FUnLink-*-2
+                     fcb       F$AllRAM  ; define byte value(s) F$AllRAM
+                     fdb       FAllRAM-*-2 ; define word value(s) FAllRAM-*-2
+@@ -420,6 +422,8 @@
+ 
+                     use       fdebug.asm ; include source file fdebug.asm
+ 
++                    use       fcpymem_compat.asm
++
+                     emod
+ eom                 equ       *         ; define assembler symbol eom
+                     end

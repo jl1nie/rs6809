@@ -1,0 +1,272 @@
+--- a/rel.asm
++++ b/rel.asm
+@@ -259,8 +259,7 @@
+ * Filler to get to a total size of $130. XX.Size is bytes at the start of
+ * this file - before the module header. 3 is bytes after this filler - the
+ * end boilerplate for the module.
+-*Filler   fill  $39,$130-XX.Size-3-*
+-                    fcb       $39,$39
++Filler   fill  $39,$130-XX.Size-3-*
+ 
+                     ELSE      match               IFNE mc09
+ 
+--- a/mc09krn.asm
++++ b/mc09krn.asm
+@@ -259,7 +259,7 @@
+ 
+ * Setup System calls
+                     leay      >SysCalls,pc ; load y with address of table, below
+-                    lbsr      SysSvc    ; copy table below into dispatch table
++                    lbsr      InstallSvc    ; copy table below into dispatch table
+ 
+ * Initialize system process descriptor
+                     ldu       <D.PrcDBT ; get process table pointer
+@@ -496,7 +496,7 @@
+                     fcb       F$AllImg+SysState ; define byte value(s) F$AllImg+SysState
+                     fdb       FAllImg-*-2 ; define word value(s) FAllImg-*-2
+                     fcb       F$SetImg+SysState ; define byte value(s) F$SetImg+SysState
+-                    fdb       FFreeLB-*-2 ; define word value(s) FFreeLB-*-2
++                    fdb       FSFreeLB-*-2 ; define word value(s) FFreeLB-*-2
+                     fcb       F$FreeLB+SysState ; define byte value(s) F$FreeLB+SysState
+                     fdb       FSFreeLB-*-2 ; define word value(s) FSFreeLB-*-2
+                     fcb       F$FreeHB+SysState ; define byte value(s) F$FreeHB+SysState
+@@ -645,93 +645,25 @@
+ 
+ * Copy register stack from user to system
+ * Entry: U=Ptr to Register stack in process dsc
+-CpUsrStkTo          pshs      cc,x,y,u  ; preserve registers
+-                    ldb       P$Task,x  ; get task #
+-                    ldx       P$SP,x    ; get stack pointer
+-                    lbsr      FMoveLater ; calculate block offset (only affects A&X)
+-                    leax      -$6000,x  ; adjust pointer to where memory map will be
+-                    bra       KrnBlockNumberWhere ; go copy it
+-
+-* Copy register stack from system to user
+-* Entry: U=Ptr to Register stack in process dsc
+-CpSysStkTo          pshs      cc,x,y,u  ; preserve registers
+-                    ldb       P$Task,x  ; get task # of destination
+-                    ldx       P$SP,x    ; get stack pointer
+-                    lbsr      FMoveLater ; calculate block offset (only affects A&X)
+-                    leax      -$6000,x  ; adjust pointer to where memory map will be
+-                    exg       x,y       ; swap pointers & copy
+-* Copy a register stack
+-* Entry: X=Source
+-*        Y=Destination
+-*        A=Offset into DAT image of stack
+-*        B=Task #
+-KrnBlockNumberWhere leau      a,u       ; point to block # of where stack is
+-                  IFNE    mc09    ; begin conditional assembly for mc09
+-                    orcc      #IntMasks ; shutdown interupts while we do this
+-
+-                    lda       #5        ; load A from #5
+-                    bsr       prepmmu   ; select block 5
+-
+-                    lda       1,u       ; get first block
+-                    ldb       3,u       ; get a second just in case of overlap
+-
+-                    sta       >MMUDAT   ; set value for block 5
+-
+-                    lda       #6        ; load A from #6
+-                    bsr       prepmmu   ; select block 6
+-
+-                    stb       >MMUDAT   ; set value for block 6
+-
+-                    ldb       #R$Size   ; load B from #R$Size
+-Loop5               lda       ,x+       ; load A from ,x+
+-                    sta       ,y+       ; store A at ,y+
+-                    decb                ; decrement B
+-                    bne       Loop5     ; branch if zero is clear to Loop5
+-                    ldx       <D.SysDAT ; remap the blocks we took out
+-
+-                    lda       #5        ; load A from #5
+-                    bsr       prepmmu   ; select block 5
+-
+-                    lda       $0B,x     ; load A from $0B,x
+-                    ldb       $0D,x     ; load B from $0D,x
+-
+-                    sta       >MMUDAT   ; restore value for block 5
+-                    lda       #6        ; load A from #6
+-                    bsr       prepmmu   ; select block 6
+-
+-                    stb       >MMUDAT   ; restore value for block 6
+-                  ELSE
+-                    lda       1,u       ; get first block
+-                    ldb       3,u       ; get a second just in case of overlap
+-                    orcc      #IntMasks ; shutdown interupts while we do this
+-                    std       >DAT.Regs+5 ; map blocks in
+-                  IFNE    H6309   ; begin conditional assembly for H6309
+-                    ldw       #R$Size   ; get size of register stack
+-                    tfm       x+,y+     ; copy it
+-                  ELSE
+-                    ldb       #R$Size   ; load B from #R$Size
+-Loop5               lda       ,x+       ; load A from ,x+
+-                    sta       ,y+       ; store A at ,y+
+-                    decb                ; decrement B
+-                    bne       Loop5     ; branch if zero is clear to Loop5
+-                  ENDC
+-                    ldx       <D.SysDAT ; remap the blocks we took out
+-                    lda       $0B,x     ; load A from $0B,x
+-                    ldb       $0D,x     ; load B from $0D,x
+-                    std       >DAT.Regs+5 ; store D at >DAT.Regs+5
+-                    endif
+-                    puls      cc,x,y,u,pc ; restore & return
+-
+-                  IFNE    mc09    ; begin conditional assembly for mc09
+-* A holds the MMU register we want to select. Merge in
+-* the stored value and write the result to MMUADR. This is
+-* a desperate attempt to save a few bytes..
+-prepmmu
+-                    ora       <D.TINIT  ; merge with current MMU mask
+-                    sta       >MMUADR   ; select block
+-                    rts                 ; return to caller
+-                    endif
+-
++* A system process descriptor/stack can live in $A000-$DFFF. F$Move maps
++* both source and destination explicitly and never uses the stack while
++* those slots are switched, so register frames remain valid in that case.
++CpUsrStkTo          pshs      cc,d,x,y,u
++                    lda       P$Task,x
++                    ldb       <D.SysTsk
++                    ldx       P$SP,x
++                    ldy       #R$Size
++                    lbsr      FMoveTarget
++                    puls      cc,d,x,y,u,pc
++CpSysStkTo          pshs      cc,d,x,y,u
++                    tfr       u,y
++                    ldb       P$Task,x
++                    ldu       P$SP,x
++                    tfr       y,x
++                    lda       <D.SysTsk
++                    ldy       #R$Size
++                    lbsr      FMoveTarget
++                    puls      cc,d,x,y,u,pc
+ 
+ * Process software interupts from system state
+ * Entry: U=Register stack pointer
+--- a/fnproc.asm
++++ b/fnproc.asm
+@@ -141,7 +141,7 @@
+                     ldy       P$SP,x    ; get stack pointer
+                     lbsr      KrnWeGngBack ; re-map the DAT image, if necessary
+                     ldb       <D.Quick  ; get quick return flag
+-                    bra       KrnJoin2  ; go switch GIME over to new process & run
++                    lbra      KrnJoin2  ; go switch GIME over to new process & run
+ 
+ * Process a signal (process had no signal trap)
+ FNprocJoin2         equ       *         ; define assembler symbol
+--- a/fld.asm
++++ b/fld.asm
+@@ -42,9 +42,12 @@
+                     pshs      b,cc      ; save regs
+                     clrb                ; clear B
+                     orcc      #IntMasks ; shut off interrupts
+-                    sta       >DAT.Regs ; map in MMU block into slot 0
++                    ldb       <D.TINIT
++                    stb       >MMUADR
++                    sta       >MMUDAT
+                     lda       ,x+       ; get byte
+-                    stb       >DAT.Regs ; map MMU block #0 back
++                    clrb
++                    stb       >MMUDAT
+                     puls      b,cc      ; restore b,cc from the stack
+                     bra       AdjBlk0   ; branch unconditionally to AdjBlk0
+ 
+@@ -77,22 +80,14 @@
+                     rts                 ; return to caller
+ * Get 2 bytes for LDDDXY (also called by other routines)
+ * Should simply map in 2 blocks, and do a LDD (don't have to worry about wrap)
+-FLdTarget           pshs      u,y,x     ; preserve regs
+-                  IFNE    H6309   ; begin conditional assembly for H6309
+-                    addr      d,x       ; point X to X+D
+-                  ELSE
+-                    leax      d,x       ; compute d,x into X
+-                  ENDC
+-                    bsr       AdjBlk0   ; wrap address around for 1 block
+-                    ldu       <D.SysDAT ; get sys DAT Image ptr
+-                    clra                ; system block 0 =0 always
+-                    ldb       3,u       ; get MMU block #1
+-                    tfr       d,u       ; make U=blocks to re-map in once done
+-                    lda       1,y       ; get MMU block #0
+-                    ldb       3,y       ; get MMU block #1
+-                    pshs      cc        ; preserve int. status
+-                    orcc      #IntMasks ; shut off int.
+-                    std       >DAT.Regs ; map in both blocks
+-                    ldd       ,x        ; get 2 bytes
+-                    stu       >DAT.Regs ; map original blocks in
+-                    puls      pc,u,y,x,cc ; restore regs & return
++* Read each byte through the Multicomp MMU, including an 8 KiB crossing.
++FLdTarget           pshs      x,y
++                    leax      d,x
++                    lbsr      AdjBlk0
++                    lbsr      FLdMMUBlockData
++                    pshs      a
++                    leax      1,x
++                    lbsr      AdjBlk0
++                    lbsr      FLdMMUBlockData
++                    tfr       a,b
++                    puls      a,x,y,pc
+--- a/falltsk.asm
++++ b/falltsk.asm
+@@ -75,7 +75,10 @@
+                     stu       b,x       ; save DAT image pointer in task table
+                     cmpb      #2        ; is it either system or GrfDrv?
+                     bhi       FAlltskTarget ; no, return
+-                    ldx       #DAT.Regs ; update system DAT image
++                    tfr       b,a
++                    lsla
++                    lsla
++                    ora       <D.TINIT
+                     lbsr      KrnActualMMUBlock ; go bash the hardware
+ FAlltskTarget       puls      cc,d,x,u,pc ; restore cc,d,x,u,pc from the stack
+ 
+--- a/fmove.asm
++++ b/fmove.asm
+@@ -158,7 +158,16 @@
+                     puls      y         ; get source & dest MMU block #'s
+                     orcc      #IntMasks ; shut IRQ's off
+                     stb       <D.IRQTmp+1 ; save copy of current copy block size
+-                    sty       >DAT.Regs+5 ; swap in source/dest MMU blocks into $A000-$DFFF
++                    lda       <D.TINIT
++                    ora       #5
++                    sta       >MMUADR
++                    tfr       y,d
++                    sta       >MMUDAT
++                    lda       <D.TINIT
++                    ora       #6
++                    sta       >MMUADR
++                    stb       >MMUDAT
++                    ldb       <D.IRQTmp+1
+ ***** NO STACK USE BETWEEN HERE.....
+                     andb      #$07      ; 2 1st, do single byte copies for 1-7 leftover bytes
+                     beq       FMoveSizeBack ; 3 No leftovers, go to 8 byte copy routine
+@@ -186,7 +195,16 @@
+ FMoveSystemDAT      ldy       <D.SysDAT ; 6 Get system DAT pointer
+                     lda       $0B,y     ; 5 Get original MMU blocks
+                     ldb       $0D,y     ; 5
+-                    std       >DAT.Regs+5 ; 6 Restore originals
++                    tfr       d,y
++                    lda       <D.TINIT
++                    ora       #5
++                    sta       >MMUADR
++                    tfr       y,d
++                    sta       >MMUDAT
++                    lda       <D.TINIT
++                    ora       #6
++                    sta       >MMUADR
++                    stb       >MMUDAT
+ ***** AND HERE...........
+                     andcc     #^IntMasks ; turn IRQ's back on
+                     ldd       14,s      ; get # of bytes left to copy
+--- a/mc09sdc.asm
++++ b/mc09sdc.asm
+@@ -306,8 +306,8 @@
+                     pshs      b
+ 
+                     pshs      x                   copy of X to pull off byte by byte
+-                    addb      ,s+                 form b+xl
+-                    adcb      ,s+                 form b+xl+xh
++                    orb       ,s+                 combine XH
++                    orb       ,s+                 combine XL; zero only for LSN0
+                     bne       notlsn0             it is not LSN0. We're done.
+                     ldb       #DD.SIZ
+                     stb       lsn0cp,u            it is LSN0, need to copy this many bytes

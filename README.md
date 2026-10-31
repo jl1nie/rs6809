@@ -1,11 +1,12 @@
 # rs6809
 
 Pure RustのMotorola 6809エミュレータです。外部crate・Cコード・FFIを使わず、標準ライブラリのみで動作します。
-64KBの物理RAMとACIA相当のシリアルコンソールを備え、サンプルとしてNitrOS-9 Level 1とBASIC09を起動できます。
+標準構成は64KB RAMとACIA相当のシリアルコンソールです。Multicomp互換モードは512KB RAMを備え、NitrOS-9 Level 1 / BASIC09とLevel 2を起動できます。
+Level 2では1つのOSを共有してTelnetから複数ユーザー・複数プロセスを同時に動かせます。
 
 ## ビルドと最小サンプル
 
-Rust edition 2024対応のツールチェーンを使用します。
+Rust 1.89以降（edition 2024対応）のツールチェーンを使用します。
 
 ```sh
 cargo build --release
@@ -56,6 +57,76 @@ cargo test --release --test nitros9 -- --ignored --nocapture
 
 このテストはROM→NitrOS-9→シェル→BASIC09→編集モード→`RUN test`→`42`→`B:` の全経路を確認します。
 参照キットが必要なので通常の `cargo test` では無視されます。
+
+## NitrOS-9 Level 2（512KB）
+
+上記と同じ参照キット（コミット `bf60370cfa180636cde3ee305d089d94872de82a`）から、
+Multicomp用Level 2カーネルと専用ディスクを構築できます。
+Python 3.12以降・make・ホストのCコンパイラ・curl・patchが必要です。
+LWTOOLS 4.25とToolShedは「Cコンパイラ」と同じ手順で作業ディレクトリ内に用意されます。
+
+```sh
+python3 scripts/build-level2-disk.py
+sh examples/nitros9-level2.sh
+```
+
+起動後に `NitrOS-9/6809 Level 2 V03.3.0`、`LEVEL2-STARTED`、`OS9:` が表示されます。
+`mfree` で `$7FFFF` までの物理メモリと空きメモリを確認できます。
+最小ディスクには `shell`、`echo`、`mfree` を収録しています。BASIC09やCコンパイラは含みません。
+Level 2用の参照ソースに必要な変更は生成先だけに適用し、参照キットとLevel 1ディスクは保持します。
+変更理由は [Level 2対応の記録](docs/level2.md) を参照してください。
+
+```sh
+cargo test --release --test nitros9_level2 -- --ignored
+```
+
+このテストはROMからの起動、startup実行、シェルでの `mfree`、別プロセスの `echo` 実行と
+シェルへの復帰を確認します。
+
+MulticompのRAMは既定512KBで、`--ram-kb 64|128|256|512|1024` で選べます。
+従来の64KB構成は `--ram-kb 64` で再現できます。このLevel 2イメージは512KB向けです。
+CoCo 3専用のROM・ディスク・GIMEには対応しません。
+
+## Telnet・マルチユーザー
+
+OS-9 Level 2の端末設定に合わせて同時1〜4セッションを利用できます。
+各接続を空きACIAへ割り当て、OS-9の `login` で認証します。プロセスとSIGHUP処理もOS-9が管理します。
+待ち受けはlocalhost限定、TCPポート番号は空き番号を自動取得します。Telnetモードのファイル書き込みは永続化します。
+
+```sh
+python3 scripts/build-level2-disk.py --multi-user --acia-count 3
+sh examples/nitros9-telnet.sh
+```
+
+起動時に表示された `127.0.0.1:ポート番号` に別の端末から接続し、Enterを押してログインします。
+例えば表示が `127.0.0.1:49152` なら：
+
+```sh
+telnet 127.0.0.1 49152
+```
+
+初期構成は `/term`・`/t0`・`/t1` の3端末です。構築時の `--acia-count 1|2|3|4` で、
+OS-9の端末記述子と `tsmon` の起動数を変更できます。準備できた端末だけを空きACIAとして受け付け、
+同時接続数はOS-9側の設定で決まります。Telnetモードではホストの標準入力は使いません。
+
+初期アカウントは `user1`〜`user3` で、ランダムな初期パスワードを
+`artifacts/level2-multiuser/accounts.txt` に保存します。認証はOS-9の `login` が行い、
+切断はACIAのDCD消失として通知します。OS-9のドライバと既存のSIGHUPハンドラが後処理を行います。
+
+ファイルの保存先は `artifacts/level2-multiuser/multicomp09-level2.img` です。
+コマンド完了後の変更はエミュレータ再起動後も残ります。同じイメージへの二重書き込みは排他ロックで防ぎます。
+既存のマルチユーザーディスクがある場合、構築スクリプトは再構築を拒否します。
+`--force` を指定した再構築は保存ファイルとアカウントを初期化します。
+
+実際のOS-9で同時ログイン・接続上限・セッション分離・再接続・ファイル永続化を検証するには：
+
+```sh
+python3 scripts/test-telnet.py
+python3 scripts/test-telnet.py --acia-count 4
+```
+
+テスト用ディスクは一時ディレクトリに作成します。
+設定・切断時の動作・保存先・検証手順は [Telnet接続の説明](docs/telnet.md) にまとめています。
 
 ## Cコンパイラ
 
@@ -218,19 +289,19 @@ releaseビルドはopt-level=3、ThinLTO、codegen-units=1です。
 
 | 項目 | 標準マシン | NitrOS-9用Multicomp互換モード |
 |---|---|---|
-| 物理RAM | 64KB | 64KB |
+| 物理RAM | 64KB | 既定512KB（64KB〜1MBを選択可） |
 | 起動ROM | なし | `$E000–$FFFF`、8KB、無効化可能 |
-| ACIA status/control | `$8018` | `$FFD0` |
-| ACIA data | `$8019` | `$FFD1` |
+| ACIA status/control | `$8018` | `$FFD0`、追加端末は `$FFD2`・`$FFD4`・`$FFD6` |
+| ACIA data | `$8019` | `$FFD1`、追加端末は `$FFD3`・`$FFD5`・`$FFD7` |
 | タイマー | `$8010` | `$FFDD` |
 | SD data/control/LBA | なし | `$FFD8–$FFDC` |
 | マッピング制御 | なし | `$FFDE–$FFDF` |
 
 - CPU：6809の定義済み命令、各アドレッシング、CC、IRQ/FIRQ/NMI、SWI/SWI2/SWI3、SYNC/CWAI、命令サイクル加算。
-- ACIA：受信キュー、送信出力、受信・送信IRQ、マスターリセット。送信は即時完了です。
+- ACIA：最大4台。受信キュー、送信出力、受信・送信IRQ、DCD、マスターリセット。送信は即時完了です。
 - タイマー：既定20,000サイクルごと。1MHz換算で50Hz。実時間への速度制限はありません。
-- SD：512バイト単位。書き込みはメモリ内の差分に保持し、終了すると消えます。
-- MMU：8KBバンクの制御を扱いますが、物理RAMは64KBです。未搭載バンクは `$FF` を返します。512KB構成やLevel 2の動作は対象外です。
+- SD：512バイト単位。Telnetモードまたは `--persist-disk` で永続化し、排他ロックします。その他の既定モードと `--volatile-disk` はメモリ内の差分を使用します。
+- MMU：8KBバンク、2組の独立したタスクマップ、バンクごとの書き込み保護。未搭載バンクは `$FF` を返し書き込みを無視します。固定上位領域 `$FE00–$FFFF` は物理バンク7を共有し、I/Oを除き常に読み書き可能です。
 - エミュレーションは命令単位です。バスサイクル単位の精密タイミング、未定義命令、6309拡張、ACIAのボーレート・パリティ・エラーフラグは扱いません。
 
 任意のバイナリをRAMにロードする場合：
@@ -240,6 +311,8 @@ cargo run --release -- --bin program.bin --load 0x1000 --pc 0x1000 --max-cycles 
 ```
 
 ライブラリからは `Cpu` と `Bus` を使ってCPUだけを組み込めます。`Machine` はRAM・コンソール・タイマー付きの実装です。
+`Machine::multicomp()` は512KB、`Machine::multicomp_with_ram(rom, disk, ram_bytes)` は指定サイズのRAMを用意します。
+公開フィールド `ram` は物理メモリの `Box<[u8]>` です。`load()` は従来どおり下位64KB内への直接ロードです。
 命令エラーとディスク読み込みエラーは実行を失敗として報告します。
 `--until` は出力文字列への到達で成功終了し、到達前にサイクル上限に達すると失敗します。
 

@@ -1,7 +1,7 @@
-use rs6809::{Cpu, Machine};
+use rs6809::{Cpu, Machine, telnet::TelnetServer};
 use std::{
     env,
-    fs::{self, File},
+    fs::{self, File, OpenOptions},
     io::{self, Read, Write},
     sync::mpsc,
     thread,
@@ -29,9 +29,14 @@ fn report(cycles: u64, started: Instant, measurement: Option<(u64, Instant)>) {
     }
 }
 fn run() -> Result<(), Box<dyn std::error::Error>> {
-    let mut args = env::args().skip(1);
+    let mut args = env::args().skip(1).peekable();
     let mut rom = None;
     let mut disk = None;
+    let mut ram_kb = None;
+    let mut acia_count = None;
+    let mut telnet = None;
+    let mut persist_disk = false;
+    let mut volatile_disk = false;
     let mut bin = None;
     let mut addr = 0x1000;
     let mut pc = None;
@@ -45,6 +50,25 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         match a.as_str() {
             "--rom" => rom = Some(args.next().ok_or("missing ROM path")?),
             "--disk" => disk = Some(args.next().ok_or("missing disk path")?),
+            "--acia-count" => {
+                acia_count = Some(usize::try_from(number(
+                    &args.next().ok_or("missing ACIA count")?,
+                )?)?)
+            }
+            "--telnet" => {
+                telnet = Some(if args.peek().is_some_and(|next| !next.starts_with("--")) {
+                    args.next().unwrap()
+                } else {
+                    "127.0.0.1:0".to_string()
+                });
+            }
+            "--persist-disk" => persist_disk = true,
+            "--volatile-disk" => volatile_disk = true,
+            "--ram-kb" => {
+                ram_kb = Some(usize::try_from(number(
+                    &args.next().ok_or("missing RAM size")?,
+                )?)?)
+            }
             "--bin" => bin = Some(args.next().ok_or("missing binary path")?),
             "--load" => addr = u16::try_from(number(&args.next().ok_or("missing load address")?)?)?,
             "--pc" => pc = Some(u16::try_from(number(&args.next().ok_or("missing PC")?)?)?),
@@ -59,7 +83,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
             "--help" | "-h" => {
                 println!(
-                    "rs6809 [--bin FILE --load 0x1000 --pc 0x1000]\n       [--rom FILE --disk FILE --boot] [--script FILE]\n       [--until TEXT] [--max-cycles N] [--stats] [--measure-from TEXT]\n\nDefault: 64 KiB RAM, ACIA $8018/$8019, timer $8010.\nROM+disk: Multicomp console $FFD0/$FFD1, SD $FFD8-$FFDC, timer $FFDD.\n--boot types NITROS9 at the CamelForth prompt.\nScripts: lines PROMPT<TAB>RESPONSE, matched sequentially; response ends with CR.\nDisk writes are volatile. Cycle limit without --until exits successfully.\n--stats reports guest cycles and host elapsed seconds to stderr.\n--measure-from starts an output-marker interval, ending at --until."
+                    "rs6809 [--bin FILE --load 0x1000 --pc 0x1000]\n       [--rom FILE --disk FILE --boot] [--ram-kb N] [--script FILE]\n       [--acia-count N] [--telnet [127.0.0.1:0]] [--persist-disk|--volatile-disk]\n       [--until TEXT] [--max-cycles N] [--stats] [--measure-from TEXT]\n\nDefault: 64 KiB RAM, ACIA $8018/$8019, timer $8010.\nROM+disk: 512 KiB RAM (select 64/128/256/512/1024 with --ram-kb).\nMulticomp console $FFD0/$FFD1, SD $FFD8-$FFDC, timer $FFDD.\n--acia-count selects 1..4 Multicomp ACIAs (default 1, or 4 with --telnet).\n--telnet binds localhost on a free TCP port by default; OS-9 opens the available ACIAs.\nOne client per active ACIA; host stdin is disabled. Use the multi-user Level 2 disk.\n--boot types NITROS9 at the CamelForth prompt.\nScripts: lines PROMPT<TAB>RESPONSE, matched sequentially; response ends with CR.\nTelnet disk writes persist by default; --persist-disk also enables this without Telnet.\n--volatile-disk keeps writes in RAM. Cycle limit without --until exits successfully.\n--stats reports guest cycles and host elapsed seconds to stderr.\n--measure-from starts an output-marker interval, ending at --until."
                 );
                 return Ok(());
             }
@@ -71,11 +95,44 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     {
         return Err("--measure-from requires a nonempty marker and --until".into());
     }
+    if persist_disk && volatile_disk {
+        return Err("--persist-disk and --volatile-disk conflict".into());
+    }
+    persist_disk = (persist_disk || telnet.is_some()) && !volatile_disk;
+    if persist_disk && disk.is_none() {
+        return Err("persistent writes require --disk".into());
+    }
     let mut machine = match (rom, disk) {
-        (Some(r), Some(d)) => Machine::multicomp(&fs::read(r)?, File::open(d)?)?,
-        (None, None) => Machine::default(),
+        (Some(r), Some(d)) => Machine::multicomp_with_ram(
+            &fs::read(r)?,
+            if persist_disk {
+                OpenOptions::new().read(true).write(true).open(d)?
+            } else {
+                File::open(d)?
+            },
+            ram_kb
+                .unwrap_or(512)
+                .checked_mul(1024)
+                .ok_or("RAM size overflow")?,
+        )?,
+        (None, None) => {
+            if ram_kb.is_some() {
+                return Err("--ram-kb requires --rom and --disk".into());
+            }
+            Machine::default()
+        }
         _ => return Err("--rom and --disk must be specified together".into()),
     };
+    if persist_disk {
+        machine.persist_disk_writes()?;
+    }
+    if acia_count.is_some() || telnet.is_some() {
+        machine.set_acia_count(acia_count.unwrap_or(if telnet.is_some() { 4 } else { 1 }))?;
+    }
+    let mut server = telnet
+        .map(|address| TelnetServer::bind(&address, &mut machine))
+        .transpose()?;
+    let mut announced = false;
     let mut cpu = Cpu::default();
     cpu.reset(&mut machine);
     if let Some(path) = bin {
@@ -103,19 +160,21 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     let (tx, rx) = mpsc::sync_channel(1024);
-    thread::spawn(move || {
-        let stdin = io::stdin();
-        for byte in stdin.lock().bytes() {
-            match byte {
-                Ok(b) => {
-                    if tx.send(b).is_err() {
-                        break;
+    if server.is_none() {
+        thread::spawn(move || {
+            let stdin = io::stdin();
+            for byte in stdin.lock().bytes() {
+                match byte {
+                    Ok(b) => {
+                        if tx.send(b).is_err() {
+                            break;
+                        }
                     }
+                    Err(_) => break,
                 }
-                Err(_) => break,
             }
-        }
-    });
+        });
+    }
     let mut out = io::stdout().lock();
     let mut seen = String::new();
     let mut pending = std::collections::VecDeque::new();
@@ -130,6 +189,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
         if !machine.acia.tx.is_empty() {
             let bytes = std::mem::take(&mut machine.acia.tx);
+            if let Some(server) = &mut server {
+                server.send(0, &bytes, &mut machine);
+            }
             out.write_all(&bytes)?;
             out.flush()?;
             for b in bytes {
@@ -171,6 +233,19 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         blocks += 1;
         if blocks == 1024 {
             blocks = 0;
+            if let Some(server) = &mut server {
+                server.poll(&mut machine)?;
+                if !announced
+                    && (0..machine.acia_count()).any(|i| machine.serial(i).unwrap().session_ready())
+                {
+                    eprintln!(
+                        "rs6809: Telnet listening on {} ({} ACIA hardware ports; OS-9 controls active sessions)",
+                        server.local_addr()?,
+                        machine.acia_count()
+                    );
+                    announced = true;
+                }
+            }
             if pending.is_empty() {
                 while let Ok(b) = rx.try_recv() {
                     machine.acia.rx.push_back(match b {

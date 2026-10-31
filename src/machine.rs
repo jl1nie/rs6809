@@ -1,7 +1,7 @@
 use crate::{Bus, Cpu, CpuError};
 use std::collections::{BTreeMap, VecDeque};
 use std::fs::File;
-use std::io::{self, Read, Seek, SeekFrom};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 
 /// A console-compatible subset of the MC6850 (instantaneous transmit).
 #[derive(Default)]
@@ -9,25 +9,48 @@ pub struct Acia {
     pub control: u8,
     pub rx: VecDeque<u8>,
     pub tx: Vec<u8>,
+    /// MC6850 DCD is active low. Local serial consoles keep carrier present.
+    pub carrier_lost: bool,
+    pub resets: u64,
+    configured: bool,
+    reset_streak: u8,
+    session_ready: bool,
 }
 impl Acia {
+    /// TSMon acknowledges a fresh login endpoint with two master resets.
+    pub fn session_ready(&self) -> bool {
+        self.session_ready
+    }
+    pub fn configured(&self) -> bool {
+        self.configured
+    }
     pub fn irq(&self) -> bool {
         self.control & 0x80 != 0 && !self.rx.is_empty() || self.control & 0x60 == 0x20
     }
     pub fn status(&self) -> u8 {
-        2 | u8::from(!self.rx.is_empty()) | if self.irq() { 0x80 } else { 0 }
+        2 | u8::from(!self.rx.is_empty())
+            | if self.carrier_lost { 4 } else { 0 }
+            | if self.irq() { 0x80 } else { 0 }
     }
     pub fn control(&mut self, v: u8) {
         if v & 3 == 3 {
+            self.session_ready = false;
+            self.reset_streak = self.reset_streak.saturating_add(1);
+            self.configured = false;
+            self.resets = self.resets.wrapping_add(1);
             self.control = 0;
             self.rx.clear()
         } else {
+            self.session_ready |= self.reset_streak >= 2;
+            self.reset_streak = 0;
+            self.configured = true;
             self.control = v
         }
     }
 }
 struct Disk {
     file: File,
+    persistent: bool,
     overlay: BTreeMap<u32, [u8; 512]>,
     lba: u32,
     state: u8,
@@ -83,7 +106,18 @@ impl Disk {
         self.index += 1;
         if self.index == 512 {
             if self.state == 2 {
-                self.overlay.insert(self.lba, self.data);
+                if self.persistent {
+                    if let Err(error) = self
+                        .file
+                        .seek(SeekFrom::Start(u64::from(self.lba) * 512))
+                        .and_then(|_| self.file.write_all(&self.data))
+                        .and_then(|_| self.file.sync_data())
+                    {
+                        self.error = Some(error);
+                    }
+                } else {
+                    self.overlay.insert(self.lba, self.data);
+                }
             }
             self.state = 0;
         }
@@ -94,11 +128,12 @@ struct Mapping {
     writable: [bool; 8],
 }
 
-/// 64 KiB physical RAM; optional 8 KiB ROM overlay, timer and SD interface.
-/// Disk writes are kept in memory, leaving the source image intact.
+/// Flat 64 KiB RAM or banked Multicomp RAM with an 8 KiB ROM overlay.
+/// Disk writes use a volatile overlay unless `persist_disk_writes` is enabled.
 pub struct Machine {
-    pub ram: Box<[u8; 65536]>,
+    pub ram: Box<[u8]>,
     pub acia: Acia,
+    extra_acias: Vec<Acia>,
     pub acia_base: u16,
     pub timer_base: u16,
     pub timer: u8,
@@ -115,8 +150,9 @@ pub struct Machine {
 impl Default for Machine {
     fn default() -> Self {
         Self {
-            ram: Box::new([0; 65536]),
+            ram: vec![0; 65536].into_boxed_slice(),
             acia: Acia::default(),
+            extra_acias: Vec::new(),
             acia_base: 0x8018,
             timer_base: 0x8010,
             timer: 0,
@@ -136,7 +172,20 @@ impl Default for Machine {
     }
 }
 impl Machine {
+    /// Multicomp with 512 KiB physical RAM (64 banks of 8 KiB).
     pub fn multicomp(rom: &[u8], disk: File) -> io::Result<Self> {
+        Self::multicomp_with_ram(rom, disk, 512 * 1024)
+    }
+
+    /// Select 64, 128, 256, 512 or 1024 KiB of physical RAM.
+    /// The CPU address space remains 64 KiB; MMU entries select physical banks.
+    pub fn multicomp_with_ram(rom: &[u8], disk: File, ram_bytes: usize) -> io::Result<Self> {
+        if !(65536..=1048576).contains(&ram_bytes) || !ram_bytes.is_power_of_two() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Multicomp RAM must be 64, 128, 256, 512 or 1024 KiB",
+            ));
+        }
         let rom: Box<[u8; 8192]> = rom.to_vec().into_boxed_slice().try_into().map_err(|_| {
             io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -144,11 +193,13 @@ impl Machine {
             )
         })?;
         Ok(Self {
+            ram: vec![0; ram_bytes].into_boxed_slice(),
             acia_base: 0xffd0,
             timer_base: 0xffdd,
             rom: Some(rom),
             disk: Some(Disk {
                 file: disk,
+                persistent: false,
                 overlay: BTreeMap::new(),
                 lba: 0,
                 state: 0,
@@ -158,6 +209,51 @@ impl Machine {
             }),
             ..Self::default()
         })
+    }
+    /// Configure the total number of Multicomp serial ports, including /term.
+    /// Ports occupy $FFD0/$FFD1 through $FFD6/$FFD7. Call before CPU reset.
+    pub fn set_acia_count(&mut self, count: usize) -> io::Result<()> {
+        if self.rom.is_none() || !(1..=4).contains(&count) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Multicomp ACIA count must be 1 through 4",
+            ));
+        }
+        self.extra_acias.resize_with(count - 1, Acia::default);
+        Ok(())
+    }
+    pub fn acia_count(&self) -> usize {
+        1 + self.extra_acias.len()
+    }
+    pub fn serial(&self, index: usize) -> Option<&Acia> {
+        if index == 0 {
+            Some(&self.acia)
+        } else {
+            self.extra_acias.get(index - 1)
+        }
+    }
+    pub fn serial_mut(&mut self, index: usize) -> Option<&mut Acia> {
+        if index == 0 {
+            Some(&mut self.acia)
+        } else {
+            self.extra_acias.get_mut(index - 1)
+        }
+    }
+    /// Persist completed SD sectors to a read/write backing file. Enable before
+    /// running the CPU; an existing volatile overlay cannot be converted.
+    pub fn persist_disk_writes(&mut self) -> io::Result<()> {
+        let disk = self
+            .disk
+            .as_mut()
+            .ok_or_else(|| io::Error::other("no SD disk configured"))?;
+        if !disk.overlay.is_empty() {
+            return Err(io::Error::other("disk already has volatile writes"));
+        }
+        disk.file
+            .try_lock()
+            .map_err(|error| io::Error::other(format!("cannot lock disk for writing: {error}")))?;
+        disk.persistent = true;
+        Ok(())
     }
     pub fn load(&mut self, addr: u16, data: &[u8]) -> io::Result<()> {
         let start = addr as usize;
@@ -169,7 +265,7 @@ impl Machine {
         Ok(())
     }
     pub fn irq(&self) -> bool {
-        self.timer & 0x80 != 0 || self.acia.irq()
+        self.timer & 0x80 != 0 || self.acia.irq() || self.extra_acias.iter().any(Acia::irq)
     }
     #[inline]
     pub fn step(&mut self, cpu: &mut Cpu) -> Result<u64, CpuError> {
@@ -204,7 +300,11 @@ impl Machine {
                 slot as u8
             };
             let bank = usize::from(entry & 0x7f);
-            self.mapping.read_bases[slot] = if bank < 8 { bank << 13 } else { 65536 };
+            self.mapping.read_bases[slot] = if bank < self.ram.len() >> 13 {
+                bank << 13
+            } else {
+                self.ram.len()
+            };
             self.mapping.writable[slot] = !enabled || entry & 0x80 == 0;
         }
     }
@@ -216,7 +316,7 @@ impl Machine {
         let translated =
             self.mapping.read_bases[usize::from(addr) >> 13] | (usize::from(addr) & 8191);
         // This range check also proves the following RAM access is in bounds.
-        (translated < 65536).then_some(translated)
+        (translated < self.ram.len()).then_some(translated)
     }
 }
 impl Machine {
@@ -233,6 +333,15 @@ impl Machine {
             return self.timer;
         }
         if self.rom.is_some() {
+            if (0xffd2..=0xffd7).contains(&addr)
+                && let Some(acia) = self.extra_acias.get_mut(usize::from(addr - 0xffd2) / 2)
+            {
+                return if addr & 1 == 0 {
+                    acia.status()
+                } else {
+                    acia.rx.pop_front().unwrap_or(0xff)
+                };
+            }
             match addr {
                 0xffd2 | 0xffd4 => return 2,
                 0xffd3 | 0xffd5 | 0xffd6 | 0xffd7 => return 0xff,
@@ -269,6 +378,16 @@ impl Machine {
             return;
         }
         if self.rom.is_some() {
+            if (0xffd2..=0xffd7).contains(&addr)
+                && let Some(acia) = self.extra_acias.get_mut(usize::from(addr - 0xffd2) / 2)
+            {
+                if addr & 1 == 0 {
+                    acia.control(v);
+                } else {
+                    acia.tx.push(v);
+                }
+                return;
+            }
             match addr {
                 0xffd2..=0xffd7 => return,
                 0xffd8 => {
@@ -295,11 +414,13 @@ impl Machine {
                     if v & 16 == 0 {
                         if v & 0x20 == 0 {
                             self.fixed_top = false
-                        } else if self.rom_disabled && v & 128 == 0 {
+                        } else if self.mapper & 0xa0 == 0xa0 && v & 128 == 0 {
                             self.fixed_top = true
                         }
-                        self.mapper = v;
-                        self.rom_disabled = v & 128 != 0 || (self.rom_disabled && v & 0x20 != 0);
+                        // ROMDIS stays set during the fixed-top handshake.
+                        self.rom_disabled =
+                            v & 128 != 0 || (self.mapper & 0xa0 == 0xa0 && v & 0x20 != 0);
+                        self.mapper = v | if self.rom_disabled { 0x80 } else { 0 };
                         self.refresh_mapping();
                     }
                     return;
@@ -342,7 +463,10 @@ impl Machine {
         if self.rom.is_some() && addr >= 0xe000 && !self.rom_disabled {
             return;
         }
-        if self.mapper & 0x20 != 0 && !self.mapping.writable[usize::from(addr) >> 13] {
+        if self.mapper & 0x20 != 0
+            && !(self.fixed_top && addr >= 0xfe00)
+            && !self.mapping.writable[usize::from(addr) >> 13]
+        {
             return;
         }
         if let Some(p) = self.physical(addr) {
