@@ -1,15 +1,20 @@
-//! 6809 disassembler. OS-9 service requests (`SWI2` + code byte) decode as `OS9 F$xxx`.
-use super::os9;
+//! 6809 disassembler. An OS can decode its service requests (OS-9: `SWI2`
+//! + code byte as `OS9 F$xxx`) through [`disassemble_with`].
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Line {
     pub addr: u16,
     pub len: u16,
     pub text: String,
-    /// Branch/call destination or OS-9 service code, for the UI.
+    /// Branch/call destination or the service code, for the UI.
     pub target: Option<u16>,
     pub flow: Flow,
+    /// An OS service request (decoded by the OS hook).
+    pub svc: bool,
 }
+
+/// An OS's service-request decoder: (length, text, code) at an address.
+pub type SvcHook<'a> = &'a dyn Fn(&dyn Fn(u16) -> u8, u16) -> Option<(u16, String, u16)>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Flow {
@@ -136,6 +141,21 @@ impl Reader<'_> {
 
 /// Disassemble one instruction at `addr` using a side-effect-free reader.
 pub fn disassemble(mem: &dyn Fn(u16) -> u8, addr: u16) -> Line {
+    disassemble_with(mem, addr, &|_, _| None)
+}
+
+/// Disassemble, letting the OS decode its service requests first.
+pub fn disassemble_with(mem: &dyn Fn(u16) -> u8, addr: u16, svc: SvcHook) -> Line {
+    if let Some((len, text, code)) = svc(mem, addr) {
+        return Line {
+            addr,
+            len,
+            text,
+            target: Some(code),
+            flow: Flow::Call,
+            svc: true,
+        };
+    }
     let mut r = Reader {
         mem,
         pc: addr,
@@ -148,6 +168,7 @@ pub fn disassemble(mem: &dyn Fn(u16) -> u8, addr: u16) -> Line {
         text,
         target,
         flow,
+        svc: false,
     }
 }
 
@@ -161,12 +182,7 @@ fn decode(r: &mut Reader) -> (String, Option<u16>, Flow) {
     let op = if page != 0 { r.byte() } else { first };
     let bad = || (format!("FCB ${first:02X}"), None, Flow::Next);
     if page == 0x10 && op == 0x3f {
-        let code = r.byte();
-        return (
-            format!("OS9 {}", os9::service_name(code)),
-            Some(u16::from(code)),
-            Flow::Call,
-        );
+        return ("SWI2".into(), None, Flow::Call);
     }
     if page == 0x11 && op == 0x3f {
         return ("SWI3".into(), None, Flow::Call);
@@ -349,8 +365,8 @@ mod tests {
         assert_eq!(dis(&[0x20, 0xfe]), ("BRA $1000".into(), 2));
         assert_eq!(dis(&[0x10, 0x27, 0x00, 0x00]), ("LBEQ $1004".into(), 4));
         assert_eq!(dis(&[0xbd, 0xc0, 0x00]), ("JSR $C000".into(), 3));
-        assert_eq!(dis(&[0x10, 0x3f, 0x8a]), ("OS9 I$Write".into(), 3));
-        assert_eq!(dis(&[0x10, 0x3f, 0x03]), ("OS9 F$Fork".into(), 3));
+        // Without an OS hook SWI2 is a plain instruction.
+        assert_eq!(dis(&[0x10, 0x3f, 0x8a]), ("SWI2".into(), 2));
         assert_eq!(dis(&[0x4f]), ("CLRA".into(), 1));
         assert_eq!(dis(&[0x0f, 0x20]), ("CLR <$20".into(), 2));
         assert_eq!(dis(&[0x01]), ("FCB $01".into(), 1));

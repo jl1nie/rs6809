@@ -11,6 +11,7 @@ pub mod http;
 pub mod json;
 pub mod microware;
 pub mod os9;
+pub mod osmon;
 pub mod symbols;
 mod tables;
 
@@ -18,7 +19,7 @@ use crate::cpu::I;
 use crate::telnet::TelnetServer;
 use crate::{Bus, Cpu, Machine};
 use disasm::{Flow, disassemble};
-use os9::{Level, Regs, Tracer, View};
+use osmon::{OsMonitor, Regs, Tracer};
 use std::collections::{BTreeSet, VecDeque};
 use symbols::{Symbols, Target};
 use std::fmt::Write as _;
@@ -29,9 +30,6 @@ use std::time::{Duration, Instant};
 
 const UI: &str = include_str!("ui.html");
 
-/// Service requests after which modules may have moved:
-/// F$Link, F$Load, F$UnLink, F$Fork, F$Chain, F$Exit, F$UnLoad, F$NMLink, F$NMLoad, F$VModul.
-const MODULE_CALLS: [u8; 10] = [0x00, 0x01, 0x02, 0x03, 0x05, 0x06, 0x1d, 0x21, 0x22, 0x2e];
 
 pub fn json_str(s: &str) -> String {
     let mut o = String::with_capacity(s.len() + 2);
@@ -134,10 +132,10 @@ pub enum Stop {
     Error(String),
 }
 impl Stop {
-    fn describe(&self, t: &Tracer) -> String {
+    fn describe(&self, t: &Tracer, os: &dyn OsMonitor) -> String {
         let call = |id: &u64| {
             t.call(*id)
-                .map(|c| format!("{} (プロセス{})", os9::service_name(c.code), c.pid))
+                .map(|c| format!("{} (プロセス{})", os.service_name(c.code), c.pid))
                 .unwrap_or_default()
         };
         match self {
@@ -155,11 +153,11 @@ impl Stop {
             Stop::SysCall { code, pid } => {
                 format!(
                     "システムコール呼び出し {} (プロセス{pid})",
-                    os9::service_name(*code)
+                    os.service_name(*code)
                 )
             }
             Stop::SysReturn(id) => {
-                let err = t.call(*id).and_then(|c| c.error).map(os9::error_name);
+                let err = t.call(*id).and_then(|c| c.error).map(|e| os.error_name(e));
                 format!(
                     "システムコール復帰 {}{}",
                     call(id),
@@ -273,7 +271,13 @@ pub struct Ice {
     pub stop: Option<Stop>,
     goal: Goal,
     skip_checks: bool,
-    level: Option<Level>,
+    /// The OS layer; its structures are read once `os_ready`.
+    os: Box<dyn OsMonitor>,
+    os_ready: bool,
+    /// `os.svc_prefix()`, cached for the per-instruction check.
+    svc_prefix: &'static [u8],
+    /// `os.current_slot()` once the OS is ready.
+    os_slot: Option<usize>,
     detect_at: u64,
     /// Guest cycles per host second; 0 runs at full speed.
     pub speed: u64,
@@ -297,8 +301,14 @@ pub struct Ice {
 }
 
 impl Ice {
+    /// An ICE for NitrOS-9 (the OS of the Multicomp images).
     pub fn new(cpu: Cpu, machine: Machine, options: Options) -> Self {
+        Self::with_os(cpu, machine, options, Box::new(os9::Nitros9::default()))
+    }
+    pub fn with_os(cpu: Cpu, machine: Machine, options: Options, os: Box<dyn OsMonitor>) -> Self {
         Self {
+            svc_prefix: os.svc_prefix(),
+            os_slot: None,
             cpu,
             machine,
             breakpoints: BTreeSet::new(),
@@ -318,7 +328,8 @@ impl Ice {
             stop: Some(Stop::Pause),
             goal: Goal::None,
             skip_checks: false,
-            level: None,
+            os,
+            os_ready: false,
             detect_at: 0,
             speed: 0,
             actions: options.actions,
@@ -443,10 +454,12 @@ impl Ice {
         if self.symbols.tables.is_empty() {
             return;
         }
-        if self.level.is_none() {
-            self.level = View::detect(&self.machine).map(|v| v.level);
+        if !self.os_ready {
+            self.os_ready = self.os.detect(&self.machine);
+            self.os_slot = self.os.current_slot();
         }
-        if self.symbols.place(&self.machine, self.level) {
+        let images = if self.os_ready { self.os.images(&self.machine) } else { Vec::new() };
+        if self.symbols.place(&images) {
             self.reresolve();
         }
     }
@@ -456,24 +469,41 @@ impl Ice {
         (2..=4u16).any(|k| {
             let at = w.wrapping_sub(k);
             let l = disassemble(&|a| m.peek(a), at);
-            l.len == k && l.flow == Flow::Call && !l.text.starts_with("SWI") && !l.text.starts_with("OS9")
+            l.len == k && l.flow == Flow::Call && !l.text.starts_with("SWI") && !l.svc
         })
     }
     /// Return addresses on the stack, innermost first: (stack address, value).
     pub fn call_chain(&self, max: usize) -> Vec<(u16, u16)> {
         self.call_chain_from(self.cpu.s, max)
     }
-    pub fn view(&self) -> Option<View<'_>> {
-        self.level.map(|level| View::new(&self.machine, level))
+    /// The OS layer, once the OS has been found in memory.
+    pub fn os(&self) -> Option<&dyn OsMonitor> {
+        self.os_ready.then_some(&*self.os)
+    }
+    /// The OS layer for names and conventions, even before the OS runs.
+    pub fn os_layer(&self) -> &dyn OsMonitor {
+        &*self.os
     }
     fn current_proc(&self) -> Option<u16> {
-        self.view().map(|v| v.current())
+        self.os().map(|o| o.current(&self.machine))
     }
     fn detect(&mut self) {
-        if self.level.is_none() && self.cpu.cycles >= self.detect_at {
-            self.level = View::detect(&self.machine).map(|v| v.level);
+        if !self.os_ready && self.cpu.cycles >= self.detect_at {
+            self.os_ready = self.os.detect(&self.machine);
+            self.os_slot = self.os.current_slot();
             self.detect_at = self.cpu.cycles + 200_000;
         }
+    }
+    /// Disassemble with the OS's service-request convention.
+    pub fn dis(&self, addr: u16) -> disasm::Line {
+        let m = &self.machine;
+        self.dis_with(&|a| m.peek(a), addr)
+    }
+    pub fn dis_with(&self, read: &dyn Fn(u16) -> u8, addr: u16) -> disasm::Line {
+        let os = &*self.os;
+        disasm::disassemble_with(read, addr, &|read, at| {
+            os.svc_at(read, at).map(|s| (s.len, format!("{} {}", os.svc_mnemonic(), os.service_name(s.code)), u16::from(s.code)))
+        })
     }
 
     /// Execute one instruction (or interrupt entry) with all debug checks.
@@ -487,8 +517,8 @@ impl Ice {
         if !skip && (self.bp_at(pc) || self.phys_bp_at(pc)) {
             return Some(Stop::Breakpoint(pc));
         }
-        let os9 = if self.trace_os9 { self.level } else { None };
-        let desc = os9.map(|level| View::new(&self.machine, level).current());
+        let tracing = self.trace_os9 && self.os_ready;
+        let current = tracing.then(|| self.tracer.current());
         if let Goal::At {
             pc: target,
             s,
@@ -531,15 +561,19 @@ impl Ice {
             let bytes = [0u16, 1, 2, 3, 4].map(|i| m.peek(pc.wrapping_add(i)));
             rts = bytes[0] == 0x39 || (bytes[0] == 0x35 && bytes[1] & 0x80 != 0);
             return_insn = rts || bytes[0] == 0x3b;
-            let pid = match (os9, desc) {
-                (Some(level), Some(d)) => View::new(m, level).pid_of(d),
-                _ => 0,
+            let pid = current.map_or(0, |c| c.1);
+            // Decode from the bytes already fetched (a request fits in five).
+            let svc = if bytes.starts_with(self.svc_prefix) {
+                self.os.svc_at(&|a| bytes.get(usize::from(a.wrapping_sub(pc))).map_or_else(|| m.peek(a), |&b| b), pc)
+            } else {
+                None
             };
-            if bytes[0] == 0x10 && bytes[1] == 0x3f && !skip {
-                let code = bytes[2];
-                if self.break_calls.contains(&code) && self.break_pid.is_none_or(|p| p == pid) {
-                    return Some(Stop::SysCall { code, pid });
-                }
+            if let Some(svc) = svc
+                && !skip
+                && self.break_calls.contains(&svc.code)
+                && self.break_pid.is_none_or(|p| p == pid)
+            {
+                return Some(Stop::SysCall { code: svc.code, pid });
             }
             if self.trace.len() >= 4096 {
                 self.trace.pop_front();
@@ -550,12 +584,8 @@ impl Ice {
                 bytes,
                 pid,
             });
-            if let Some(level) = os9
-                && bytes[0] == 0x10
-                && bytes[1] == 0x3f
-            {
-                let v = View::new(&self.machine, level);
-                self.tracer.before(&self.machine, &v, &self.cpu);
+            if tracing && svc.is_some() {
+                self.tracer.before(&self.machine, &*self.os, &self.cpu);
             }
         }
         let old = self.cpu.cycles;
@@ -584,9 +614,8 @@ impl Ice {
         if let Some(e) = self.machine.disk_error() {
             return Some(Stop::Error(e.to_string()));
         }
-        if let Some(level) = os9 {
-            let v = View::new(&self.machine, level);
-            let (done, switch) = self.tracer.after(&self.machine, &v, &self.cpu);
+        if tracing {
+            let (done, switch) = self.tracer.after(&self.machine, &*self.os, self.os_slot, &self.cpu);
             if let Some(id) = done
                 && let Some(c) = self.tracer.call(id)
                 && (self.break_returns.contains(&c.code)
@@ -597,7 +626,7 @@ impl Ice {
             }
             let module_change = done
                 .and_then(|id| self.tracer.call(id))
-                .is_some_and(|c| MODULE_CALLS.contains(&c.code));
+                .is_some_and(|c| self.os.image_calls().contains(&c.code));
             if module_change || switch.is_some() {
                 self.refresh_symbols();
             }
@@ -700,7 +729,7 @@ impl Ice {
             Stop::Breakpoint(pc) => self.hit_ids(pc),
             _ => Vec::new(),
         };
-        self.dap.stopped(&s, &s.describe(&self.tracer), hits);
+        self.dap.stopped(&s, &s.describe(&self.tracer, &*self.os), hits);
         self.stop = Some(s);
     }
     /// Source-level step (as the editor's step over / step into).
@@ -765,8 +794,7 @@ impl Ice {
     }
 
     fn step_over(&mut self) {
-        let m = &self.machine;
-        let l = disassemble(&|a| m.peek(a), self.cpu.pc);
+        let l = self.dis(self.cpu.pc);
         if l.flow == Flow::Call {
             let goal = Goal::At {
                 pc: self.cpu.pc.wrapping_add(l.len),
@@ -918,9 +946,9 @@ impl Ice {
                 }
                 http::Response::json(self.state_json())
             }
-            "/api/os9break" => {
+            "/api/os/break" => {
                 if let Some(c) = p("code") {
-                    let code = os9::service_code(c).or_else(|| parse_addr(c).map(|v| v as u8));
+                    let code = self.os.service_code(c).or_else(|| parse_addr(c).map(|v| v as u8));
                     let Some(code) = code else { return bad("code") };
                     let set = if p("when") == Some("return") {
                         &mut self.break_returns
@@ -1003,23 +1031,24 @@ impl Ice {
                     json_str(&text)
                 ))
             }
-            "/api/os9/procs" => http::Response::json(self.procs_json()),
-            "/api/os9/modules" => http::Response::json(self.modules_json()),
-            "/api/os9/memmap" => http::Response::json(self.memmap_json()),
-            "/api/os9/calls" => {
+            "/api/os/info" => http::Response::json(self.os.info().to_string()),
+            "/api/os/procs" => http::Response::json(self.procs_json()),
+            "/api/os/modules" => http::Response::json(self.modules_json()),
+            "/api/os/memmap" => http::Response::json(self.memmap_json()),
+            "/api/os/calls" => {
                 let since = p("since").and_then(parse_num).map_or(0, u64::from);
                 let limit = p("limit").and_then(parse_num).unwrap_or(2000) as usize;
                 let user = p("user") == Some("1");
                 let parent = p("parent").and_then(parse_num).map(u64::from);
                 let pid = p("pid").and_then(parse_num).map(|n| n as u8);
-                let f = |c: &os9::Call| {
+                let f = |c: &osmon::Call| {
                     (!user || !c.system)
                         && parent.is_none_or(|q| c.parent == Some(q))
                         && pid.is_none_or(|q| c.pid == q)
                 };
                 http::Response::json(self.calls_json(since, limit, &f))
             }
-            "/api/os9/services" => http::Response::json(Self::services_json()),
+            "/api/os/services" => http::Response::json(self.services_json()),
             "/api/symbols" => {
                 if p("op") == Some("clear") {
                     self.symbols.clear();
@@ -1074,20 +1103,18 @@ impl Ice {
         if back == 0 {
             return addr;
         }
-        let m = &self.machine;
-        let read = |a| m.peek(a);
         // Try start points and keep one whose decode lands exactly on addr.
         for dist in (back..=back * 4).rev() {
             let mut a = addr.wrapping_sub(dist);
             let mut count = 0;
             while a != addr && addr.wrapping_sub(a) <= dist {
-                a = a.wrapping_add(disassemble(&read, a).len.max(1));
+                a = a.wrapping_add(self.dis(a).len.max(1));
                 count += 1;
             }
             if a == addr && count >= back {
                 let mut a = addr.wrapping_sub(dist);
                 for _ in 0..count - back {
-                    a = a.wrapping_add(disassemble(&read, a).len.max(1));
+                    a = a.wrapping_add(self.dis(a).len.max(1));
                 }
                 return a;
             }
@@ -1108,7 +1135,7 @@ impl Ice {
         let stop = self
             .stop
             .as_ref()
-            .map(|s| s.describe(&self.tracer))
+            .map(|s| s.describe(&self.tracer, &*self.os))
             .unwrap_or_default();
         let _ = write!(
             o,
@@ -1170,13 +1197,13 @@ impl Ice {
             .collect();
         let names = |s: &BTreeSet<u8>| {
             s.iter()
-                .map(|c| json_str(&os9::service_name(*c)))
+                .map(|c| json_str(&self.os.service_name(*c)))
                 .collect::<Vec<_>>()
                 .join(",")
         };
         let _ = write!(
             o,
-            "\"breakpoints\":[{}],\"watches\":[{}],\"os9break\":{{\"calls\":[{}],\"returns\":[{}],\"errors\":{},\"switch\":{},\"pid\":{},\"trace\":{}}},",
+            "\"breakpoints\":[{}],\"watches\":[{}],\"osbreak\":{{\"calls\":[{}],\"returns\":[{}],\"errors\":{},\"switch\":{},\"pid\":{},\"trace\":{}}},",
             bps.join(","),
             ws.join(","),
             names(&self.break_calls),
@@ -1186,30 +1213,22 @@ impl Ice {
             self.break_pid.unwrap_or(0),
             self.trace_os9
         );
-        match self.view() {
-            Some(v) => {
-                let cur = v.current();
-                let [aq, wq, sq] = v.queues();
-                let list = |q: &[u8]| {
-                    q.iter()
-                        .map(|p| p.to_string())
-                        .collect::<Vec<_>>()
-                        .join(",")
-                };
-                let _ = write!(
-                    o,
-                    "\"os9\":{{\"level\":{},\"pid\":{},\"active\":[{}],\"waiting\":[{}],\"sleeping\":[{}],\"callVersion\":{},\"calls\":{},\"switches\":{}}},",
-                    if v.level == Level::One { 1 } else { 2 },
-                    v.pid_of(cur),
-                    list(&aq),
-                    list(&wq),
-                    list(&sq),
-                    self.tracer.version,
-                    self.tracer.last_id(),
-                    self.tracer.switches.len()
-                );
+        match self.os() {
+            Some(os) => {
+                let m = &self.machine;
+                // OS-specific fields (e.g. level and queues), then the trace counters.
+                let mut fields: Vec<String> = os
+                    .summary(m)
+                    .into_iter()
+                    .map(|(k, v)| format!("{}:{v}", json_str(k)))
+                    .collect();
+                fields.insert(1.min(fields.len()), format!("\"pid\":{}", os.pid_of(m, os.current(m))));
+                fields.push(format!("\"callVersion\":{}", self.tracer.version));
+                fields.push(format!("\"calls\":{}", self.tracer.last_id()));
+                fields.push(format!("\"switches\":{}", self.tracer.switches.len()));
+                let _ = write!(o, "\"os\":{{{}}},", fields.join(","));
             }
-            None => o.push_str("\"os9\":null,"),
+            None => o.push_str("\"os\":null,"),
         }
         let _ = write!(
             o,
@@ -1221,16 +1240,15 @@ impl Ice {
 
     fn disasm_json(&self, start: u16, n: usize) -> String {
         let m = &self.machine;
-        let read = |a| m.peek(a);
         let mut a = start;
         let mut items = Vec::new();
         for _ in 0..n {
-            let l = disassemble(&read, a);
+            let l = self.dis(a);
             let bytes: Vec<String> = (0..l.len)
                 .map(|i| format!("{:02X}", m.peek(a.wrapping_add(i))))
                 .collect();
-            let explain = if l.text.starts_with("OS9 ") {
-                l.target.map(|c| os9::explain(c as u8)).unwrap_or("")
+            let explain = if l.svc {
+                l.target.map(|c| self.os.explain(c as u8)).unwrap_or("")
             } else {
                 ""
             };
@@ -1238,7 +1256,7 @@ impl Ice {
             let label = sym.exact(m, a).map_or("null".into(), json_str);
             // Name the destination of branches, calls and extended operands.
             let target = match l.target {
-                Some(t) if !l.text.starts_with("OS9 ") => sym.label(m, t),
+                Some(t) if !l.svc => sym.label(m, t),
                 _ => None,
             };
             let src = match sym.line(m, a) {
@@ -1255,7 +1273,7 @@ impl Ice {
                 _ => "null".into(),
             };
             items.push(format!(
-                "{{\"addr\":{},\"bytes\":\"{}\",\"text\":{},\"bp\":{},\"phys\":{},\"note\":{},\"label\":{},\"tsym\":{},\"src\":{}}}",
+                "{{\"addr\":{},\"bytes\":\"{}\",\"text\":{},\"bp\":{},\"phys\":{},\"note\":{},\"label\":{},\"tsym\":{},\"src\":{},\"svc\":{}}}",
                 a,
                 bytes.join(" "),
                 json_str(&l.text),
@@ -1264,7 +1282,8 @@ impl Ice {
                 json_str(explain),
                 label,
                 target.map_or("null".into(), |t| json_str(&t)),
-                src
+                src,
+                l.svc
             ));
             a = a.wrapping_add(l.len.max(1));
         }
@@ -1354,25 +1373,15 @@ impl Ice {
                     })
                     .collect()
             }
-            "sys" => match self.view() {
-                Some(v) => (0..len).map(|i| v.sys(addr.wrapping_add(i))).collect(),
-                None => (0..len).map(|i| m.peek(addr.wrapping_add(i))).collect(),
+            // OS address spaces (OS-9: `sys`, `pidN`).
+            space => match self.os() {
+                Some(os) if space == "sys" || space.starts_with("pid") => (0..len)
+                    .map(|i| os.read_space(m, space, addr.wrapping_add(i)).unwrap_or(0xff))
+                    .collect(),
+                None if space == "sys" => (0..len).map(|i| m.peek(addr.wrapping_add(i))).collect(),
+                _ if space == "sys" || space.starts_with("pid") => vec![0xff; usize::from(len)],
+                _ => (0..len).map(|i| m.peek(addr.wrapping_add(i))).collect(),
             },
-            s if s.starts_with("pid") => {
-                let pid = s[3..].parse::<u8>().unwrap_or(0);
-                match self.view().and_then(|v| {
-                    v.processes()
-                        .into_iter()
-                        .find(|p| p.id == pid)
-                        .map(|p| (v, p.addr))
-                }) {
-                    Some((v, d)) => (0..len)
-                        .map(|i| v.proc_read(d, addr.wrapping_add(i)))
-                        .collect(),
-                    None => vec![0xff; usize::from(len)],
-                }
-            }
-            _ => (0..len).map(|i| m.peek(addr.wrapping_add(i))).collect(),
         };
         let hex: String = bytes.iter().map(|b| format!("{b:02X}")).collect();
         format!("{{\"addr\":{addr},\"hex\":\"{hex}\"}}")
@@ -1387,10 +1396,7 @@ impl Ice {
             .map(|t| {
                 let pc = t.regs.pc;
                 let b = t.bytes;
-                let l = disassemble(
-                    &|a| b.get(usize::from(a.wrapping_sub(pc))).copied().unwrap_or(0),
-                    pc,
-                );
+                let l = self.dis_with(&|a| b.get(usize::from(a.wrapping_sub(pc))).copied().unwrap_or(0), pc);
                 format!(
                     "{{\"cycle\":{},\"pid\":{},\"regs\":{},\"text\":{}}}",
                     t.cycle,
@@ -1404,64 +1410,49 @@ impl Ice {
     }
 
     fn procs_json(&self) -> String {
-        let Some(v) = self.view() else {
+        let Some(os) = self.os() else {
             return "{\"procs\":[]}".into();
         };
-        let items: Vec<String> = v
-            .processes()
+        let items: Vec<String> = os
+            .processes(&self.machine)
             .iter()
             .map(|p| {
-                let paths: Vec<String> = p.paths.iter().map(|x| x.to_string()).collect();
-                let dat: Vec<String> = p.dat.iter().map(|x| x.to_string()).collect();
-                format!(
-                    "{{\"id\":{},\"addr\":{},\"parent\":{},\"sibling\":{},\"child\":{},\"sp\":{},\"task\":{},\"pages\":{},\"user\":{},\"prior\":{},\"age\":{},\"state\":{},\"queue\":\"{}\",\"module\":{},\"signal\":{},\"paths\":[{}],\"dat\":[{}]}}",
-                    p.id, p.addr, p.parent, p.sibling, p.child, p.sp,
-                    p.task.map_or("null".into(), |t| t.to_string()),
-                    p.pages, p.user, p.prior, p.age, p.state, p.queue,
-                    json_str(&p.module), p.signal, paths.join(","), dat.join(",")
-                )
+                let mut f = vec![
+                    format!("\"id\":{}", p.id),
+                    format!("\"parent\":{}", p.parent),
+                    format!("\"queue\":{}", json_str(p.queue)),
+                ];
+                f.extend(p.fields.iter().map(|(k, v)| format!("{}:{v}", json_str(k))));
+                format!("{{{}}}", f.join(","))
             })
             .collect();
         format!("{{\"procs\":[{}]}}", items.join(","))
     }
 
     fn modules_json(&self) -> String {
-        let Some(v) = self.view() else {
+        let Some(os) = self.os() else {
             return "{\"modules\":[]}".into();
         };
-        let items: Vec<String> = v
-            .modules()
+        let items: Vec<String> = os
+            .images(&self.machine)
             .iter()
             .map(|m| {
-                let blocks: Vec<String> = m.blocks.iter().map(|b| b.to_string()).collect();
-                format!(
-                    "{{\"name\":{},\"addr\":{},\"size\":{},\"type\":{},\"revs\":{},\"links\":{},\"blocks\":[{}]}}",
-                    json_str(&m.name), m.addr, m.size, m.kind, m.revs, m.links, blocks.join(",")
-                )
+                let mut f = vec![format!("\"name\":{}", json_str(&m.name))];
+                f.extend(m.fields.iter().map(|(k, v)| format!("{}:{v}", json_str(k))));
+                format!("{{{}}}", f.join(","))
             })
             .collect();
         format!("{{\"modules\":[{}]}}", items.join(","))
     }
 
     fn memmap_json(&self) -> String {
-        let Some(v) = self.view() else {
-            return "{\"unit\":0,\"map\":[]}".into();
-        };
-        let (unit, map) = v.memory_map();
-        let cells: Vec<String> = map.iter().map(|b| b.to_string()).collect();
-        let sys: Vec<String> = if v.level == Level::Two {
-            v.sys_dat().iter().map(|b| b.to_string()).collect()
-        } else {
-            Vec::new()
-        };
-        format!(
-            "{{\"unit\":{unit},\"map\":[{}],\"sysdat\":[{}]}}",
-            cells.join(","),
-            sys.join(",")
-        )
+        match self.os() {
+            Some(os) => os.memory_map(&self.machine).to_string(),
+            None => "{\"unit\":0,\"map\":[]}".into(),
+        }
     }
 
-    fn calls_json(&self, since: u64, limit: usize, filter: &dyn Fn(&os9::Call) -> bool) -> String {
+    fn calls_json(&self, since: u64, limit: usize, filter: &dyn Fn(&osmon::Call) -> bool) -> String {
         let generic = |r: &Regs| {
             format!(
                 "A=${:02X} B=${:02X} X=${:04X} Y=${:04X} U=${:04X}",
@@ -1484,7 +1475,7 @@ impl Ice {
                     c.end.map_or("null".into(), |e| e.to_string()),
                     c.pid,
                     c.code,
-                    json_str(&os9::service_name(c.code)),
+                    json_str(&self.os.service_name(c.code)),
                     c.system,
                     c.depth,
                     Self::regs_json(&c.inp),
@@ -1495,7 +1486,7 @@ impl Ice {
                     c.no_return,
                     c.inner
                         .iter()
-                        .map(|(code, n)| format!("[{},{n}]", json_str(&os9::service_name(*code))))
+                        .map(|(code, n)| format!("[{},{n}]", json_str(&self.os.service_name(*code))))
                         .collect::<Vec<_>>()
                         .join(",")
                 )
@@ -1517,15 +1508,18 @@ impl Ice {
         )
     }
 
-    fn services_json() -> String {
-        let items: Vec<String> = tables::SERVICES
+    fn services_json(&self) -> String {
+        let items: Vec<String> = self
+            .os
+            .services()
             .iter()
-            .map(|(c, n, d)| {
+            .map(|v| {
                 format!(
-                    "{{\"code\":{c},\"name\":{},\"desc\":{},\"explain\":{}}}",
-                    json_str(n),
-                    json_str(d),
-                    json_str(os9::explain(*c))
+                    "{{\"code\":{},\"name\":{},\"desc\":{},\"explain\":{}}}",
+                    v.code,
+                    json_str(&v.name),
+                    json_str(&v.desc),
+                    json_str(v.explain)
                 )
             })
             .collect();

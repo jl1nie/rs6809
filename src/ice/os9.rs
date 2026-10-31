@@ -1,8 +1,9 @@
 //! NitrOS-9 awareness for the ICE: service names, kernel structures and a
 //! system-call tracer. Offsets follow `defs/os9.d` of the reference kit.
+use super::json::{Json, obj};
+use super::osmon::{Call, Image, OsMonitor, PathNames, Process as OsProcess, Regs, Service, Svc};
 use super::tables::{ERRORS, SERVICES, STATUS_CODES};
-use crate::{Cpu, Machine};
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use crate::Machine;
 
 pub fn service_name(code: u8) -> String {
     SERVICES
@@ -129,37 +130,6 @@ pub fn explain(code: u8) -> &'static str {
 pub enum Level {
     One,
     Two,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct Regs {
-    pub a: u8,
-    pub b: u8,
-    pub dp: u8,
-    pub cc: u8,
-    pub x: u16,
-    pub y: u16,
-    pub u: u16,
-    pub s: u16,
-    pub pc: u16,
-}
-impl Regs {
-    pub fn of(c: &Cpu) -> Self {
-        Self {
-            a: c.a,
-            b: c.b,
-            dp: c.dp,
-            cc: c.cc,
-            x: c.x,
-            y: c.y,
-            u: c.u,
-            s: c.s,
-            pc: c.pc,
-        }
-    }
-    pub fn d(&self) -> u16 {
-        u16::from_be_bytes([self.a, self.b])
-    }
 }
 
 /// Offsets that differ between Level 1 and Level 2 process descriptors.
@@ -553,79 +523,6 @@ impl<'a> View<'a> {
     }
 }
 
-/// One traced service request, filled in on entry and completed on return.
-#[derive(Debug, Clone)]
-pub struct Call {
-    pub id: u64,
-    pub version: u64,
-    pub cycle: u64,
-    pub end: Option<u64>,
-    pub pid: u8,
-    pub code: u8,
-    pub system: bool,
-    pub depth: u8,
-    /// Innermost unfinished call of the same process when this one started.
-    pub parent: Option<u64>,
-    /// Kernel-internal requests made while this user call ran, by code.
-    /// Kept even after the individual internal calls leave the log.
-    pub inner: Vec<(u8, u32)>,
-    pub inp: Regs,
-    pub out: Option<Regs>,
-    pub args: String,
-    pub result: String,
-    pub error: Option<u8>,
-    /// Never returns to the caller (F$Exit, F$Chain, F$NProc) or was abandoned.
-    pub no_return: bool,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct Switch {
-    pub cycle: u64,
-    pub from: u8,
-    pub to: u8,
-}
-
-struct Pending {
-    index: u64,
-    /// The outermost user-state call this request runs on behalf of.
-    root: u64,
-    ret_pc: u16,
-    s: u16,
-    pid: u8,
-}
-
-/// Records every SWI2 service request and context switch.
-pub struct Tracer {
-    pub calls: BTreeMap<u64, Call>,
-    user_ids: VecDeque<u64>,
-    system_ids: VecDeque<u64>,
-    pub switches: VecDeque<Switch>,
-    next_id: u64,
-    pub version: u64,
-    pending: Vec<Pending>,
-    ret_hint: Vec<u8>,
-    last_proc: u16,
-    paths: HashMap<(u8, u8), String>,
-    capacity: usize,
-}
-impl Default for Tracer {
-    fn default() -> Self {
-        Self {
-            calls: BTreeMap::new(),
-            user_ids: VecDeque::new(),
-            system_ids: VecDeque::new(),
-            switches: VecDeque::new(),
-            next_id: 1,
-            version: 0,
-            pending: Vec::new(),
-            ret_hint: vec![0; 65536],
-            last_proc: 0,
-            paths: HashMap::new(),
-            capacity: 60000,
-        }
-    }
-}
-
 fn printable(bytes: &[u8]) -> String {
     let mut s = String::new();
     for &b in bytes {
@@ -671,7 +568,11 @@ fn preview(m: &Machine, at: u16, len: u16) -> String {
     s
 }
 
-impl Tracer {
+/// Argument and result texts for the call log.
+struct Describe<'a> {
+    paths: &'a PathNames,
+}
+impl Describe<'_> {
     fn path_label(&self, pid: u8, path: u8) -> String {
         match self.paths.get(&(pid, path)) {
             Some(n) => format!("{path}({n})"),
@@ -783,221 +684,245 @@ impl Tracer {
         }
     }
 
-    /// User calls and system-state calls are kept separately so the flood
-    /// of kernel-internal requests never evicts a pending user request.
-    fn push(&mut self, c: Call) {
-        let (ids, cap) = if c.system {
-            (&mut self.system_ids, self.capacity)
-        } else {
-            (&mut self.user_ids, self.capacity / 4)
-        };
-        if ids.len() >= cap
-            && let Some(old) = ids.pop_front()
-        {
-            self.calls.remove(&old);
+}
+
+/// NitrOS-9 Level 1 and Level 2 for the ICE.
+#[derive(Default)]
+pub struct Nitros9 {
+    level: Option<Level>,
+}
+
+impl Nitros9 {
+    fn view<'m>(&self, m: &'m Machine) -> Option<View<'m>> {
+        self.level.map(|l| View::new(m, l))
+    }
+    pub fn level(&self) -> Option<Level> {
+        self.level
+    }
+}
+
+fn blocks_json(v: &[u16]) -> Json {
+    Json::Arr(v.iter().map(|&b| b.into()).collect())
+}
+
+impl OsMonitor for Nitros9 {
+    fn detect(&mut self, m: &Machine) -> bool {
+        if self.level.is_none() {
+            self.level = View::detect(m).map(|v| v.level);
         }
-        ids.push_back(c.id);
-        self.calls.insert(c.id, c);
+        self.level.is_some()
     }
-    fn get_mut(&mut self, id: u64) -> Option<&mut Call> {
-        self.calls.get_mut(&id)
+    fn info(&self) -> Json {
+        let two = self.level == Some(Level::Two);
+        let q = |key: &str, label: &str| obj([("key", key.into()), ("label", label.into())]);
+        obj([
+            ("os", "nitros9".into()),
+            ("name", "OS-9".into()),
+            ("title", if two { "NitrOS-9 Level 2" } else { "NitrOS-9 Level 1" }.into()),
+            ("level", if two { 2 } else { 1 }.into()),
+            ("current", "実行中 D.Proc".into()),
+            (
+                "queues",
+                Json::Arr(vec![
+                    q("active", "アクティブ D.AProcQ（実行待ち）"),
+                    q("waiting", "待機 D.WProcQ（F$Wait）"),
+                    q("sleeping", "睡眠 D.SProcQ（F$Sleep・I/O待ち）"),
+                ]),
+            ),
+            ("image", "モジュール".into()),
+            ("memmap", if two { "blocks" } else { "pages" }.into()),
+            ("errorLabel", "OS-9 エラー復帰".into()),
+            ("switchLabel", "OS-9 プロセス切り替え".into()),
+            (
+                "spaces",
+                Json::Arr(vec![obj([("key", "sys".into()), ("label", "OS-9システム空間".into())])]),
+            ),
+        ])
     }
-    pub fn last_id(&self) -> u64 {
-        self.next_id - 1
+    fn summary(&self, m: &Machine) -> Vec<(&'static str, Json)> {
+        let Some(v) = self.view(m) else { return Vec::new() };
+        let [aq, wq, sq] = v.queues();
+        let ids = |q: Vec<u8>| Json::Arr(q.into_iter().map(Json::from).collect());
+        vec![
+            ("level", if v.level == Level::One { 1 } else { 2 }.into()),
+            ("active", ids(aq)),
+            ("waiting", ids(wq)),
+            ("sleeping", ids(sq)),
+        ]
     }
-    /// Call before executing the instruction at `cpu.pc`. Returns the new
-    /// call id when the instruction is an OS-9 service request.
-    pub fn before(&mut self, m: &Machine, view: &View, cpu: &Cpu) -> Option<u64> {
-        if m.peek(cpu.pc) != 0x10 || m.peek(cpu.pc.wrapping_add(1)) != 0x3f {
+    fn svc_at(&self, read: &dyn Fn(u16) -> u8, pc: u16) -> Option<Svc> {
+        if read(pc) != 0x10 || read(pc.wrapping_add(1)) != 0x3f {
             return None;
         }
-        let code = m.peek(cpu.pc.wrapping_add(2));
-        let desc = view.current();
-        let pid = view.pid_of(desc);
-        let state_off = if view.level == Level::One { 0x0d } else { 0x0c };
-        let system = desc != 0 && view.sys(desc.wrapping_add(state_off)) & 0x80 != 0;
-        let inp = Regs::of(cpu);
-        // Kernel-internal requests are frequent; their registers are formatted on demand.
-        let args = if system {
-            String::new()
-        } else {
-            self.describe_entry(m, pid, code, &inp)
-        };
-        if !system {
-            // A process in user state has no unfinished kernel calls: any
-            // leftovers left through another path (signals, process exit).
-            let ret_hint = &mut self.ret_hint;
-            let calls = &mut self.calls;
-            self.pending.retain(|p| {
-                if p.pid != pid {
-                    return true;
-                }
-                ret_hint[usize::from(p.ret_pc)] -= 1;
-                if let Some(c) = calls.get_mut(&p.index) {
-                    c.no_return = true;
-                }
-                false
-            });
-        }
-        let depth = self
-            .pending
-            .iter()
-            .filter(|p| p.pid == pid)
-            .count()
-            .min(255) as u8;
-        let outer = self.pending.iter().rev().find(|p| p.pid == pid);
-        let parent = outer.map(|p| p.index);
-        let id = self.next_id;
-        let root = outer.map_or(id, |p| p.root);
-        if root != id
-            && let Some(r) = self.calls.get_mut(&root)
-        {
-            match r.inner.iter_mut().find(|(c, _)| *c == code) {
-                Some((_, n)) => *n += 1,
-                None => r.inner.push((code, 1)),
-            }
-        }
-        self.next_id += 1;
-        self.version += 1;
-        let no_return = matches!(code, 0x05 | 0x06 | 0x2d);
-        self.push(Call {
-            id,
-            version: self.version,
-            cycle: cpu.cycles,
-            end: None,
-            pid,
-            code,
-            system,
-            depth,
-            parent,
-            inner: Vec::new(),
-            inp,
-            out: None,
-            args,
-            result: if no_return {
-                "(戻らない)".into()
-            } else {
-                String::new()
-            },
-            error: None,
-            no_return,
-        });
-        if !no_return {
-            let ret_pc = cpu.pc.wrapping_add(3);
-            // A process re-entering the same frame abandoned its old call.
-            if let Some(i) = self
-                .pending
-                .iter()
-                .position(|p| p.ret_pc == ret_pc && p.s == cpu.s && p.pid == pid)
-            {
-                let old = self.pending.remove(i);
-                self.ret_hint[usize::from(old.ret_pc)] -= 1;
-                if let Some(c) = self.get_mut(old.index) {
-                    c.no_return = true;
-                }
-            }
-            if self.pending.len() >= 256 {
-                let old = self.pending.remove(0);
-                self.ret_hint[usize::from(old.ret_pc)] -= 1;
-            }
-            self.ret_hint[usize::from(ret_pc)] += 1;
-            self.pending.push(Pending {
-                index: id,
-                root,
-                ret_pc,
-                s: cpu.s,
-                pid,
-            });
-        }
-        Some(id)
+        let code = read(pc.wrapping_add(2));
+        // F$Chain, F$Exit and F$NProc never return to the caller.
+        Some(Svc { code, len: 3, no_return: matches!(code, 0x05 | 0x06 | 0x2d) })
     }
-
-    /// Call after each instruction. Returns a completed call id and any context switch.
-    pub fn after(&mut self, m: &Machine, view: &View, cpu: &Cpu) -> (Option<u64>, Option<Switch>) {
-        let mut switch = None;
-        let desc = view.current();
-        if desc != self.last_proc {
-            let s = Switch {
-                cycle: cpu.cycles,
-                from: view.pid_of(self.last_proc),
-                to: view.pid_of(desc),
-            };
-            self.last_proc = desc;
-            if s.from != s.to {
-                if self.switches.len() >= self.capacity {
-                    self.switches.pop_front();
-                }
-                self.switches.push_back(s);
-                switch = Some(s);
-            }
-        }
-        if self.ret_hint[usize::from(cpu.pc)] == 0 {
-            return (None, switch);
-        }
-        let pid = view.pid_of(desc);
-        let Some(i) = self
-            .pending
-            .iter()
-            .rposition(|p| p.ret_pc == cpu.pc && p.s == cpu.s && p.pid == pid)
-        else {
-            return (None, switch);
-        };
-        let p = self.pending.remove(i);
-        self.ret_hint[usize::from(p.ret_pc)] -= 1;
-        let out = Regs::of(cpu);
-        let Some(call) = self.calls.get(&p.index) else {
-            return (None, switch);
-        };
-        let result = if call.system && out.cc & 1 == 0 {
-            String::new()
-        } else {
-            self.describe_exit(m, call, &out)
-        };
-        let (code, system, inp) = (call.code, call.system, call.inp);
-        let opened = (matches!(code, 0x83 | 0x84) && !system)
-            .then(|| call.args.split('"').nth(1).map(str::to_string))
-            .flatten();
-        let error = (out.cc & 1 != 0).then_some(out.b);
-        // Learn path names so later I/O calls show what a path number refers to.
-        if error.is_none() && !system {
-            match code {
-                0x83 | 0x84 => {
-                    if let Some(name) = opened {
-                        self.paths.insert((pid, out.a), name);
-                    }
-                }
-                0x82 => {
-                    if let Some(n) = self.paths.get(&(pid, inp.a)).cloned() {
-                        self.paths.insert((pid, out.a), n);
-                    }
-                }
-                0x8F => {
-                    self.paths.remove(&(pid, inp.a));
-                }
-                0x03 => {
-                    let inherited: Vec<_> = (0..3)
-                        .filter_map(|k| self.paths.get(&(pid, k)).map(|n| (k, n.clone())))
-                        .collect();
-                    for (k, n) in inherited {
-                        self.paths.insert((out.a, k), n);
-                    }
-                }
-                _ => (),
-            }
-        }
-        self.version += 1;
-        let version = self.version;
-        if let Some(c) = self.get_mut(p.index) {
-            c.end = Some(cpu.cycles);
-            c.out = Some(out);
-            c.result = result;
-            c.error = error;
-            c.version = version;
-        }
-        (Some(p.index), switch)
+    fn svc_prefix(&self) -> &'static [u8] {
+        &[0x10, 0x3f]
     }
-    pub fn call(&self, id: u64) -> Option<&Call> {
-        self.calls.get(&id)
+    fn svc_mnemonic(&self) -> &'static str {
+        "OS9"
+    }
+    fn service_name(&self, code: u8) -> String {
+        service_name(code)
+    }
+    fn service_code(&self, name: &str) -> Option<u8> {
+        service_code(name)
+    }
+    fn explain(&self, code: u8) -> &'static str {
+        explain(code)
+    }
+    fn error_name(&self, code: u8) -> String {
+        error_name(code)
+    }
+    fn services(&self) -> Vec<Service> {
+        SERVICES
+            .iter()
+            .map(|(c, n, d)| Service { code: *c, name: n.to_string(), desc: d.to_string(), explain: explain(*c) })
+            .collect()
+    }
+    fn image_calls(&self) -> &'static [u8] {
+        // F$Link, F$Load, F$UnLink, F$Fork, F$Chain, F$Exit, F$UnLoad, F$NMLink, F$NMLoad, F$VModul.
+        &[0x00, 0x01, 0x02, 0x03, 0x05, 0x06, 0x1d, 0x21, 0x22, 0x2e]
+    }
+    fn current(&self, m: &Machine) -> u16 {
+        self.view(m).map_or(0, |v| v.current())
+    }
+    fn pid_of(&self, m: &Machine, key: u16) -> u8 {
+        self.view(m).map_or(0, |v| v.pid_of(key))
+    }
+    fn current_slot(&self) -> Option<usize> {
+        // D.Proc in the direct page; system block 0 is physical 0 in Level 2,
+        // and Level 1 maps low memory one to one.
+        self.level.map(|l| if l == Level::One { 0x4b } else { 0x50 })
+    }
+    fn in_system(&self, m: &Machine, key: u16) -> bool {
+        let Some(v) = self.view(m) else { return false };
+        let state_off = if v.level == Level::One { 0x0d } else { 0x0c };
+        v.sys(key.wrapping_add(state_off)) & 0x80 != 0
+    }
+    fn describe_entry(&self, m: &Machine, paths: &PathNames, pid: u8, code: u8, r: &Regs) -> String {
+        Describe { paths }.describe_entry(m, pid, code, r)
+    }
+    fn describe_exit(&self, m: &Machine, call: &Call, r: &Regs) -> String {
+        Describe { paths: &PathNames::new() }.describe_exit(m, call, r)
+    }
+    fn error_of(&self, r: &Regs) -> Option<u8> {
+        (r.cc & 1 != 0).then_some(r.b)
+    }
+    fn learn(&self, call: &Call, out: &Regs, pid: u8, paths: &mut PathNames) {
+        let inp = &call.inp;
+        match call.code {
+            0x83 | 0x84 => {
+                if let Some(name) = call.args.split('"').nth(1) {
+                    paths.insert((pid, out.a), name.to_string());
+                }
+            }
+            0x82 => {
+                if let Some(n) = paths.get(&(pid, inp.a)).cloned() {
+                    paths.insert((pid, out.a), n);
+                }
+            }
+            0x8F => {
+                paths.remove(&(pid, inp.a));
+            }
+            0x03 => {
+                let inherited: Vec<_> = (0..3).filter_map(|k| paths.get(&(pid, k)).map(|n| (k, n.clone()))).collect();
+                for (k, n) in inherited {
+                    paths.insert((out.a, k), n);
+                }
+            }
+            _ => (),
+        }
+    }
+    fn processes(&self, m: &Machine) -> Vec<OsProcess> {
+        let Some(v) = self.view(m) else { return Vec::new() };
+        v.processes()
+            .into_iter()
+            .map(|p| OsProcess {
+                id: p.id,
+                parent: p.parent,
+                key: p.addr,
+                name: p.module.clone(),
+                queue: p.queue,
+                fields: vec![
+                    ("addr", p.addr.into()),
+                    ("sibling", p.sibling.into()),
+                    ("child", p.child.into()),
+                    ("sp", p.sp.into()),
+                    ("task", p.task.into()),
+                    ("pages", p.pages.into()),
+                    ("user", p.user.into()),
+                    ("prior", p.prior.into()),
+                    ("age", p.age.into()),
+                    ("state", p.state.into()),
+                    ("module", p.module.as_str().into()),
+                    ("signal", p.signal.into()),
+                    ("paths", Json::Arr(p.paths.iter().map(|&x| x.into()).collect())),
+                    ("dat", blocks_json(&p.dat)),
+                ],
+            })
+            .collect()
+    }
+    fn images(&self, m: &Machine) -> Vec<Image> {
+        let Some(v) = self.view(m) else { return Vec::new() };
+        v.modules()
+            .into_iter()
+            .map(|md| {
+                // Physical chunks of the module, one per 8 KiB slot it spans.
+                let mut chunks = Vec::new();
+                let (start, end) = (u32::from(md.addr), u32::from(md.addr) + u32::from(md.size));
+                let mut a = start;
+                while a < end {
+                    let stop = (((a >> 13) + 1) << 13).min(end);
+                    let phys = match v.level {
+                        Level::One => m.translate(a as u16),
+                        Level::Two => md
+                            .blocks
+                            .get(((a >> 13) - (start >> 13)) as usize)
+                            .map(|&b| usize::from(b) * 8192 + (a as usize & 8191)),
+                    };
+                    if let Some(p) = phys {
+                        chunks.push((p, (stop - a) as usize, (a - start) as u16));
+                    }
+                    a = stop;
+                }
+                Image {
+                    name: md.name.clone(),
+                    fields: vec![
+                        ("addr", md.addr.into()),
+                        ("size", md.size.into()),
+                        ("type", md.kind.into()),
+                        ("revs", md.revs.into()),
+                        ("links", md.links.into()),
+                        ("blocks", blocks_json(&md.blocks)),
+                    ],
+                    chunks,
+                }
+            })
+            .collect()
+    }
+    fn memory_map(&self, m: &Machine) -> Json {
+        let Some(v) = self.view(m) else {
+            return obj([("unit", 0.into()), ("map", Json::Arr(Vec::new()))]);
+        };
+        let (unit, map) = v.memory_map();
+        let sys = if v.level == Level::Two { v.sys_dat().to_vec() } else { Vec::new() };
+        obj([
+            ("unit", unit.into()),
+            ("map", Json::Arr(map.into_iter().map(Json::from).collect())),
+            ("sysdat", blocks_json(&sys)),
+        ])
+    }
+    fn read_space(&self, m: &Machine, space: &str, addr: u16) -> Option<u8> {
+        let v = self.view(m)?;
+        if space == "sys" {
+            return Some(v.sys(addr));
+        }
+        let pid = space.strip_prefix("pid")?.parse::<u8>().ok()?;
+        let p = v.processes().into_iter().find(|p| p.id == pid)?;
+        Some(v.proc_read(p.addr, addr))
     }
 }
 
@@ -1011,5 +936,16 @@ mod tests {
         assert_eq!(service_code("i$open"), Some(0x84));
         assert!(error_name(216).starts_with("E$PNNF"));
         assert_eq!(status_name(0x26), "SS.ScSiz");
+    }
+    #[test]
+    fn decodes_service_requests() {
+        let os = Nitros9::default();
+        let bytes = [0x10u8, 0x3f, 0x03];
+        let read = |a: u16| bytes.get(usize::from(a)).copied().unwrap_or(0);
+        let l = super::super::disasm::disassemble_with(&read, 0, &|r, at| {
+            os.svc_at(r, at).map(|s| (s.len, format!("{} {}", os.svc_mnemonic(), os.service_name(s.code)), u16::from(s.code)))
+        });
+        assert_eq!((l.text.as_str(), l.len, l.svc), ("OS9 F$Fork", 3, true));
+        assert_eq!(os.svc_at(&read, 0), Some(Svc { code: 3, len: 3, no_return: false }));
     }
 }

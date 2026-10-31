@@ -3,10 +3,9 @@
 //! handled on the emulator thread like HTTP requests, so both views always
 //! agree. Messages use `Content-Length` framing and JSON bodies.
 use super::debuginfo::{Place, encode};
-use super::disasm::disassemble;
 use super::frames::VarRef;
 use super::json::{Json, base64, obj, unbase64};
-use super::os9::{self, Regs};
+use super::osmon::Regs;
 use super::symbols::Target;
 use super::{BpSpec, Goal, Ice, Inbox, Stop};
 use std::collections::HashMap;
@@ -206,7 +205,7 @@ impl Ice {
             let desc = self
                 .stop
                 .as_ref()
-                .map(|s| s.describe(&self.tracer))
+                .map(|s| s.describe(&self.tracer, &*self.os))
                 .unwrap_or_default();
             self.dap.event(
                 Some(id),
@@ -311,18 +310,23 @@ impl Ice {
                 ("supportsLoadedSourcesRequest", true.into()),
                 (
                     "exceptionBreakpointFilters",
-                    Json::Arr(vec![
-                        obj([
-                            ("filter", "os9error".into()),
-                            ("label", "OS-9 エラー復帰".into()),
-                            ("default", false.into()),
-                        ]),
-                        obj([
-                            ("filter", "os9switch".into()),
-                            ("label", "OS-9 プロセス切り替え".into()),
-                            ("default", false.into()),
-                        ]),
-                    ]),
+                    {
+                        // Labels come from the OS layer.
+                        let info = self.os.info();
+                        let label = |k: &str, d: &str| info.get(k).str().unwrap_or(d).to_string();
+                        Json::Arr(vec![
+                            obj([
+                                ("filter", "oserror".into()),
+                                ("label", label("errorLabel", "エラー復帰").into()),
+                                ("default", false.into()),
+                            ]),
+                            obj([
+                                ("filter", "osswitch".into()),
+                                ("label", label("switchLabel", "プロセス切り替え").into()),
+                                ("default", false.into()),
+                            ]),
+                        ])
+                    },
                 ),
             ])),
             "attach" | "launch" => {
@@ -424,16 +428,17 @@ impl Ice {
                     .iter()
                     .filter_map(Json::str)
                     .collect();
-                self.break_errors = filters.contains(&"os9error");
-                self.break_switch = filters.contains(&"os9switch");
+                self.break_errors = filters.contains(&"oserror");
+                self.break_switch = filters.contains(&"osswitch");
                 Ok(obj([]))
             }
             "threads" => {
                 let mut name = "6809".to_string();
-                if let Some(v) = self.view() {
-                    let cur = v.current();
-                    if let Some(p) = v.processes().into_iter().find(|p| p.addr == cur) {
-                        name = format!("6809 (OS-9 プロセス{} {})", p.id, p.module);
+                if let Some(os) = self.os() {
+                    let cur = os.current(&self.machine);
+                    let osname = os.info().get("name").str().unwrap_or("OS").to_string();
+                    if let Some(p) = os.processes(&self.machine).into_iter().find(|p| p.key == cur) {
+                        name = format!("6809 ({osname} プロセス{} {})", p.id, p.name);
                     }
                 }
                 Ok(obj([(
@@ -680,23 +685,22 @@ impl Ice {
                     .unwrap_or(0)
                     .clamp(0, 4096) as usize;
                 let m = &self.machine;
-                let read = |x| m.peek(x);
                 if skip < 0 {
                     a = self.resync(a, (-skip).min(4096) as u16);
                 } else {
                     for _ in 0..skip {
-                        a = a.wrapping_add(disassemble(&read, a).len.max(1));
+                        a = a.wrapping_add(self.dis(a).len.max(1));
                     }
                 }
                 let mut out = Vec::new();
                 let mut last_line = None;
                 for _ in 0..count {
-                    let l = disassemble(&read, a);
+                    let l = self.dis(a);
                     let bytes: Vec<String> = (0..l.len)
                         .map(|i| format!("{:02X}", m.peek(a.wrapping_add(i))))
                         .collect();
                     let mut text = l.text.clone();
-                    if let Some(t) = l.target.filter(|_| !l.text.starts_with("OS9 "))
+                    if let Some(t) = l.target.filter(|_| !l.svc)
                         && let Some(name) = self.symbols.label(m, t)
                     {
                         text.push_str(&format!("  <{name}>"));
@@ -806,7 +810,7 @@ impl Ice {
                     ("expensive", false.into()),
                 ]),
                 obj([
-                    ("name", "OS-9".into()),
+                    ("name", self.os.info().get("name").str().unwrap_or("OS").to_string().into()),
                     ("variablesReference", PROCESS.into()),
                     ("expensive", false.into()),
                 ]),
@@ -988,29 +992,24 @@ impl Ice {
                 })
                 .collect(),
             PROCESS => {
-                let Some(v) = self.view() else {
-                    return vec![var("OS-9", "未検出".into(), None)];
+                let Some(os) = self.os() else {
+                    return vec![var("OS", "未検出".into(), None)];
                 };
-                let cur = v.current();
-                let mut out = vec![var(
-                    "Level",
-                    if v.level == os9::Level::One { "1" } else { "2" }.into(),
-                    None,
-                )];
-                if let Some(p) = v.processes().into_iter().find(|p| p.addr == cur) {
+                let show = |v: &Json| v.str().map_or_else(|| v.to_string(), str::to_string);
+                let mut out: Vec<Json> = os.summary(m).iter().map(|(k, v)| var(k, show(v), None)).collect();
+                let cur = os.current(m);
+                if let Some(p) = os.processes(m).into_iter().find(|p| p.key == cur) {
                     out.push(var("プロセスID", p.id.to_string(), None));
-                    out.push(var("モジュール", p.module.clone(), None));
+                    out.push(var("名前", p.name.clone(), None));
                     out.push(var("親", p.parent.to_string(), None));
-                    out.push(var("P$State", format!("${:02X}", p.state), None));
-                    out.push(var("記述子", format!("${:04X}", p.addr), None));
-                    if let Some(t) = p.task {
-                        out.push(var("タスク", t.to_string(), None));
+                    for (k, v) in &p.fields {
+                        out.push(var(k, show(v), None));
                     }
                 }
                 if let Some(c) = self.tracer.calls.values().rev().find(|c| !c.system) {
                     out.push(var(
                         "直近のシステムコール",
-                        format!("{} {} → {}", os9::service_name(c.code), c.args, c.result),
+                        format!("{} {} → {}", os.service_name(c.code), c.args, c.result),
                         None,
                     ));
                 }

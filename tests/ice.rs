@@ -139,29 +139,29 @@ fn traces_and_breaks_on_os9_calls() {
         "{dis}"
     );
 
-    ok(&mut d, "/api/os9break?code=I$WritLn&when=call");
+    ok(&mut d, "/api/os/break?code=I$WritLn&when=call");
     ok(&mut d, "/api/run");
     d.run_steps(100);
     assert_eq!(d.cpu.pc, 0x1009);
     assert!(ok(&mut d, "/api/state").contains("システムコール呼び出し I$WritLn (プロセス1)"));
 
-    ok(&mut d, "/api/os9break?code=I$WritLn&op=del");
-    ok(&mut d, "/api/os9break?code=I$WritLn&when=return");
+    ok(&mut d, "/api/os/break?code=I$WritLn&op=del");
+    ok(&mut d, "/api/os/break?code=I$WritLn&when=return");
     ok(&mut d, "/api/run");
     d.run_steps(100);
     assert_eq!(d.cpu.pc, 0x100c);
     assert!(ok(&mut d, "/api/state").contains("システムコール復帰 I$WritLn"));
 
-    let (_, calls) = d.command("GET", "/api/os9/calls?user=1", b"");
+    let (_, calls) = d.command("GET", "/api/os/calls?user=1", b"");
     assert!(calls.contains(r#""name":"I$WritLn""#), "{calls}");
     assert!(
         calls.contains(r#"パス1(stdout) 3バイト \"hi\\r\""#),
         "{calls}"
     );
     assert!(calls.contains("3バイト書いた"), "{calls}");
-    let (_, procs) = d.command("GET", "/api/os9/procs", b"");
+    let (_, procs) = d.command("GET", "/api/os/procs", b"");
     assert!(procs.contains(r#""module":"Hello""#), "{procs}");
-    let (_, mods) = d.command("GET", "/api/os9/modules", b"");
+    let (_, mods) = d.command("GET", "/api/os/modules", b"");
     assert!(
         mods.contains(r#""name":"Init""#) && mods.contains(r#""name":"Hello""#),
         "{mods}"
@@ -277,7 +277,7 @@ fn traces_real_nitros9_shell() {
     }
     let (_, con) = d.command("GET", "/api/console?since=0", b"");
     assert!(con.contains("traced\\r\\n"), "{con}");
-    let (_, calls) = d.command("GET", "/api/os9/calls?user=1&limit=100000", b"");
+    let (_, calls) = d.command("GET", "/api/os/calls?user=1&limit=100000", b"");
     assert!(
         calls.contains(r#"モジュール\"echo\" パラメータ\"traced\\r\""#),
         "{calls}"
@@ -286,7 +286,7 @@ fn traces_real_nitros9_shell() {
         calls.contains(r#"パス1(stdout) 7バイト \"traced\\r\""#),
         "{calls}"
     );
-    let (_, procs) = d.command("GET", "/api/os9/procs", b"");
+    let (_, procs) = d.command("GET", "/api/os/procs", b"");
     assert!(
         procs.contains(r#""module":"Shell""#) && procs.contains(r#""module":"SysGo""#),
         "{procs}"
@@ -318,13 +318,13 @@ fn decodes_real_level2_processes_and_modules() {
             echo_console: false,
         },
     );
-    ok(&mut d, "/api/os9break?code=F$Fork&when=return");
+    ok(&mut d, "/api/os/break?code=F$Fork&when=return");
     ok(&mut d, "/api/run");
     // SysGo forks the shells first; stop at the fork of `echo LEVEL2-STARTED`.
     for _ in 0..400 {
         d.run_steps(1_000_000);
         if !d.running {
-            let (_, calls) = d.command("GET", "/api/os9/calls?user=1&limit=20", b"");
+            let (_, calls) = d.command("GET", "/api/os/calls?user=1&limit=20", b"");
             if calls.contains(r#"モジュール\"echo\""#) {
                 break;
             }

@@ -179,7 +179,7 @@ canvas { width: 100%; display: block; }
 </header>
 <nav class="tabs">
   <button data-tab="dbg" class="on">デバッガ</button>
-  <button data-tab="os9">OS-9 モニタ</button>
+  <button data-tab="os9" id="osTab">OS モニタ</button>
 </nav>
 <main>
   <section id="dbg" class="page on">
@@ -250,7 +250,7 @@ canvas { width: 100%; display: block; }
           <input id="memAddr" class="addr" value="0000">
           <select id="memSpace" title="アドレス空間">
             <option value="cpu">CPU論理</option>
-            <option value="sys">OS-9システム空間</option>
+            <option value="sys" id="sysSpace">OSのシステム空間</option>
             <option value="phys">物理RAM(先頭64KB)</option>
           </select>
           <button id="memGo">表示</button>
@@ -268,12 +268,7 @@ canvas { width: 100%; display: block; }
     <div class="panel span2">
       <h2>スケジューラ<span class="grow"></span><span id="osLevel" class="kbd"></span></h2>
       <div class="body">
-        <div class="queues">
-          <div class="queue"><h3>実行中 D.Proc</h3><div class="chips" id="qRun"></div></div>
-          <div class="queue"><h3>アクティブ D.AProcQ（実行待ち）</h3><div class="chips" id="qActive"></div></div>
-          <div class="queue"><h3>待機 D.WProcQ（F$Wait）</h3><div class="chips" id="qWait"></div></div>
-          <div class="queue"><h3>睡眠 D.SProcQ（F$Sleep・I/O待ち）</h3><div class="chips" id="qSleep"></div></div>
-        </div>
+        <div class="queues" id="queues"></div>
         <canvas id="timeline" height="150" style="margin-top:8px"></canvas>
         <div class="row mute" style="font-size:12px;margin-top:4px">
           タイムライン：横軸は仮想サイクル。帯はそのプロセスがCPUを持っていた区間、▲はユーザーのシステムコール。
@@ -285,10 +280,10 @@ canvas { width: 100%; display: block; }
     <div class="list" style="gap:10px">
       <div class="panel">
         <h2>プロセス</h2>
-        <div class="scroll"><table><thead><tr><th>ID</th><th>親</th><th>モジュール</th><th>状態</th><th>キュー</th><th>優先</th><th>エージ</th><th>パス</th><th id="thDat"></th></tr></thead><tbody id="procs"></tbody></table></div>
+        <div class="scroll"><table><thead id="procHead"></thead><tbody id="procs"></tbody></table></div>
       </div>
       <div class="panel">
-        <h2>OS-9 ブレーク条件</h2>
+        <h2 id="osBreakTitle">OS ブレーク条件</h2>
         <div class="body list" style="gap:6px">
           <label class="row"><input type="checkbox" id="trTrace" checked>システムコールとプロセス切り替えを記録する</label>
           <label class="row"><input type="checkbox" id="trErr">エラーで復帰したら停止</label>
@@ -483,8 +478,8 @@ async function renderDis() {
   const addr = follow || viewAddr === null ? st.regs.pc : viewAddr;
   const d = await api(`disasm?addr=${hex(addr, 4)}&back=${follow ? 8 : 0}&n=48`);
   $("dis").innerHTML = d.lines.map((l) => {
-    const os9 = l.text.startsWith("OS9 ");
-    const title = os9 ? (services[l.text.slice(4)]?.desc || "") + (l.note ? "\n" + l.note : "") : "";
+    const os9 = l.svc;
+    const title = os9 ? (services[l.text.split(" ")[1]]?.desc || "") + (l.note ? "\n" + l.note : "") : "";
     // Source line and label headers from the loaded listings.
     const src = l.src ? `<tr class="src"><td></td><td colspan="4">${esc(l.src.file.split("/").pop())}:${l.src.line}  ${esc(l.src.text.trim())}</td></tr>` : "";
     const lbl = l.label ? `<tr class="lbl"><td></td><td colspan="4">${esc(l.label)}:</td></tr>` : "";
@@ -585,30 +580,63 @@ async function pollConsole() {
   termWrite(d.text);
 }
 
-// ---------- OS-9 ----------
+// ---------- OS monitor ----------
 let calls = new Map(), callVersion = 0, selCall = null, switches = [];
-const STATE_BITS = [[0x80, "Sys"], [0x40, "TSlp"], [0x20, "TOut"], [0x10, "Img"], [0x08, "Susp"], [0x02, "Cond"], [0x01, "Dead"]];
-const QNAME = { running: "実行中", active: "実行待ち", wait: "待機", sleep: "睡眠", "-": "—" };
+// Names, queues and terms come from /api/os/info; OS-specific views below.
+let osInfo = null;
+async function loadOsInfo() {
+  osInfo = await api("os/info");
+  $("osTab").textContent = `${osInfo.name} モニタ`;
+  $("osBreakTitle").textContent = `${osInfo.name} ブレーク条件`;
+  const sys = (osInfo.spaces || []).find((x) => x.key === "sys");
+  $("sysSpace").textContent = sys ? sys.label : "OSのシステム空間";
+  $("queues").innerHTML = `<div class="queue"><h3>${esc(osInfo.current || "実行中")}</h3><div class="chips" id="qRun"></div></div>` +
+    (osInfo.queues || []).map((q) => `<div class="queue"><h3>${esc(q.label)}</h3><div class="chips" id="q_${q.key}"></div></div>`).join("");
+}
 async function renderOs9() {
-  const o = st.os9;
+  const o = st.os;
+  if (!osInfo || (o && o.level !== osInfo.level)) await loadOsInfo();
   if (!o) {
-    $("osLevel").textContent = "OS-9 未起動（Initモジュール未検出）";
-    for (const q of ["qRun", "qActive", "qWait", "qSleep"]) $(q).innerHTML = "";
-    $("procs").innerHTML = '<tr><td colspan="9" class="empty">OS-9が起動すると表示されます</td></tr>';
+    $("osLevel").textContent = `${osInfo.name} 未検出`;
+    $("queues").querySelectorAll(".chips").forEach((q) => q.innerHTML = "");
+    $("procs").innerHTML = `<tr><td colspan="9" class="empty">${esc(osInfo.name)}が起動すると表示されます</td></tr>`;
     return;
   }
-  $("osLevel").textContent = `NitrOS-9 Level ${o.level}`;
-  $("qRun").innerHTML = o.pid ? pidChip(o.pid) : '<span class="mute">アイドル（D.Proc=0）</span>';
-  $("qActive").innerHTML = o.active.map(pidChip).join("");
-  $("qWait").innerHTML = o.waiting.map(pidChip).join("");
-  $("qSleep").innerHTML = o.sleeping.map(pidChip).join("");
-  const [p, m, mm] = await Promise.all([api("os9/procs"), api("os9/modules"), api("os9/memmap")]);
-  renderProcs(p.procs, o.level);
-  renderMods(m.modules, o.level);
-  renderMemMap(mm, m.modules, p.procs, o.level);
+  $("osLevel").textContent = osInfo.title || osInfo.name;
+  $("qRun").innerHTML = o.pid ? pidChip(o.pid) : '<span class="mute">アイドル</span>';
+  (osInfo.queues || []).forEach((q) => { $("q_" + q.key).innerHTML = (o[q.key] || []).map(pidChip).join(""); });
+  const [p, m, mm] = await Promise.all([api("os/procs"), api("os/modules"), api("os/memmap")]);
+  const view = OS_VIEWS[osInfo.os] || GENERIC_VIEW;
+  view.procs(p.procs);
+  view.mods(m.modules);
+  view.memmap(mm, m.modules, p.procs);
   await pollCalls();
 }
+// Fallback for an OS without its own view: every field as a column.
+const fieldText = (v) => Array.isArray(v) ? v.join(" ") : v === null ? "" : String(v);
+const GENERIC_VIEW = {
+  procs(procs) {
+    const keys = [...new Set(procs.flatMap((p) => Object.keys(p)))].filter((k) => !["id", "parent", "queue"].includes(k));
+    $("procHead").innerHTML = `<tr><th>ID</th><th>親</th><th>キュー</th>${keys.map((k) => `<th>${esc(k)}</th>`).join("")}</tr>`;
+    $("procs").innerHTML = procs.map((p) => `<tr><td>${pidChip(p.id)}</td><td>${p.parent}</td><td>${esc(p.queue)}</td>` +
+      keys.map((k) => `<td class="mono">${esc(fieldText(p[k]))}</td>`).join("") + "</tr>").join("");
+  },
+  mods(mods) {
+    $("thBlk").textContent = "";
+    $("mods").innerHTML = mods.map((m) => `<tr><td class="mono name">${esc(m.name)}</td><td colspan="6" class="mono">` +
+      Object.entries(m).filter(([k]) => k !== "name").map(([k, v]) => `${esc(k)}=${esc(fieldText(v))}`).join(" ") + "</td></tr>").join("");
+  },
+  memmap(mm) {
+    $("memUnit").textContent = `1マス＝${mm.unit}バイト`;
+    $("memgrid").style.gridTemplateColumns = "repeat(32, 1fr)";
+    $("memgrid").innerHTML = (mm.map || []).map((f, i) => `<div style="background:${f ? "var(--warn)" : "var(--chip)"}" title="${i}: ${f}"></div>`).join("");
+    $("memLegend").innerHTML = '<span><i style="background:var(--warn)"></i>使用中</span><span><i style="background:var(--chip)"></i>空き</span>';
+  },
+};
+const STATE_BITS = [[0x80, "Sys"], [0x40, "TSlp"], [0x20, "TOut"], [0x10, "Img"], [0x08, "Susp"], [0x02, "Cond"], [0x01, "Dead"]];
+const QNAME = { running: "実行中", active: "実行待ち", wait: "待機", sleep: "睡眠", "-": "—" };
 function renderProcs(procs, level) {
+  $("procHead").innerHTML = '<tr><th>ID</th><th>親</th><th>モジュール</th><th>状態</th><th>キュー</th><th>優先</th><th>エージ</th><th>パス</th><th id="thDat"></th></tr>';
   $("thDat").textContent = level === 2 ? "DATイメージ" : "データ";
   const kids = {};
   procs.forEach((p) => (kids[p.parent] = kids[p.parent] || []).push(p));
@@ -664,6 +692,14 @@ function renderMemMap(mm, mods, procs, level) {
     $("memLegend").innerHTML = '<span><i style="background:var(--cat-sys)"></i>システム空間</span><span><i style="background:var(--cat-mem)"></i>モジュール</span><span><i style="background:var(--warn)"></i>使用中</span><span>色付き＝各プロセスのDAT</span><span><i style="background:var(--chip)"></i>空き</span>';
   }
 }
+// NitrOS-9: P$State flags, DAT images, module blocks and the block/page map.
+const OS_VIEWS = {
+  nitros9: {
+    procs: (procs) => renderProcs(procs, osInfo.level),
+    mods: (mods) => renderMods(mods, osInfo.level),
+    memmap: (mm, mods, procs) => renderMemMap(mm, mods, procs, osInfo.memmap === "pages" ? 1 : 2),
+  },
+};
 function callFilter(c) {
   if ($("cUser").checked && c.system) return false;
   const pid = parseInt($("cPid").value);
@@ -673,9 +709,9 @@ function callFilter(c) {
   return true;
 }
 async function pollCalls() {
-  if (!st.os9 || st.os9.callVersion === callVersion) return;
+  if (!st.os || st.os.callVersion === callVersion) return;
   const user = $("cUser").checked ? "&user=1" : "";
-  const d = await api(`os9/calls?since=${callVersion}&limit=${callVersion ? 3000 : 600}${user}`);
+  const d = await api(`os/calls?since=${callVersion}&limit=${callVersion ? 3000 : 600}${user}`);
   callVersion = d.version;
   d.calls.forEach((c) => calls.set(c.id, c));
   if (calls.size > 4000) [...calls.keys()].sort((a, b) => a - b).slice(0, calls.size - 3000).forEach((k) => calls.delete(k));
@@ -722,14 +758,14 @@ async function renderDetail(c, loadChildren) {
   $("callDetail").innerHTML = html;
   $("callDetail").querySelectorAll("button").forEach((b) => b.onclick = async () => {
     if (b.dataset.b === "mem") { $("memSpace").value = "cpu"; $("memAddr").value = hex(c.in.x, 4); document.querySelector('[data-tab="dbg"]').click(); return; }
-    await api(`os9break?code=${encodeURIComponent(c.name)}&when=${b.dataset.b}`, ""); poll(true);
+    await api(`os/break?code=${encodeURIComponent(c.name)}&when=${b.dataset.b}`, ""); poll(true);
   });
   const tree = await childTree(c.id, 0);
   if ($("tree")) $("tree").innerHTML = tree || `<span class="mute">${c.inner && c.inner.length ? "個々の内部呼び出しは記録の保持範囲外です（上は集計）" : "なし"}</span>`;
 }
 async function childTree(id, depth) {
   if (depth > 3) return "";
-  const d = await api(`os9/calls?parent=${id}&limit=60`);
+  const d = await api(`os/calls?parent=${id}&limit=60`);
   const kids = d.calls.sort((a, b) => a.id - b.id);
   let out = "";
   for (const k of kids) {
@@ -785,7 +821,7 @@ function drawTimeline() {
 $("tlRange").onchange = drawTimeline;
 addEventListener("resize", drawTimeline);
 
-async function os9break(q) { await api("os9break?" + q, ""); poll(true); }
+async function os9break(q) { await api("os/break?" + q, ""); poll(true); }
 $("trTrace").onchange = (e) => os9break("trace=" + (e.target.checked ? 1 : 0));
 $("trErr").onchange = (e) => os9break("errors=" + (e.target.checked ? 1 : 0));
 $("trSwitch").onchange = (e) => os9break("switch=" + (e.target.checked ? 1 : 0));
@@ -794,7 +830,7 @@ $("trCall").onclick = () => os9break(`code=${encodeURIComponent($("trCode").valu
 $("trRet").onclick = () => os9break(`code=${encodeURIComponent($("trCode").value)}&when=return`);
 $("trClear").onclick = () => os9break("op=clear");
 function renderOs9Breaks() {
-  const b = st.os9break;
+  const b = st.osbreak;
   $("trTrace").checked = b.trace; $("trErr").checked = b.errors; $("trSwitch").checked = b.switch;
   if (document.activeElement !== $("trPid")) $("trPid").value = b.pid || "";
   const item = (n, w) => `<div class="item"><span class="cat-${cat(n)} name">${esc(n)}</span>${w === "call" ? "呼び出し" : "復帰"}<button data-n="${esc(n)}" data-w="${w}">×</button></div>`;
@@ -851,7 +887,8 @@ async function poll(force) {
   }
 }
 (async () => {
-  const s = await api("os9/services");
+  await loadOsInfo();
+  const s = await api("os/services");
   s.services.forEach((x) => services[x.name] = x);
   $("svcList").innerHTML = s.services.map((x) => `<option value="${esc(x.name)}">${esc(x.desc)}</option>`).join("");
   await poll(true);

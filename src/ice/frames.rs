@@ -42,7 +42,7 @@ impl Ice {
             l.len == k
                 && l.flow == Flow::Call
                 && !l.text.starts_with("SWI")
-                && !l.text.starts_with("OS9")
+                && !l.svc
                 && (target.is_none() || l.target.is_none() || l.target == target)
         })
     }

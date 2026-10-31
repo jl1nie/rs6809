@@ -15,7 +15,7 @@
 //! Level 2 address space that maps the module.
 use super::debuginfo::DebugInfo;
 use super::microware::{self, Bases, DataKind, DataLabel, Insn};
-use super::os9::{Level, View};
+use super::osmon::Image;
 use crate::Machine;
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
@@ -714,28 +714,20 @@ impl Symbols {
     }
 
     /// Recompute where modules live. Returns true when placements changed.
-    pub fn place(&mut self, m: &Machine, level: Option<Level>) -> bool {
+    /// Place module-relative tables on the OS's loaded images (physical
+    /// RAM chunks). Returns true when placements changed.
+    pub fn place(&mut self, images: &[Image]) -> bool {
         if !self.tables.iter().any(|t| t.module.is_some()) {
             let changed = !self.placements.is_empty();
             self.placements.clear();
             return changed;
         }
-        let Some(level) = level else {
-            return false;
-        };
-        let v = View::new(m, level);
-        let mods = v.modules();
         let mut sig: u64 = 0xcbf29ce484222325;
-        for md in &mods {
-            for b in md
-                .name
-                .bytes()
-                .chain(md.addr.to_be_bytes())
-                .chain(md.size.to_be_bytes())
-            {
-                sig = (sig ^ u64::from(b)).wrapping_mul(0x100000001b3);
-            }
-            for &b in &md.blocks {
+        for im in images {
+            let chunks = im.chunks.iter().flat_map(|&(p, n, o)| {
+                (p as u64).to_be_bytes().into_iter().chain((n as u64).to_be_bytes()).chain(o.to_be_bytes())
+            });
+            for b in im.name.bytes().chain(chunks) {
                 sig = (sig ^ u64::from(b)).wrapping_mul(0x100000001b3);
             }
         }
@@ -746,26 +738,8 @@ impl Symbols {
         self.placements.clear();
         for (ti, t) in self.tables.iter().enumerate() {
             let Some(name) = &t.module else { continue };
-            for md in mods.iter().filter(|md| md.name.eq_ignore_ascii_case(name)) {
-                let mut chunks = Vec::new();
-                let (start, end) = (u32::from(md.addr), u32::from(md.addr) + u32::from(md.size));
-                let mut a = start;
-                while a < end {
-                    let slot_end = ((a >> 13) + 1) << 13;
-                    let stop = slot_end.min(end);
-                    let phys = match level {
-                        Level::One => m.translate(a as u16),
-                        Level::Two => md
-                            .blocks
-                            .get(((a >> 13) - (start >> 13)) as usize)
-                            .map(|&b| usize::from(b) * 8192 + (a as usize & 8191)),
-                    };
-                    if let Some(p) = phys {
-                        chunks.push((p, (stop - a) as usize, (a - start) as u16));
-                    }
-                    a = stop;
-                }
-                self.placements.push(Placement { table: ti, chunks });
+            for im in images.iter().filter(|im| im.name.eq_ignore_ascii_case(name)) {
+                self.placements.push(Placement { table: ti, chunks: im.chunks.clone() });
             }
         }
         true

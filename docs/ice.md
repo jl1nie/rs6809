@@ -31,7 +31,8 @@ sh examples/nitros9-ice.sh 127.0.0.1:8080  # 待ち受けアドレスを変更
                           ├ Cpu / Machine（所有）
                           ├ 実行制御・ブレーク判定・命令トレース
                           ├ disasm.rs   6809逆アセンブラ（OS9 F$xxx表記）
-                          ├ os9.rs      OS-9構造の読み取り・システムコール追跡
+                          ├ osmon.rs    OSの差し替え口（OsMonitor）とシステムコールの記録
+                          ├ os9.rs      NitrOS-9の実装（構造の読み取り・説明文）
                           ├ symbols.rs  リスト・マップの読み込み、モジュール位置への配置
                           └ dap.rs      DAPの要求処理とイベント（停止・出力）
 ```
@@ -208,7 +209,31 @@ ln -s "$PWD/editors/vscode" ~/.vscode/extensions/rs6809.rs6809-debug-0.1.0   # V
 | `source`/`loadedSources` | ホストにないソースはリスト内の本文を返します |
 | `output` イベント | ゲストのコンソール出力（ACIA 1）をデバッグコンソールに出します |
 
-## OS-9連携の仕組み
+## OSの差し替え口
+
+ICEの画面・HTTP API・DAPは、OS固有の処理を `osmon.rs` の `OsMonitor` トレイト経由でだけ使います。
+2つ目のOSは、このトレイトを実装した型を `Ice::with_os` に渡せば載せられます（`Ice::new` はNitrOS-9）。
+
+| メソッド | 内容 | NitrOS-9 |
+|---|---|---|
+| `detect` | メモリからOSを見分ける | `D.Init` が `Init` モジュールを指す |
+| `info` | 名前・見出し・キュー名・メモリマップの種類・例外ブレークの名前（`/api/os/info`） | `OS-9`、`NitrOS-9 Level 2` など |
+| `svc_at`・`svc_prefix`・`svc_mnemonic` | 命令がシステムコールか、番号・長さ・戻らないか。逆アセンブルの表記 | `SWI2`＋番号、`OS9 F$xxx` |
+| `service_name` ほか | サービス・エラーの名前と説明 | `defs/os9.d` から生成した表 |
+| `current`・`current_slot`・`pid_of`・`in_system` | 実行中のプロセスとそのID、システム状態か | `D.Proc`、`P$ID`、`P$State` |
+| `describe_entry`・`describe_exit`・`error_of`・`learn` | 引数・結果の説明、エラーの判定、パス名の学習 | 下記 |
+| `processes`・`summary` | プロセス表（共通の列＋OS固有の列）とキュー | プロセス記述子、`D.AProcQ` など |
+| `images`・`image_calls` | ロード済みイメージと物理RAM上の範囲（シンボルの配置）、それが変わりうる呼び出し | モジュールディレクトリ、`F$Link` など |
+| `memory_map`・`read_space` | メモリの使用状況、OSのアドレス空間 | `D.FMBM`／`D.BlkMap`、`sys`・`pidN` |
+
+呼び出しの記録（呼び出しの木、内部呼び出しの集計、切り替えのタイムライン）は `osmon.rs` の `Tracer` で、OSに依存しません。
+命令ごとの処理を軽くするため、システムコール命令の先頭バイト（`svc_prefix`）と、実行中プロセスの識別子の物理番地（`current_slot`）をOSから受け取ります。
+プロセスIDは切り替えを検出したときだけ求めます。
+
+画面のOSタブは `/api/os/info` の名前とキュー名で描き、プロセス表・モジュール・メモリマップはOS別の描画（`ui.html` の `OS_VIEWS`）を使います。
+描画のないOSには、項目をそのまま並べる汎用の描画を使います。
+
+## NitrOS-9の実装
 
 ### システムコールの捕捉
 
@@ -295,9 +320,10 @@ P2 F$Wait     → 子3が終了 ステータス0
 | `GET /api/mem?addr=&len=&space=cpu\|sys\|phys\|pidN`、`POST ...&val=16進` | メモリ |
 | `GET /api/trace?n=` | 実行トレース |
 | `GET /api/console?since=`、`POST /api/console`（本文をACIA 1へ） | コンソール |
-| `POST /api/os9break?code=&when=call\|return&op=del`、`errors=` `switch=` `pid=` `trace=` | OS-9ブレーク条件 |
-| `GET /api/os9/procs` `modules` `memmap` `services` | OS-9構造 |
-| `GET /api/os9/calls?since=&user=1&pid=&parent=&limit=` | システムコール（`since` は更新番号） |
+| `POST /api/os/break?code=&when=call\|return&op=del`、`errors=` `switch=` `pid=` `trace=` | OSのブレーク条件（`state` の `osbreak`） |
+| `GET /api/os/info` | OSの名前・見出し・キュー名など（`OsMonitor::info`） |
+| `GET /api/os/procs` `modules` `memmap` `services` | OSの構造（`state` の `os` に要約） |
+| `GET /api/os/calls?since=&user=1&pid=&parent=&limit=` | システムコール（`since` は更新番号） |
 | `GET /api/symbols`、`POST ...?path=`・`dir=`・`op=clear` | シンボル表の一覧・読み込み・ソース検索ディレクトリ |
 | `POST /api/bp?sym=名前\|ファイル:行`、`symdel=ID` | シンボル・ソース行のブレークポイント（`state` の `symBreakpoints`） |
 | `GET /api/resolve?expr=` | シンボル名・16進の番地を解決 |
@@ -326,6 +352,8 @@ python3 scripts/c-debug-build.py examples/cvars.c --level2 --out artifacts/cdebu
 
 ```sh
 cargo test --release --test dap               # DAP（TCP）の一連の操作
+cargo test --release --test os_layer          # 作り物のOS（ToyOS）でAPIとDAP
+cargo test --release --test os_snapshot -- --ignored --nocapture   # OSの表示のスナップショットと速度
 ```
 
 - 逆アセンブラ、ステップオーバー／アウト、ブレークポイント、ウォッチポイント、メモリ・レジスタ操作。
@@ -344,6 +372,11 @@ cargo test --release --test dap               # DAP（TCP）の一連の操作
 - Cのソースレベル（Level 1・Level 2）：ロード前に設定した `hello.c:19` で停止し、`main+` のラベル、
   `LBSR` の分岐先 `sum`、スタック上の `_cstart+` の戻り番地を確認。`sum` の `{` へステップイン、ステップアウト、
   `printf` の行をステップオーバーして出力を確認し、`return 0;` から `_cstart` へ戻るまで行単位で進めます。
+- OSの差し替え口：`SWI`＋番号をシステムコールとする作り物のOS（ToyOS、`tests/os_layer.rs`）だけで、
+  OSの情報、名前でのシステムコールブレーク、逆アセンブルの表記と説明、呼び出しの記録、プロセス表・イメージ・メモリマップ・
+  OSのアドレス空間、イメージへのシンボルの配置、DAPのスレッド名・OSスコープ・例外ブレークが動くことを確認します。
+- OSの層を作る前後で、Level 1・Level 2の決まった停止点（`F$Fork` の復帰）の `procs`・`modules`・`memmap`・`calls`・
+  `services`・状態の要約・逆アセンブルのJSONが同じ中身であることを `tests/os_snapshot.rs` で確かめました。
 - DAP：LWASMで組んだ小さなプログラムにTCPで接続し、初期化、アタッチ、ソース行（空行は次の行へ移動）と関数のブレークポイント、
   停止イベント、スタックフレームと戻り番地の行、レジスタの表示と変更、ステップ、ステップアウト、評価、逆アセンブル、メモリ読み出しを確認します。
 
@@ -354,7 +387,7 @@ cargo test --release --test dap               # DAP（TCP）の一連の操作
 - Level 2のタスク番号はプロセスが動いている間だけ割り当てられます。待機中・睡眠中のプロセスは0（未割り当て）です。
 - 停止した時点が `F$NProc` の途中だと、実行待ちのプロセスがどのキューにも載っていないことがあります。
   決まった時点で見るには、OS-9ブレーク条件（呼び出し・復帰）で止めてください。
-- 記録を有効にすると、シェル待機中で約42MHz相当（記録なしで約87MHz相当、通常実行は数百MHz相当）になります。実機の数十倍の速度です。
+- 記録を有効にしたシェル待機中で約140MHz相当です（`tests/os_snapshot.rs` の `ice_speed`、命令実行のみでHTTPの処理を含まない値。ホストにより異なります）。実機の数十倍の速度です。
 - ウォッチポイントはCPU論理アドレスで判定します。Level 2で別プロセスの同じ論理アドレスにも反応します。プロセスIDでの絞り込みはOS-9ブレーク条件のみです。
 - 待ち受けは既定でlocalhostのみ、認証はありません。外部に公開しないでください。
 - 停止中もタイマーは進みません（命令単位で時計を進めるため）。ステップ実行中に時計割り込みが入るのは正しい動作です。
