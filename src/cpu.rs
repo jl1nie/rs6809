@@ -57,6 +57,10 @@ impl Cpu {
     pub fn set_d(&mut self, v: u16) {
         [self.a, self.b] = v.to_be_bytes();
     }
+    /// 0 when executing, 1 while stopped in SYNC, 2 while stopped in CWAI.
+    pub fn waiting(&self) -> u8 {
+        self.wait
+    }
     pub fn reset(&mut self, b: &mut impl Bus) {
         *self = Self {
             cc: I | F,

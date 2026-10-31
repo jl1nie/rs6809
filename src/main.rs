@@ -1,4 +1,4 @@
-use rs6809::{Cpu, Machine, telnet::TelnetServer};
+use rs6809::{Cpu, Machine, ice, telnet::TelnetServer};
 use std::{
     env,
     fs::{self, File, OpenOptions},
@@ -46,6 +46,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut boot = false;
     let mut stats = false;
     let mut measure_from = None;
+    let mut ice_addr = None;
+    let mut ice_halt = false;
     while let Some(a) = args.next() {
         match a.as_str() {
             "--rom" => rom = Some(args.next().ok_or("missing ROM path")?),
@@ -76,6 +78,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             "--script" => script = Some(args.next().ok_or("missing script path")?),
             "--until" => until = Some(args.next().ok_or("missing output marker")?),
             "--boot" => boot = true,
+            "--ice" => {
+                ice_addr = Some(if args.peek().is_some_and(|next| !next.starts_with("--")) {
+                    args.next().unwrap()
+                } else {
+                    "127.0.0.1:6809".to_string()
+                });
+            }
+            "--ice-halt" => ice_halt = true,
             "--stats" => stats = true,
             "--measure-from" => {
                 measure_from = Some(args.next().ok_or("missing measurement marker")?);
@@ -83,7 +93,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
             "--help" | "-h" => {
                 println!(
-                    "rs6809 [--bin FILE --load 0x1000 --pc 0x1000]\n       [--rom FILE --disk FILE --boot] [--ram-kb N] [--script FILE]\n       [--acia-count N] [--telnet [127.0.0.1:0]] [--persist-disk|--volatile-disk]\n       [--until TEXT] [--max-cycles N] [--stats] [--measure-from TEXT]\n\nDefault: 64 KiB RAM, ACIA $8018/$8019, timer $8010.\nROM+disk: 512 KiB RAM (select 64/128/256/512/1024 with --ram-kb).\nMulticomp console $FFD0/$FFD1, SD $FFD8-$FFDC, timer $FFDD.\n--acia-count selects 1..4 Multicomp ACIAs (default 1, or 4 with --telnet).\n--telnet binds localhost on a free TCP port by default; OS-9 opens the available ACIAs.\nOne client per active ACIA; host stdin is disabled. Use the multi-user Level 2 disk.\n--boot types NITROS9 at the CamelForth prompt.\nScripts: lines PROMPT<TAB>RESPONSE, matched sequentially; response ends with CR.\nTelnet disk writes persist by default; --persist-disk also enables this without Telnet.\n--volatile-disk keeps writes in RAM. Cycle limit without --until exits successfully.\n--stats reports guest cycles and host elapsed seconds to stderr.\n--measure-from starts an output-marker interval, ending at --until."
+                    "rs6809 [--bin FILE --load 0x1000 --pc 0x1000]\n       [--rom FILE --disk FILE --boot] [--ram-kb N] [--script FILE]\n       [--acia-count N] [--telnet [127.0.0.1:0]] [--persist-disk|--volatile-disk]\n       [--until TEXT] [--max-cycles N] [--stats] [--measure-from TEXT]\n       [--ice [127.0.0.1:6809]] [--ice-halt]\n\nDefault: 64 KiB RAM, ACIA $8018/$8019, timer $8010.\nROM+disk: 512 KiB RAM (select 64/128/256/512/1024 with --ram-kb).\nMulticomp console $FFD0/$FFD1, SD $FFD8-$FFDC, timer $FFDD.\n--acia-count selects 1..4 Multicomp ACIAs (default 1, or 4 with --telnet).\n--telnet binds localhost on a free TCP port by default; OS-9 opens the available ACIAs.\nOne client per active ACIA; host stdin is disabled. Use the multi-user Level 2 disk.\n--boot types NITROS9 at the CamelForth prompt.\nScripts: lines PROMPT<TAB>RESPONSE, matched sequentially; response ends with CR.\nTelnet disk writes persist by default; --persist-disk also enables this without Telnet.\n--volatile-disk keeps writes in RAM. Cycle limit without --until exits successfully.\n--stats reports guest cycles and host elapsed seconds to stderr.\n--measure-from starts an output-marker interval, ending at --until.\n--ice serves the debugger UI (registers, disassembly, breakpoints, OS-9 views)\n  over HTTP; open the printed URL. ACIA 1 becomes the browser console.\n--ice-halt starts the CPU stopped at the reset vector."
                 );
                 return Ok(());
             }
@@ -159,6 +169,26 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
             actions.push_back((prompt.into(), response.into()));
         }
+    }
+    if let Some(address) = ice_addr {
+        if until.is_some() || max != 0 || measure_from.is_some() {
+            return Err("--ice cannot be combined with --until, --max-cycles or --measure-from".into());
+        }
+        let listener = std::net::TcpListener::bind(&address)?;
+        let mut debugger = ice::Ice::new(
+            cpu,
+            machine,
+            ice::Options {
+                actions,
+                echo_console: server.is_none(),
+            },
+        );
+        if let Some(server) = server {
+            eprintln!("rs6809: Telnet listening on {}", server.local_addr()?);
+            debugger.set_telnet(server);
+        }
+        eprintln!("rs6809: ICE UI at http://{}/", listener.local_addr()?);
+        return Ok(debugger.serve(listener, !ice_halt)?);
     }
     let (tx, rx) = mpsc::sync_channel(1024);
     if server.is_none() {
