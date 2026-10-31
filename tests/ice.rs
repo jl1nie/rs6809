@@ -381,3 +381,84 @@ fn decodes_real_level2_processes_and_modules() {
         }
     }
 }
+
+/// Debug a C program at source level: requires the C disk (Level 1) or
+/// Level 2 disk and `python3 scripts/c-debug-build.py examples/hello.c [--level2 --out ...]`.
+fn debug_hello(disk: &str, symbols: &str, level2: bool) {
+    let kit = "reference/nitros9-basic09-starter-kit/nitros9-runtime";
+    let mut m = Machine::multicomp_with_ram(
+        &fs::read(format!("{kit}/6809M.bin")).unwrap(),
+        File::open(disk).unwrap(),
+        512 * 1024,
+    )
+    .unwrap();
+    let mut c = Cpu::default();
+    c.reset(&mut m);
+    let mut actions = VecDeque::from([("CamelForth".to_string(), "NITROS9".to_string())]);
+    if !level2 {
+        actions.push_back(("Time ?".into(), "2026/10/31 12:00:00".into()));
+    }
+    actions.push_back(("OS9:".into(), "/dd/SOURCES/hello".into()));
+    let mut d = Ice::new(c, m, Options { actions, echo_console: false });
+    d.symbols.add_source_dir("examples".into());
+    d.load_symbols(symbols).unwrap();
+    // Set before the module exists: resolved when the shell loads it.
+    let (_, state) = d.command("POST", "/api/bp?sym=hello.c:19", b"");
+    assert!(state.contains(r#""text":"hello.c:19","resolved":0"#), "{state}");
+    ok(&mut d, "/api/run");
+    for _ in 0..400 {
+        d.run_steps(1_000_000);
+        if !d.running {
+            break;
+        }
+    }
+    let state = ok(&mut d, "/api/state");
+    assert!(state.contains("ブレークポイント"), "{state}");
+    let line = |d: &Ice| {
+        let (t, l) = d.symbols.line(&d.machine, d.cpu.pc).expect("line info");
+        (d.symbols.tables[t].sources[l.src].name.clone(), l.line)
+    };
+    assert_eq!(line(&d), ("hello.c".into(), 19));
+    assert!(d.symbols.label(&d.machine, d.cpu.pc).unwrap().starts_with("main"));
+
+    // The call to sum is labelled; the stack shows main's caller in cstart.
+    let (_, dis) = d.command("GET", &format!("/api/disasm?addr={:04X}&n=8", d.cpu.pc), b"");
+    assert!(dis.contains(r#""tsym":"sum""#), "{dis}");
+    assert!(dis.contains(r#""src":{"file":"hello.c","line":19"#), "{dis}");
+    let (_, stack) = d.command("GET", "/api/stack", b"");
+    assert!(stack.contains(r#""chain":[{"#) && stack.contains("_cstart+"), "{stack}");
+
+    // Step into sum, then out, then over the printf line.
+    d.step_source(true);
+    d.run_steps(10_000_000);
+    assert_eq!(line(&d), ("hello.c".into(), 6));
+    assert_eq!(d.symbols.exact(&d.machine, d.cpu.pc), Some("sum"));
+    ok(&mut d, "/api/out");
+    d.run_steps(10_000_000);
+    d.step_source(false);
+    d.run_steps(10_000_000);
+    assert_eq!(line(&d), ("hello.c".into(), 20));
+    d.step_source(false);
+    d.run_steps(50_000_000);
+    assert_eq!(line(&d), ("hello.c".into(), 21));
+    let (_, con) = d.command("GET", "/api/console?since=0", b"");
+    assert!(con.contains("Hello from C: 42"), "{con}");
+    // `return 0;` holds the epilogue; stepping over it returns into cstart,
+    // which has no lines.
+    d.step_source(false);
+    d.run_steps(1_000_000);
+    assert!(d.symbols.line(&d.machine, d.cpu.pc).is_none());
+    assert!(d.symbols.label(&d.machine, d.cpu.pc).unwrap().starts_with("_cstart+"));
+}
+
+#[test]
+#[ignore]
+fn c_source_debugging_level1() {
+    debug_hello("artifacts/ccompiler/multicomp09-c.img", "artifacts/cdebug/hello", false);
+}
+
+#[test]
+#[ignore]
+fn c_source_debugging_level2() {
+    debug_hello("artifacts/level2/multicomp09-level2.img", "artifacts/cdebug/level2-hello", true);
+}

@@ -1,0 +1,931 @@
+//! Debug Adapter Protocol server: editors such as VS Code drive the same ICE
+//! as the browser UI. Each TCP connection is one session; requests are
+//! handled on the emulator thread like HTTP requests, so both views always
+//! agree. Messages use `Content-Length` framing and JSON bodies.
+use super::disasm::disassemble;
+use super::json::{Json, base64, obj, unbase64};
+use super::os9::{self, Regs};
+use super::symbols::Target;
+use super::{BpSpec, Goal, Ice, Inbox, Stop};
+use std::collections::HashMap;
+use std::io::{self, BufRead, BufReader, Write};
+use std::net::{TcpListener, TcpStream};
+use std::sync::mpsc::{self, Sender};
+use std::thread;
+
+const THREAD: i64 = 1;
+const REGISTERS: i64 = 1;
+const STACK: i64 = 2;
+const PROCESS: i64 = 3;
+
+struct Session {
+    id: u32,
+    out: Sender<String>,
+    seq: i64,
+    /// Last verified state reported per breakpoint id.
+    reported: HashMap<u32, bool>,
+}
+
+/// Connected sessions and events waiting to be sent after a response.
+#[derive(Default)]
+pub struct Hub {
+    sessions: Vec<Session>,
+    pending: Vec<(Option<u32>, Json)>,
+    output: Vec<u8>,
+}
+
+impl Hub {
+    fn event(&mut self, to: Option<u32>, name: &str, body: Json) {
+        if !self.sessions.is_empty() {
+            self.pending.push((
+                to,
+                obj([
+                    ("type", "event".into()),
+                    ("event", name.into()),
+                    ("body", body),
+                ]),
+            ));
+        }
+    }
+    pub fn stopped(&mut self, s: &Stop, description: &str, hits: Vec<u32>) {
+        let reason = match s {
+            Stop::Pause => "pause",
+            Stop::Step => "step",
+            Stop::Breakpoint(_) => "breakpoint",
+            Stop::Watch { .. } => "data breakpoint",
+            Stop::SysCall { .. } | Stop::SysReturn(_) | Stop::Switch { .. } => {
+                "function breakpoint"
+            }
+            Stop::Error(_) => "exception",
+        };
+        self.flush_output_into_pending();
+        self.event(
+            None,
+            "stopped",
+            obj([
+                ("reason", reason.into()),
+                ("description", description.into()),
+                ("text", description.into()),
+                ("threadId", THREAD.into()),
+                ("allThreadsStopped", true.into()),
+                (
+                    "hitBreakpointIds",
+                    if hits.is_empty() {
+                        Json::Null
+                    } else {
+                        hits.into()
+                    },
+                ),
+            ]),
+        );
+    }
+    pub fn continued(&mut self) {
+        self.event(
+            None,
+            "continued",
+            obj([
+                ("threadId", THREAD.into()),
+                ("allThreadsContinued", true.into()),
+            ]),
+        );
+    }
+    pub fn output(&mut self, bytes: &[u8]) {
+        if !self.sessions.is_empty() {
+            self.output.extend_from_slice(bytes);
+        }
+    }
+    fn flush_output_into_pending(&mut self) {
+        if self.output.is_empty() {
+            return;
+        }
+        let text: String = String::from_utf8_lossy(&std::mem::take(&mut self.output))
+            .replace("\r\n", "\n")
+            .replace('\r', "\n");
+        self.event(
+            None,
+            "output",
+            obj([("category", "stdout".into()), ("output", text.into())]),
+        );
+    }
+    fn send(&mut self, to: u32, mut msg: Json) {
+        if let Some(s) = self.sessions.iter_mut().find(|s| s.id == to) {
+            s.seq += 1;
+            if let Json::Obj(m) = &mut msg {
+                m.insert("seq".into(), s.seq.into());
+            }
+            let _ = s.out.send(msg.to_string());
+        }
+    }
+    pub fn flush(&mut self) {
+        self.flush_output_into_pending();
+        for (to, msg) in std::mem::take(&mut self.pending) {
+            let ids: Vec<u32> = self
+                .sessions
+                .iter()
+                .map(|s| s.id)
+                .filter(|id| to.is_none_or(|t| t == *id))
+                .collect();
+            for id in ids {
+                self.send(id, msg.clone());
+            }
+        }
+    }
+    pub fn active(&self) -> bool {
+        !self.sessions.is_empty()
+    }
+}
+
+fn hex_ref(a: u16) -> Json {
+    format!("0x{a:04X}").into()
+}
+fn parse_ref(v: &Json) -> Option<u16> {
+    let s = v.str()?.trim();
+    let h = s
+        .strip_prefix("0x")
+        .or_else(|| s.strip_prefix("0X"))
+        .or_else(|| s.strip_prefix('$'))?;
+    u32::from_str_radix(h, 16).ok().map(|v| v as u16)
+}
+fn parse_value(s: &str) -> Option<u16> {
+    let s = s.trim();
+    if let Some(h) = s.strip_prefix('$').or_else(|| s.strip_prefix("0x")) {
+        return u32::from_str_radix(h, 16).ok().map(|v| v as u16);
+    }
+    s.parse::<i32>().ok().map(|v| v as u16)
+}
+fn cc_flags(cc: u8) -> String {
+    "EFHINZVC"
+        .chars()
+        .enumerate()
+        .map(|(i, c)| if cc & (0x80 >> i) != 0 { c } else { '-' })
+        .collect()
+}
+fn source_ref(table: usize, src: usize) -> i64 {
+    (table as i64) * 65536 + src as i64 + 1
+}
+
+impl Ice {
+    /// Handle one DAP message from session `id`; replies go to `out`.
+    pub fn dap_message(&mut self, id: u32, msg: &Json, out: Sender<String>) {
+        if !self.dap.sessions.iter().any(|s| s.id == id) {
+            self.dap.sessions.push(Session {
+                id,
+                out,
+                seq: 0,
+                reported: HashMap::new(),
+            });
+        }
+        if msg.get("type").str() != Some("request") {
+            return;
+        }
+        let command = msg.get("command").str().unwrap_or("").to_string();
+        let args = msg.get("arguments");
+        let result = self.dap_request(id, &command, args);
+        let (success, body, message) = match result {
+            Ok(body) => (true, body, Json::Null),
+            Err(e) => (false, Json::Null, Json::from(e)),
+        };
+        let response = obj([
+            ("type", "response".into()),
+            ("request_seq", msg.get("seq").int().unwrap_or(0).into()),
+            ("success", success.into()),
+            ("command", command.as_str().into()),
+            ("message", message),
+            ("body", body),
+        ]);
+        // Responses go out before the events the request caused.
+        self.dap.send(id, response);
+        if command == "initialize" {
+            self.dap.event(Some(id), "initialized", obj([]));
+        }
+        if command == "configurationDone" && !self.running {
+            let desc = self
+                .stop
+                .as_ref()
+                .map(|s| s.describe(&self.tracer))
+                .unwrap_or_default();
+            self.dap.event(
+                Some(id),
+                "stopped",
+                obj([
+                    ("reason", "pause".into()),
+                    ("description", desc.into()),
+                    ("threadId", THREAD.into()),
+                    ("allThreadsStopped", true.into()),
+                ]),
+            );
+        }
+        self.dap_sync();
+    }
+
+    pub fn dap_closed(&mut self, id: u32) {
+        self.dap.sessions.retain(|s| s.id != id);
+        self.remove_sym_bps(|b| b.owner != id);
+    }
+
+    /// Flush events and report breakpoints whose resolution changed.
+    pub fn dap_sync(&mut self) {
+        if !self.dap.active() {
+            return;
+        }
+        let mut changes = Vec::new();
+        for s in &mut self.dap.sessions {
+            for b in self.sym_bps.iter().filter(|b| b.owner == s.id) {
+                let verified = !b.targets.is_empty();
+                if s.reported.insert(b.id, verified) != Some(verified) {
+                    changes.push((s.id, b.id, verified, b.line));
+                }
+            }
+        }
+        for (sid, bid, verified, line) in changes {
+            let bp = obj([
+                ("id", bid.into()),
+                ("verified", verified.into()),
+                ("line", line.into()),
+            ]);
+            self.dap.event(
+                Some(sid),
+                "breakpoint",
+                obj([("reason", "changed".into()), ("breakpoint", bp)]),
+            );
+        }
+        self.dap.flush();
+    }
+
+    /// Breakpoint ids that stop at this PC.
+    pub(super) fn hit_ids(&self, pc: u16) -> Vec<u32> {
+        let phys = self.machine.translate(pc);
+        self.sym_bps
+            .iter()
+            .filter(|b| {
+                b.targets.iter().any(|t| match *t {
+                    Target::Logical(a) => a == pc,
+                    Target::Phys(p) => Some(p) == phys,
+                })
+            })
+            .map(|b| b.id)
+            .collect()
+    }
+
+    fn dap_source(&self, table: usize, src: usize) -> Json {
+        let s = &self.symbols.tables[table].sources[src];
+        let name = s.name.rsplit('/').next().unwrap_or(&s.name).to_string();
+        match &s.path {
+            Some(p) => {
+                let abs = std::fs::canonicalize(p).unwrap_or_else(|_| p.clone());
+                obj([
+                    ("name", name.into()),
+                    ("path", abs.to_string_lossy().into_owned().into()),
+                ])
+            }
+            None => obj([
+                ("name", name.into()),
+                ("sourceReference", source_ref(table, src).into()),
+                ("origin", s.name.as_str().into()),
+            ]),
+        }
+    }
+
+    /// Source location of an address, as (source, line).
+    fn dap_location(&self, addr: u16) -> Option<(Json, u32)> {
+        let (ti, l) = self.symbols.line(&self.machine, addr)?;
+        Some((self.dap_source(ti, l.src), l.line))
+    }
+
+    fn dap_request(&mut self, id: u32, command: &str, args: &Json) -> Result<Json, String> {
+        match command {
+            "initialize" => Ok(obj([
+                ("supportsConfigurationDoneRequest", true.into()),
+                ("supportsFunctionBreakpoints", true.into()),
+                ("supportsInstructionBreakpoints", true.into()),
+                ("supportsDisassembleRequest", true.into()),
+                ("supportsReadMemoryRequest", true.into()),
+                ("supportsWriteMemoryRequest", true.into()),
+                ("supportsSteppingGranularity", true.into()),
+                ("supportsSetVariable", true.into()),
+                ("supportsEvaluateForHovers", true.into()),
+                ("supportsLoadedSourcesRequest", true.into()),
+                (
+                    "exceptionBreakpointFilters",
+                    Json::Arr(vec![
+                        obj([
+                            ("filter", "os9error".into()),
+                            ("label", "OS-9 エラー復帰".into()),
+                            ("default", false.into()),
+                        ]),
+                        obj([
+                            ("filter", "os9switch".into()),
+                            ("label", "OS-9 プロセス切り替え".into()),
+                            ("default", false.into()),
+                        ]),
+                    ]),
+                ),
+            ])),
+            "attach" | "launch" => {
+                let symbols: Vec<String> = match args.get("symbols") {
+                    Json::Str(s) => vec![s.clone()],
+                    v => v
+                        .arr()
+                        .iter()
+                        .filter_map(|x| x.str().map(str::to_string))
+                        .collect(),
+                };
+                for d in args.get("sourceDirs").arr().iter().filter_map(Json::str) {
+                    self.symbols.add_source_dir(d.into());
+                }
+                for s in &symbols {
+                    self.load_symbols(s)?;
+                }
+                if args.get("stopOnEntry").bool() == Some(true) && self.running {
+                    self.halt(Stop::Pause);
+                }
+                Ok(Json::Null)
+            }
+            "configurationDone" | "cancel" => Ok(Json::Null),
+            "disconnect" | "terminate" => {
+                self.remove_sym_bps(|b| b.owner != id);
+                Ok(Json::Null)
+            }
+            "setBreakpoints" => {
+                let source = args.get("source");
+                let file = source
+                    .get("path")
+                    .str()
+                    .or_else(|| source.get("name").str())
+                    .ok_or("source")?
+                    .to_string();
+                let lines: Vec<u32> = if args.get("breakpoints").arr().is_empty() {
+                    args.get("lines")
+                        .arr()
+                        .iter()
+                        .filter_map(Json::int)
+                        .map(|l| l as u32)
+                        .collect()
+                } else {
+                    args.get("breakpoints")
+                        .arr()
+                        .iter()
+                        .filter_map(|b| b.get("line").int())
+                        .map(|l| l as u32)
+                        .collect()
+                };
+                self.remove_sym_bps(|b| {
+                    !(b.owner == id
+                        && matches!(&b.spec, BpSpec::Line { file: f, .. } if *f == file))
+                });
+                let mut out = Vec::new();
+                for line in lines {
+                    let bid = self.add_sym_bp(
+                        id,
+                        BpSpec::Line {
+                            file: file.clone(),
+                            line,
+                        },
+                    );
+                    out.push(self.dap_bp(bid, Some(line)));
+                }
+                Ok(obj([("breakpoints", Json::Arr(out))]))
+            }
+            "setFunctionBreakpoints" => {
+                self.remove_sym_bps(|b| !(b.owner == id && matches!(b.spec, BpSpec::Symbol(_))));
+                let mut out = Vec::new();
+                for name in args
+                    .get("breakpoints")
+                    .arr()
+                    .iter()
+                    .filter_map(|b| b.get("name").str())
+                {
+                    let bid = self.add_sym_bp(id, BpSpec::Symbol(name.trim().to_string()));
+                    out.push(self.dap_bp(bid, None));
+                }
+                Ok(obj([("breakpoints", Json::Arr(out))]))
+            }
+            "setInstructionBreakpoints" => {
+                self.remove_sym_bps(|b| !(b.owner == id && matches!(b.spec, BpSpec::Addr(_))));
+                let mut out = Vec::new();
+                for b in args.get("breakpoints").arr() {
+                    let Some(a) = parse_ref(b.get("instructionReference")) else {
+                        continue;
+                    };
+                    let a = a.wrapping_add(b.get("offset").int().unwrap_or(0) as u16);
+                    let bid = self.add_sym_bp(id, BpSpec::Addr(a));
+                    out.push(self.dap_bp(bid, None));
+                }
+                Ok(obj([("breakpoints", Json::Arr(out))]))
+            }
+            "setExceptionBreakpoints" => {
+                let filters: Vec<&str> = args
+                    .get("filters")
+                    .arr()
+                    .iter()
+                    .filter_map(Json::str)
+                    .collect();
+                self.break_errors = filters.contains(&"os9error");
+                self.break_switch = filters.contains(&"os9switch");
+                Ok(obj([]))
+            }
+            "threads" => {
+                let mut name = "6809".to_string();
+                if let Some(v) = self.view() {
+                    let cur = v.current();
+                    if let Some(p) = v.processes().into_iter().find(|p| p.addr == cur) {
+                        name = format!("6809 (OS-9 プロセス{} {})", p.id, p.module);
+                    }
+                }
+                Ok(obj([(
+                    "threads",
+                    Json::Arr(vec![obj([("id", THREAD.into()), ("name", name.into())])]),
+                )]))
+            }
+            "stackTrace" => {
+                self.refresh_symbols();
+                let mut frames = Vec::new();
+                let pcs: Vec<u16> = std::iter::once(self.cpu.pc)
+                    .chain(self.call_chain(31).into_iter().map(|(_, w)| w))
+                    .collect();
+                for (i, &pc) in pcs.iter().enumerate() {
+                    // A return address belongs to the line of its call.
+                    let at = if i == 0 { pc } else { pc.wrapping_sub(1) };
+                    let name = self
+                        .symbols
+                        .label(&self.machine, at)
+                        .unwrap_or_else(|| format!("${pc:04X}"));
+                    let (source, line) = self.dap_location(at).unwrap_or((Json::Null, 0));
+                    frames.push(obj([
+                        ("id", i.into()),
+                        ("name", name.into()),
+                        ("source", source),
+                        ("line", line.into()),
+                        ("column", if line > 0 { 1 } else { 0 }.into()),
+                        ("instructionPointerReference", hex_ref(pc)),
+                        (
+                            "presentationHint",
+                            if line > 0 {
+                                Json::Null
+                            } else {
+                                "subtle".into()
+                            },
+                        ),
+                    ]));
+                }
+                let start = args.get("startFrame").int().unwrap_or(0).max(0) as usize;
+                let levels = args
+                    .get("levels")
+                    .int()
+                    .filter(|&n| n > 0)
+                    .map_or(usize::MAX, |n| n as usize);
+                let total = frames.len();
+                let frames: Vec<Json> = frames.into_iter().skip(start).take(levels).collect();
+                Ok(obj([
+                    ("stackFrames", Json::Arr(frames)),
+                    ("totalFrames", total.into()),
+                ]))
+            }
+            "scopes" => Ok(obj([(
+                "scopes",
+                Json::Arr(vec![
+                    obj([
+                        ("name", "レジスタ".into()),
+                        ("variablesReference", REGISTERS.into()),
+                        ("expensive", false.into()),
+                        ("presentationHint", "registers".into()),
+                    ]),
+                    obj([
+                        ("name", "スタック".into()),
+                        ("variablesReference", STACK.into()),
+                        ("expensive", false.into()),
+                    ]),
+                    obj([
+                        ("name", "OS-9".into()),
+                        ("variablesReference", PROCESS.into()),
+                        ("expensive", false.into()),
+                    ]),
+                ]),
+            )])),
+            "variables" => Ok(obj([(
+                "variables",
+                Json::Arr(self.dap_variables(args.get("variablesReference").int().unwrap_or(0))),
+            )])),
+            "setVariable" => {
+                if args.get("variablesReference").int() != Some(REGISTERS) {
+                    return Err("レジスタのみ変更できます".into());
+                }
+                let name = args.get("name").str().unwrap_or("").to_ascii_lowercase();
+                let v = args.get("value").str().and_then(parse_value).ok_or("値")?;
+                let c = &mut self.cpu;
+                match name.as_str() {
+                    "a" => c.a = v as u8,
+                    "b" => c.b = v as u8,
+                    "d" => c.set_d(v),
+                    "dp" => c.dp = v as u8,
+                    "cc" => c.cc = v as u8,
+                    "x" => c.x = v,
+                    "y" => c.y = v,
+                    "u" => c.u = v,
+                    "s" => c.s = v,
+                    "pc" => c.pc = v,
+                    _ => return Err("レジスタ名".into()),
+                }
+                let shown = self.dap_variables(REGISTERS).into_iter().find(|x| {
+                    x.get("name").str().map(str::to_ascii_lowercase) == Some(name.clone())
+                });
+                Ok(obj([(
+                    "value",
+                    shown.map_or(Json::Null, |x| x.get("value").clone()),
+                )]))
+            }
+            "continue" => {
+                if !self.running {
+                    self.resume(Goal::None);
+                }
+                Ok(obj([("allThreadsContinued", true.into())]))
+            }
+            "next" | "stepIn" => {
+                let instruction = args.get("granularity").str() == Some("instruction");
+                match (command, instruction) {
+                    ("next", true) => self.step_over(),
+                    ("stepIn", true) => self.single_step(),
+                    (_, false) => self.step_line(command == "stepIn"),
+                    _ => unreachable!(),
+                }
+                Ok(Json::Null)
+            }
+            "stepOut" => {
+                let goal = Goal::Out {
+                    s: self.cpu.s,
+                    proc_: self.current_proc(),
+                };
+                self.resume(goal);
+                Ok(Json::Null)
+            }
+            "pause" => {
+                if self.running {
+                    self.halt(Stop::Pause);
+                } else {
+                    self.dap.stopped(&Stop::Pause, "一時停止", Vec::new());
+                }
+                Ok(Json::Null)
+            }
+            "evaluate" => self.dap_evaluate(
+                args.get("expression").str().unwrap_or(""),
+                args.get("context").str().unwrap_or(""),
+            ),
+            "disassemble" => {
+                self.refresh_symbols();
+                let base = parse_ref(args.get("memoryReference")).ok_or("memoryReference")?;
+                let mut a = base.wrapping_add(args.get("offset").int().unwrap_or(0) as u16);
+                let skip = args.get("instructionOffset").int().unwrap_or(0);
+                let count = args
+                    .get("instructionCount")
+                    .int()
+                    .unwrap_or(0)
+                    .clamp(0, 4096) as usize;
+                let m = &self.machine;
+                let read = |x| m.peek(x);
+                if skip < 0 {
+                    a = self.resync(a, (-skip).min(4096) as u16);
+                } else {
+                    for _ in 0..skip {
+                        a = a.wrapping_add(disassemble(&read, a).len.max(1));
+                    }
+                }
+                let mut out = Vec::new();
+                let mut last_line = None;
+                for _ in 0..count {
+                    let l = disassemble(&read, a);
+                    let bytes: Vec<String> = (0..l.len)
+                        .map(|i| format!("{:02X}", m.peek(a.wrapping_add(i))))
+                        .collect();
+                    let mut text = l.text.clone();
+                    if let Some(t) = l.target.filter(|_| !l.text.starts_with("OS9 "))
+                        && let Some(name) = self.symbols.label(m, t)
+                    {
+                        text.push_str(&format!("  <{name}>"));
+                    }
+                    let loc = self.dap_location(a);
+                    let mut fields = vec![
+                        ("address", hex_ref(a)),
+                        ("instructionBytes", bytes.join(" ").into()),
+                        ("instruction", text.into()),
+                        (
+                            "symbol",
+                            self.symbols.exact(m, a).map(str::to_string).into(),
+                        ),
+                    ];
+                    if let Some((src, line)) = loc
+                        && last_line != Some(line)
+                    {
+                        fields.push(("location", src));
+                        fields.push(("line", line.into()));
+                        last_line = Some(line);
+                    }
+                    out.push(Json::Obj(
+                        fields
+                            .into_iter()
+                            .filter(|(_, v)| *v != Json::Null)
+                            .map(|(k, v)| (k.to_string(), v))
+                            .collect(),
+                    ));
+                    a = a.wrapping_add(l.len.max(1));
+                }
+                Ok(obj([("instructions", Json::Arr(out))]))
+            }
+            "readMemory" => {
+                let base = parse_ref(args.get("memoryReference")).ok_or("memoryReference")?;
+                let a = base.wrapping_add(args.get("offset").int().unwrap_or(0) as u16);
+                let n = args.get("count").int().unwrap_or(0).clamp(0, 65536) as usize;
+                let bytes: Vec<u8> = (0..n)
+                    .map(|i| self.machine.peek(a.wrapping_add(i as u16)))
+                    .collect();
+                Ok(obj([
+                    ("address", hex_ref(a)),
+                    ("data", base64(&bytes).into()),
+                ]))
+            }
+            "writeMemory" => {
+                let base = parse_ref(args.get("memoryReference")).ok_or("memoryReference")?;
+                let a = base.wrapping_add(args.get("offset").int().unwrap_or(0) as u16);
+                let data = unbase64(args.get("data").str().unwrap_or("")).ok_or("data")?;
+                for (i, b) in data.iter().enumerate() {
+                    self.machine.poke(a.wrapping_add(i as u16), *b);
+                }
+                Ok(obj([("bytesWritten", data.len().into())]))
+            }
+            "source" => {
+                let r = args
+                    .get("sourceReference")
+                    .int()
+                    .or_else(|| args.get("source").get("sourceReference").int())
+                    .unwrap_or(0)
+                    - 1;
+                let (ti, si) = ((r / 65536) as usize, (r % 65536) as usize);
+                let src = self
+                    .symbols
+                    .tables
+                    .get(ti)
+                    .and_then(|t| t.sources.get(si))
+                    .ok_or("source")?;
+                let last = src.text.keys().last().copied().unwrap_or(0);
+                let content: Vec<&str> = (1..=last)
+                    .map(|n| src.text.get(&n).map_or("", String::as_str))
+                    .collect();
+                Ok(obj([("content", content.join("\n").into())]))
+            }
+            "loadedSources" => {
+                let mut out = Vec::new();
+                for (ti, t) in self.symbols.tables.iter().enumerate() {
+                    for si in 0..t.sources.len() {
+                        if t.lines.iter().any(|l| l.src == si) {
+                            out.push(self.dap_source(ti, si));
+                        }
+                    }
+                }
+                Ok(obj([("sources", Json::Arr(out))]))
+            }
+            _ => Err(format!("unsupported request: {command}")),
+        }
+    }
+
+    fn dap_bp(&self, id: u32, requested: Option<u32>) -> Json {
+        let Some(b) = self.sym_bps.iter().find(|b| b.id == id) else {
+            return obj([("verified", false.into())]);
+        };
+        let verified = !b.targets.is_empty();
+        let addr = b
+            .targets
+            .iter()
+            .find_map(|t| self.symbols.logical(&self.machine, *t));
+        obj([
+            ("id", id.into()),
+            ("verified", verified.into()),
+            ("line", b.line.or(requested).into()),
+            (
+                "instructionReference",
+                addr.map(hex_ref).unwrap_or(Json::Null),
+            ),
+            (
+                "message",
+                if verified {
+                    Json::Null
+                } else if matches!(b.spec, BpSpec::Line { .. }) && b.line.is_none() {
+                    "この行に対応するコードがありません".into()
+                } else {
+                    "モジュールがロードされると有効になります".into()
+                },
+            ),
+        ])
+    }
+
+    fn dap_variables(&self, reference: i64) -> Vec<Json> {
+        let var = |name: &str, value: String, mem: Option<u16>| {
+            obj([
+                ("name", name.into()),
+                ("value", value.into()),
+                ("variablesReference", 0.into()),
+                ("memoryReference", mem.map(hex_ref).unwrap_or(Json::Null)),
+            ])
+        };
+        let m = &self.machine;
+        let label = |a: u16| {
+            self.symbols
+                .label(m, a)
+                .map_or(String::new(), |l| format!("  <{l}>"))
+        };
+        match reference {
+            REGISTERS => {
+                let r = Regs::of(&self.cpu);
+                vec![
+                    var("A", format!("${:02X}", r.a), None),
+                    var("B", format!("${:02X}", r.b), None),
+                    var("D", format!("${:04X}", r.d()), Some(r.d())),
+                    var("X", format!("${:04X}{}", r.x, label(r.x)), Some(r.x)),
+                    var("Y", format!("${:04X}{}", r.y, label(r.y)), Some(r.y)),
+                    var("U", format!("${:04X}{}", r.u, label(r.u)), Some(r.u)),
+                    var("S", format!("${:04X}", r.s), Some(r.s)),
+                    var("PC", format!("${:04X}{}", r.pc, label(r.pc)), Some(r.pc)),
+                    var("DP", format!("${:02X}", r.dp), None),
+                    var("CC", format!("${:02X} {}", r.cc, cc_flags(r.cc)), None),
+                ]
+            }
+            STACK => (0..32u16)
+                .map(|i| {
+                    let at = self.cpu.s.wrapping_add(i * 2);
+                    let w = m.peek16(at);
+                    let ret = if self.is_return_address(w) {
+                        " ↩"
+                    } else {
+                        ""
+                    };
+                    var(
+                        &format!("S+${:02X}", i * 2),
+                        format!("${w:04X}{}{ret}", label(w)),
+                        Some(at),
+                    )
+                })
+                .collect(),
+            PROCESS => {
+                let Some(v) = self.view() else {
+                    return vec![var("OS-9", "未検出".into(), None)];
+                };
+                let cur = v.current();
+                let mut out = vec![var(
+                    "Level",
+                    if v.level == os9::Level::One { "1" } else { "2" }.into(),
+                    None,
+                )];
+                if let Some(p) = v.processes().into_iter().find(|p| p.addr == cur) {
+                    out.push(var("プロセスID", p.id.to_string(), None));
+                    out.push(var("モジュール", p.module.clone(), None));
+                    out.push(var("親", p.parent.to_string(), None));
+                    out.push(var("P$State", format!("${:02X}", p.state), None));
+                    out.push(var("記述子", format!("${:04X}", p.addr), None));
+                    if let Some(t) = p.task {
+                        out.push(var("タスク", t.to_string(), None));
+                    }
+                }
+                if let Some(c) = self.tracer.calls.values().rev().find(|c| !c.system) {
+                    out.push(var(
+                        "直近のシステムコール",
+                        format!("{} {} → {}", os9::service_name(c.code), c.args, c.result),
+                        None,
+                    ));
+                }
+                out
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    fn dap_evaluate(&mut self, expr: &str, context: &str) -> Result<Json, String> {
+        let e = expr.trim();
+        // In the debug console, `>text` types a line into the guest console.
+        if context == "repl"
+            && let Some(line) = e.strip_prefix('>')
+        {
+            self.pending_input.extend(line.trim_start().bytes());
+            self.pending_input.push_back(13);
+            return Ok(obj([
+                (
+                    "result",
+                    format!("→ コンソール: {}", line.trim_start()).into(),
+                ),
+                ("variablesReference", 0.into()),
+            ]));
+        }
+        self.refresh_symbols();
+        let m = &self.machine;
+        let r = Regs::of(&self.cpu);
+        let reg = match e.to_ascii_lowercase().as_str() {
+            "a" => Some(u16::from(r.a)),
+            "b" => Some(u16::from(r.b)),
+            "d" => Some(r.d()),
+            "x" => Some(r.x),
+            "y" => Some(r.y),
+            "u" => Some(r.u),
+            "s" => Some(r.s),
+            "pc" => Some(r.pc),
+            "dp" => Some(u16::from(r.dp)),
+            "cc" => Some(u16::from(r.cc)),
+            _ => None,
+        };
+        // `[expr]` reads the word at an address.
+        let (value, indirect) =
+            if let Some(inner) = e.strip_prefix('[').and_then(|x| x.strip_suffix(']')) {
+                let a = self.symbols.resolve(m, inner).ok_or("式を評価できません")?;
+                (m.peek16(a), Some(a))
+            } else if let Some(v) = reg {
+                (v, None)
+            } else if let Some(v) = self.symbols.resolve(m, e) {
+                (v, None)
+            } else {
+                return Err(format!("評価できません: {e}"));
+            };
+        let label = self
+            .symbols
+            .label(m, value)
+            .map_or(String::new(), |l| format!("  <{l}>"));
+        let text = match indirect {
+            Some(a) => format!("${value:04X} ({value}){label}  ← [${a:04X}]"),
+            None => format!("${value:04X} ({value}){label}"),
+        };
+        Ok(obj([
+            ("result", text.into()),
+            ("variablesReference", 0.into()),
+            ("memoryReference", hex_ref(value)),
+        ]))
+    }
+}
+
+fn read_message(r: &mut impl BufRead) -> io::Result<Option<Vec<u8>>> {
+    let mut length = None;
+    loop {
+        let mut line = String::new();
+        if r.read_line(&mut line)? == 0 {
+            return Ok(None);
+        }
+        let line = line.trim_end();
+        if line.is_empty() {
+            if length.is_some() {
+                break;
+            }
+            continue;
+        }
+        if let Some((k, v)) = line.split_once(':')
+            && k.trim().eq_ignore_ascii_case("content-length")
+        {
+            length = v.trim().parse::<usize>().ok().filter(|&n| n <= 16 << 20);
+        }
+    }
+    let mut body = vec![0; length.unwrap_or(0)];
+    r.read_exact(&mut body)?;
+    Ok(Some(body))
+}
+
+fn serve(stream: TcpStream, id: u32, inbox: Sender<Inbox>) -> io::Result<()> {
+    let (tx, rx) = mpsc::channel::<String>();
+    let mut writer = stream.try_clone()?;
+    thread::spawn(move || {
+        for msg in rx {
+            let frame = format!("Content-Length: {}\r\n\r\n{msg}", msg.len());
+            if writer
+                .write_all(frame.as_bytes())
+                .and_then(|_| writer.flush())
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
+    let mut reader = BufReader::new(stream);
+    while let Some(body) = read_message(&mut reader)? {
+        let Ok(msg) = Json::parse(&String::from_utf8_lossy(&body)) else {
+            continue;
+        };
+        if inbox
+            .send(Inbox::Dap {
+                id,
+                msg,
+                out: tx.clone(),
+            })
+            .is_err()
+        {
+            break;
+        }
+    }
+    Ok(())
+}
+
+/// Accept DAP connections in the background.
+pub fn start(listener: TcpListener, inbox: Sender<Inbox>) {
+    thread::spawn(move || {
+        for (n, stream) in listener.incoming().flatten().enumerate() {
+            let inbox = inbox.clone();
+            let id = n as u32 + 1;
+            let _ = stream.set_nodelay(true);
+            thread::spawn(move || {
+                let _ = serve(stream, id, inbox.clone());
+                let _ = inbox.send(Inbox::DapClosed(id));
+            });
+        }
+    });
+}

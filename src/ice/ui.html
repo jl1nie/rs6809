@@ -74,6 +74,10 @@ th { color: var(--mute); font-weight: 500; font-size: 12px; border-bottom: 1px s
 .dis td.b { color: var(--mute); }
 .dis tr.os9 td.t { color: var(--cat-proc); font-weight: 600; }
 .dis tr:hover td { background: var(--accent-soft); }
+.dis tr.lbl td { color: var(--accent); font-weight: 600; padding-top: 5px; }
+.dis tr.src td { color: var(--ok); font-style: italic; white-space: pre; }
+.dis td .sym { color: var(--accent); }
+.dis tr.ret td { color: var(--accent); }
 .scroll { overflow: auto; }
 .hex { font-family: var(--mono); white-space: pre; line-height: 1.5; overflow-x: auto; }
 #console.hide { display: none; }
@@ -185,8 +189,20 @@ canvas { width: 100%; display: block; }
       <div class="panel">
         <h2>ブレークポイント</h2>
         <div class="body">
-          <div class="row"><input id="bpAddr" class="addr" placeholder="C000"><button id="bpAdd">追加</button><button id="bpClear">全削除</button></div>
+          <div class="row"><input id="bpAddr" class="addr" style="width:11em" placeholder="C000 / sum / hello.c:19" title="アドレス(16進)、シンボル名、またはファイル名:行"><button id="bpAdd">追加</button><button id="bpClear">全削除</button></div>
           <div class="list" id="bpList" style="margin-top:6px"></div>
+        </div>
+      </div>
+      <div class="panel">
+        <h2>スタック<span class="grow"></span><span class="kbd mono" id="stackWhere"></span></h2>
+        <div class="scroll" style="max-height:260px"><table class="dis"><tbody id="stack"></tbody></table></div>
+        <div class="body mute" style="font-size:12px">↩ は呼び出し命令の直後を指す値（戻り番地）です。</div>
+      </div>
+      <div class="panel">
+        <h2>シンボル</h2>
+        <div class="body">
+          <div class="row"><input id="symPath" style="flex:1;min-width:8em" placeholder="artifacts/cdebug/hello" title="LWASM/RMAのリスト、LWLINK/c.linkのマップ、またはそのディレクトリ（ホスト上のパス）"><button id="symLoad">読込</button><button id="symClear">全削除</button></div>
+          <div class="list" id="symList" style="margin-top:6px"></div>
         </div>
       </div>
       <div class="panel">
@@ -392,12 +408,41 @@ function renderRegs() {
 
 // ---------- breakpoints ----------
 function renderBps() {
-  $("bpList").innerHTML = st.breakpoints.length ? st.breakpoints.map((a) => `<div class="item">● $${hex(a, 4)}<button data-a="${a}">×</button></div>`).join("") : '<span class="mute">なし</span>';
-  $("bpList").querySelectorAll("button").forEach((b) => b.onclick = async () => { await api(`bp?op=del&addr=${hex(+b.dataset.a, 4)}`, ""); poll(true); });
+  const plain = st.breakpoints.map((a) => `<div class="item">● $${hex(a, 4)}<button data-a="${a}">×</button></div>`);
+  // Symbolic breakpoints follow their module; unresolved ones wait for it to load.
+  const sym = (st.symBreakpoints || []).map((b) => `<div class="item ${b.resolved ? "" : "mute"}" title="${b.owner ? "エディタ(DAP)から設定" : ""}">${b.resolved ? "●" : "○"} ${esc(b.text)}` +
+    `<span class="mute mono">${b.addrs.map((a) => " $" + hex(a, 4)).join("") || (b.resolved ? " 別空間" : " 未ロード")}</span>${b.owner ? "" : `<button data-s="${b.id}">×</button>`}</div>`);
+  $("bpList").innerHTML = plain.length + sym.length ? plain.concat(sym).join("") : '<span class="mute">なし</span>';
+  $("bpList").querySelectorAll("button[data-a]").forEach((b) => b.onclick = async () => { await api(`bp?op=del&addr=${hex(+b.dataset.a, 4)}`, ""); poll(true); });
+  $("bpList").querySelectorAll("button[data-s]").forEach((b) => b.onclick = async () => { await api(`bp?symdel=${b.dataset.s}`, ""); poll(true); });
   $("wList").innerHTML = st.watches.length ? st.watches.map((w, i) => `<div class="item">${{ r: "読", w: "書", rw: "読書" }[w.kind]} $${hex(w.start, 4)}${w.end > w.start ? "–$" + hex(w.end, 4) : ""}<button data-i="${i}">×</button></div>`).join("") : '<span class="mute">なし</span>';
   $("wList").querySelectorAll("button").forEach((b) => b.onclick = async () => { await api(`watch?op=del&index=${b.dataset.i}`, ""); poll(true); });
 }
-$("bpAdd").onclick = async () => { await api(`bp?addr=${encodeURIComponent($("bpAddr").value)}`, ""); $("bpAddr").value = ""; poll(true); };
+$("bpAdd").onclick = async () => {
+  const v = $("bpAddr").value.trim();
+  // Hex addresses stay plain breakpoints; names and FILE:LINE follow the symbols.
+  const q = /^(\$|0x)?[0-9a-f]{1,4}$/i.test(v) ? `bp?addr=${encodeURIComponent(v)}` : `bp?sym=${encodeURIComponent(v)}`;
+  await api(q, ""); $("bpAddr").value = ""; poll(true);
+};
+$("bpAddr").onkeydown = (e) => { if (e.key === "Enter") $("bpAdd").onclick(); };
+async function renderSymbols() {
+  const d = await api("symbols");
+  $("symList").innerHTML = d.tables.length ? d.tables.map((t) => `<div class="item" title="${esc(t.path)}"><span class="mono">${esc(t.path.split("/").pop())}</span>` +
+    `<span class="mute">${t.kind} ${t.symbols}シンボル ${t.lines}行${t.module ? ` / モジュール ${esc(t.module)}${t.placed ? "" : "（未ロード）"}` : ""}</span></div>`).join("") : '<span class="mute">なし</span>';
+}
+$("symLoad").onclick = async () => {
+  const r = await fetch(`/api/symbols?path=${encodeURIComponent($("symPath").value.trim())}`, { method: "POST" });
+  const j = await r.json();
+  if (j.error) alert(j.error);
+  renderSymbols(); poll(true);
+};
+$("symClear").onclick = async () => { await api("symbols?op=clear", ""); renderSymbols(); poll(true); };
+async function renderStack() {
+  const d = await api("stack?n=32");
+  $("stackWhere").textContent = d.where || "";
+  $("stack").innerHTML = d.words.map((w) => `<tr class="${w.ret ? "ret" : ""}"><td>${hex(w.addr, 4)}</td><td>${hex(w.value, 4)}</td>` +
+    `<td>${w.ret ? "↩" : ""}</td><td>${w.label ? esc(w.label) : ""}</td></tr>`).join("");
+}
 $("bpClear").onclick = async () => { await api("bp?op=clear", ""); poll(true); };
 $("wAdd").onclick = async () => { await api(`watch?addr=${encodeURIComponent($("wAddr").value)}&len=${$("wLen").value}&kind=${$("wKind").value}`, ""); poll(true); };
 
@@ -409,16 +454,25 @@ async function renderDis() {
   $("dis").innerHTML = d.lines.map((l) => {
     const os9 = l.text.startsWith("OS9 ");
     const title = os9 ? (services[l.text.slice(4)]?.desc || "") + (l.note ? "\n" + l.note : "") : "";
-    return `<tr class="${l.addr === st.regs.pc ? "pc" : ""} ${l.bp ? "bp" : ""} ${os9 ? "os9" : ""}" data-a="${l.addr}" title="${esc(title)}">` +
-      `<td class="g"></td><td>${hex(l.addr, 4)}</td><td class="b">${l.bytes}</td><td class="t">${esc(l.text)}</td>` +
+    // Source line and label headers from the loaded listings.
+    const src = l.src ? `<tr class="src"><td></td><td colspan="4">${esc(l.src.file.split("/").pop())}:${l.src.line}  ${esc(l.src.text.trim())}</td></tr>` : "";
+    const lbl = l.label ? `<tr class="lbl"><td></td><td colspan="4">${esc(l.label)}:</td></tr>` : "";
+    return lbl + src + `<tr class="${l.addr === st.regs.pc ? "pc" : ""} ${l.bp ? "bp" : ""} ${os9 ? "os9" : ""}" data-a="${l.addr}" title="${esc(title)}">` +
+      `<td class="g"></td><td>${hex(l.addr, 4)}</td><td class="b">${l.bytes}</td><td class="t">${esc(l.text)}${l.tsym ? ` <span class="sym">&lt;${esc(l.tsym)}&gt;</span>` : ""}</td>` +
       `<td class="mute">${l.phys >= 0 ? "物理 " + hex(l.phys, 5) : "ROM/IO"}</td></tr>`;
   }).join("");
-  $("dis").querySelectorAll("tr").forEach((tr) => {
+  $("dis").querySelectorAll("tr[data-a]").forEach((tr) => {
     tr.querySelector(".g").onclick = async () => { await api(`bp?op=toggle&addr=${hex(+tr.dataset.a, 4)}`, ""); poll(true); };
     tr.ondblclick = () => act(`runto?addr=${hex(+tr.dataset.a, 4)}`);
   });
 }
-$("disGo").onclick = () => { const v = parseInt($("disAddr").value, 16); if (!isNaN(v)) { viewAddr = v; $("follow").checked = false; renderDis(); } };
+$("disGo").onclick = async () => {
+  // Accepts a hex address or a symbol name.
+  const r = await fetch(`/api/resolve?expr=${encodeURIComponent($("disAddr").value)}`);
+  const j = await r.json();
+  if (j.addr !== undefined) { viewAddr = j.addr; $("follow").checked = false; renderDis(); }
+};
+$("disAddr").onkeydown = (e) => { if (e.key === "Enter") $("disGo").onclick(); };
 
 // ---------- memory ----------
 async function renderMem() {
@@ -733,7 +787,7 @@ async function refreshAll() {
   renderRegs();
   renderBps();
   renderOs9Breaks();
-  if (tab === "dbg") await Promise.all([renderDis(), renderMem(), renderTrace()]);
+  if (tab === "dbg") await Promise.all([renderDis(), renderMem(), renderTrace(), renderStack(), renderSymbols()]);
   else await renderOs9();
 }
 let busy = false, lastSlow = 0, shownCycles = -1, baseRegs = null;

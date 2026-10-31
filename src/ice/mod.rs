@@ -2,9 +2,12 @@
 //!
 //! The emulator thread owns the CPU and machine. The HTTP threads forward API
 //! requests over a channel, so inspection always sees a consistent state.
+pub mod dap;
 pub mod disasm;
 pub mod http;
+pub mod json;
 pub mod os9;
+pub mod symbols;
 mod tables;
 
 use crate::cpu::I;
@@ -13,13 +16,18 @@ use crate::{Bus, Cpu, Machine};
 use disasm::{Flow, disassemble};
 use os9::{Level, Regs, Tracer, View};
 use std::collections::{BTreeSet, VecDeque};
+use symbols::{Symbols, Target};
 use std::fmt::Write as _;
 use std::io;
 use std::net::TcpListener;
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
 
 const UI: &str = include_str!("ui.html");
+
+/// Service requests after which modules may have moved:
+/// F$Link, F$Load, F$UnLink, F$Fork, F$Chain, F$Exit, F$UnLoad, F$NMLink, F$NMLoad, F$VModul.
+const MODULE_CALLS: [u8; 10] = [0x00, 0x01, 0x02, 0x03, 0x05, 0x06, 0x1d, 0x21, 0x22, 0x2e];
 
 pub fn json_str(s: &str) -> String {
     let mut o = String::with_capacity(s.len() + 2);
@@ -71,6 +79,43 @@ pub struct Watch {
     pub start: u16,
     pub end: u16,
     pub kind: WatchKind,
+}
+
+/// Messages for the emulator thread.
+pub enum Inbox {
+    Http(http::Request),
+    /// A Debug Adapter Protocol message from session `id`.
+    Dap { id: u32, msg: json::Json, out: Sender<String> },
+    DapClosed(u32),
+}
+
+/// What a symbolic breakpoint refers to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BpSpec {
+    Line { file: String, line: u32 },
+    Symbol(String),
+    Addr(u16),
+}
+/// A breakpoint on a source line, symbol or address, re-resolved whenever
+/// the OS-9 module directory changes (modules load at varying addresses).
+#[derive(Debug, Clone)]
+pub struct SymBp {
+    pub id: u32,
+    /// 0 for the browser UI, otherwise the DAP session.
+    pub owner: u32,
+    pub spec: BpSpec,
+    /// The line actually used (the next line with code).
+    pub line: Option<u32>,
+    pub targets: Vec<Target>,
+}
+impl SymBp {
+    pub fn text(&self) -> String {
+        match &self.spec {
+            BpSpec::Line { file, line } => format!("{file}:{}", self.line.unwrap_or(*line)),
+            BpSpec::Symbol(s) => s.clone(),
+            BpSpec::Addr(a) => format!("${a:04X}"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -137,6 +182,21 @@ enum Goal {
     Out {
         s: u16,
         proc_: Option<u16>,
+    },
+    /// Source-level step: stop on another source line. Without `into`,
+    /// deeper frames (S below `s`) are skipped.
+    Line {
+        table: usize,
+        src: usize,
+        line: u32,
+        s: u16,
+        proc_: Option<u16>,
+        /// Hardware task: Level 2 runs interrupts and service requests in
+        /// the system task on another stack, which must not end the step.
+        task: u8,
+        into: bool,
+        /// An RTS/PULS PC left the starting frame.
+        left: bool,
     },
 }
 
@@ -219,6 +279,15 @@ pub struct Ice {
     next_input: u64,
     echo_console: bool,
     telnet: Option<TelnetServer>,
+    pub symbols: Symbols,
+    pub sym_bps: Vec<SymBp>,
+    next_bp_id: u32,
+    /// One bit per RAM byte for breakpoints in placed modules.
+    phys_bits: Vec<u64>,
+    phys_count: usize,
+    /// Bumped whenever the effective breakpoints change.
+    pub bp_version: u64,
+    dap: dap::Hub,
 }
 
 impl Ice {
@@ -252,23 +321,157 @@ impl Ice {
             next_input: 0,
             echo_console: options.echo_console,
             telnet: None,
+            symbols: Symbols::default(),
+            sym_bps: Vec::new(),
+            next_bp_id: 1,
+            phys_bits: Vec::new(),
+            phys_count: 0,
+            bp_version: 0,
+            dap: dap::Hub::default(),
         }
     }
     pub fn set_telnet(&mut self, server: TelnetServer) {
         self.telnet = Some(server);
     }
     fn set_bp(&mut self, a: u16, on: bool) {
-        let (w, b) = (usize::from(a >> 6), a & 63);
         if on {
-            self.bp_bits[w] |= 1 << b;
             self.breakpoints.insert(a);
         } else {
-            self.bp_bits[w] &= !(1 << b);
             self.breakpoints.remove(&a);
         }
+        self.rebuild_bps();
     }
     fn bp_at(&self, a: u16) -> bool {
         self.bp_bits[usize::from(a >> 6)] & (1 << (a & 63)) != 0
+    }
+    fn phys_bp_at(&self, pc: u16) -> bool {
+        self.phys_count > 0
+            && self
+                .machine
+                .translate(pc)
+                .is_some_and(|p| self.phys_bits.get(p >> 6).is_some_and(|w| w & (1 << (p & 63)) != 0))
+    }
+    /// Recompute the bit tables from user and symbolic breakpoints.
+    fn rebuild_bps(&mut self) {
+        self.bp_bits.iter_mut().for_each(|w| *w = 0);
+        self.phys_bits = vec![0; self.machine.ram.len().div_ceil(64)];
+        self.phys_count = 0;
+        let logical = self.breakpoints.iter().copied().chain(
+            self.sym_bps
+                .iter()
+                .flat_map(|b| b.targets.iter())
+                .filter_map(|t| match t {
+                    Target::Logical(a) => Some(*a),
+                    Target::Phys(_) => None,
+                }),
+        );
+        for a in logical.collect::<Vec<_>>() {
+            self.bp_bits[usize::from(a >> 6)] |= 1 << (a & 63);
+        }
+        for b in &self.sym_bps {
+            for t in &b.targets {
+                if let Target::Phys(p) = *t
+                    && let Some(w) = self.phys_bits.get_mut(p >> 6)
+                {
+                    *w |= 1 << (p & 63);
+                    self.phys_count += 1;
+                }
+            }
+        }
+        self.bp_version += 1;
+    }
+    fn resolve_bp(&self, spec: &BpSpec) -> (Option<u32>, Vec<Target>) {
+        match spec {
+            BpSpec::Line { file, line } => self.symbols.line_targets(file, *line),
+            BpSpec::Symbol(name) => {
+                let t = self.symbols.symbol_targets(name);
+                if t.is_empty()
+                    && let Some(a) = name.strip_prefix('$').or_else(|| name.strip_prefix("0x"))
+                    && let Ok(a) = u16::from_str_radix(a, 16)
+                {
+                    return (None, vec![Target::Logical(a)]);
+                }
+                (None, t)
+            }
+            BpSpec::Addr(a) => (None, vec![Target::Logical(*a)]),
+        }
+    }
+    pub fn add_sym_bp(&mut self, owner: u32, spec: BpSpec) -> u32 {
+        self.refresh_symbols();
+        let (line, targets) = self.resolve_bp(&spec);
+        let id = self.next_bp_id;
+        self.next_bp_id += 1;
+        self.sym_bps.push(SymBp {
+            id,
+            owner,
+            spec,
+            line,
+            targets,
+        });
+        self.rebuild_bps();
+        id
+    }
+    pub fn remove_sym_bps(&mut self, keep: impl Fn(&SymBp) -> bool) {
+        self.sym_bps.retain(keep);
+        self.rebuild_bps();
+    }
+    /// Load symbols (a listing, map or directory) and re-place them.
+    pub fn load_symbols(&mut self, spec: &str) -> Result<Vec<usize>, String> {
+        let r = self.symbols.load(spec)?;
+        self.refresh_symbols();
+        self.reresolve();
+        Ok(r)
+    }
+    fn reresolve(&mut self) {
+        let specs: Vec<BpSpec> = self.sym_bps.iter().map(|b| b.spec.clone()).collect();
+        for (i, spec) in specs.iter().enumerate() {
+            let (line, targets) = self.resolve_bp(spec);
+            self.sym_bps[i].line = line;
+            self.sym_bps[i].targets = targets;
+        }
+        self.rebuild_bps();
+    }
+    /// Follow modules that loaded, moved or went away.
+    fn refresh_symbols(&mut self) {
+        if self.symbols.tables.is_empty() {
+            return;
+        }
+        if self.level.is_none() {
+            self.level = View::detect(&self.machine).map(|v| v.level);
+        }
+        if self.symbols.place(&self.machine, self.level) {
+            self.reresolve();
+        }
+    }
+    /// The return address heuristic: the word follows a call instruction.
+    pub fn is_return_address(&self, w: u16) -> bool {
+        let m = &self.machine;
+        (2..=4u16).any(|k| {
+            let at = w.wrapping_sub(k);
+            let l = disassemble(&|a| m.peek(a), at);
+            l.len == k && l.flow == Flow::Call && !l.text.starts_with("SWI") && !l.text.starts_with("OS9")
+        })
+    }
+    /// Return addresses on the stack, innermost first: (stack address, value).
+    pub fn call_chain(&self, max: usize) -> Vec<(u16, u16)> {
+        let m = &self.machine;
+        let labelled = !self.symbols.tables.is_empty();
+        let mut out = Vec::new();
+        let s = self.cpu.s;
+        for i in 0..512u16 {
+            if out.len() >= max {
+                break;
+            }
+            let at = s.wrapping_add(i);
+            if at < s {
+                break;
+            }
+            let w = m.peek16(at);
+            if self.is_return_address(w) && (!labelled || self.symbols.locate(m, w).is_some()) {
+                out.push((at, w));
+            }
+        }
+        out
     }
     pub fn view(&self) -> Option<View<'_>> {
         self.level.map(|level| View::new(&self.machine, level))
@@ -291,7 +494,7 @@ impl Ice {
         let executes = (wait == 0 || (wait == 1 && irq)) && !(irq && self.cpu.cc & I == 0);
         let pc = self.cpu.pc;
         let skip = std::mem::take(&mut self.skip_checks);
-        if !skip && self.bp_at(pc) {
+        if !skip && (self.bp_at(pc) || self.phys_bp_at(pc)) {
             return Some(Stop::Breakpoint(pc));
         }
         let os9 = if self.trace_os9 { self.level } else { None };
@@ -308,13 +511,36 @@ impl Ice {
             self.goal = Goal::None;
             return Some(Stop::Step);
         }
+        if let Goal::Line {
+            table,
+            src,
+            line,
+            s,
+            proc_,
+            task,
+            into,
+            left,
+        } = self.goal
+            && self.machine.mmu().task == task
+            && (proc_.is_none() || self.current_proc() == proc_)
+        {
+            let here = self.symbols.line(&self.machine, pc);
+            let other = here.is_some_and(|(t, l)| !(t == table && l.src == src && l.line == line));
+            // Returned from the starting frame into code without line information.
+            let returned = here.is_none() && left;
+            if (other && (into || self.cpu.s >= s)) || returned {
+                self.goal = Goal::None;
+                return Some(Stop::Step);
+            }
+        }
         let mut stop = None;
         let mut return_insn = false;
+        let mut rts = false;
         if executes {
             let m = &self.machine;
             let bytes = [0u16, 1, 2, 3, 4].map(|i| m.peek(pc.wrapping_add(i)));
-            return_insn =
-                bytes[0] == 0x39 || bytes[0] == 0x3b || (bytes[0] == 0x35 && bytes[1] & 0x80 != 0);
+            rts = bytes[0] == 0x39 || (bytes[0] == 0x35 && bytes[1] & 0x80 != 0);
+            return_insn = rts || bytes[0] == 0x3b;
             let pid = match (os9, desc) {
                 (Some(level), Some(d)) => View::new(m, level).pid_of(d),
                 _ => 0,
@@ -379,6 +605,12 @@ impl Ice {
             {
                 stop = stop.or(Some(Stop::SysReturn(id)));
             }
+            let module_change = done
+                .and_then(|id| self.tracer.call(id))
+                .is_some_and(|c| MODULE_CALLS.contains(&c.code));
+            if module_change || switch.is_some() {
+                self.refresh_symbols();
+            }
             if let Some(s) = switch
                 && self.break_switch
             {
@@ -387,6 +619,17 @@ impl Ice {
                     to: s.to,
                 }));
             }
+        }
+        // The debugged code's own return (kernel code may also RTS on
+        // another stack in the same task).
+        if rts
+            && let Goal::Line { s, proc_, .. } = self.goal
+            && self.cpu.s > s
+            && (proc_.is_none() || self.current_proc() == proc_)
+            && self.symbols.locate(&self.machine, pc).is_some()
+            && let Goal::Line { left, .. } = &mut self.goal
+        {
+            *left = true;
         }
         if let Goal::Out { s, proc_ } = self.goal
             && return_insn
@@ -412,6 +655,7 @@ impl Ice {
                 let _ = o.write_all(&bytes);
                 let _ = o.flush();
             }
+            self.dap.output(&bytes);
             for &b in &bytes {
                 self.seen.push(char::from(b));
             }
@@ -449,14 +693,48 @@ impl Ice {
 
     fn resume(&mut self, goal: Goal) {
         self.goal = goal;
+        if !self.running {
+            self.dap.continued();
+        }
         self.running = true;
         self.stop = None;
         self.skip_checks = true;
+        self.refresh_symbols();
     }
     fn halt(&mut self, s: Stop) {
         self.running = false;
         self.goal = Goal::None;
+        self.refresh_symbols();
+        let hits = match s {
+            Stop::Breakpoint(pc) => self.hit_ids(pc),
+            _ => Vec::new(),
+        };
+        self.dap.stopped(&s, &s.describe(&self.tracer), hits);
         self.stop = Some(s);
+    }
+    /// Source-level step (as the editor's step over / step into).
+    pub fn step_source(&mut self, into: bool) {
+        self.step_line(into);
+    }
+    /// Step to the next source line, or one instruction without line info.
+    fn step_line(&mut self, into: bool) {
+        match self.symbols.line(&self.machine, self.cpu.pc) {
+            Some((table, l)) => {
+                let goal = Goal::Line {
+                    table,
+                    src: l.src,
+                    line: l.line,
+                    s: self.cpu.s,
+                    proc_: self.current_proc(),
+                    task: self.machine.mmu().task,
+                    into,
+                    left: false,
+                };
+                self.resume(goal);
+            }
+            None if into => self.single_step(),
+            None => self.step_over(),
+        }
     }
 
     /// Run for up to `budget` host time; returns when stopped or out of time.
@@ -468,6 +746,7 @@ impl Ice {
         } else {
             (self.speed as f64 * budget.as_secs_f64()).max(1.0) as u64
         };
+        self.refresh_symbols();
         let mut n = 0u32;
         while self.running {
             if let Some(s) = self.step_one() {
@@ -597,15 +876,28 @@ impl Ice {
                 if let Some(a) = p("addr").and_then(parse_addr) {
                     let on = match p("op") {
                         Some("del") => false,
-                        Some("toggle") => !self.bp_at(a),
+                        Some("toggle") => !self.breakpoints.contains(&a),
                         _ => true,
                     };
                     self.set_bp(a, on);
                 }
+                // A symbol or FILE:LINE, placed wherever the module is loaded.
+                if let Some(t) = p("sym").map(str::trim).filter(|t| !t.is_empty()) {
+                    let spec = match t.rsplit_once(':') {
+                        Some((file, line)) if line.parse::<u32>().is_ok() => BpSpec::Line {
+                            file: file.to_string(),
+                            line: line.parse().unwrap(),
+                        },
+                        _ => BpSpec::Symbol(t.to_string()),
+                    };
+                    self.add_sym_bp(0, spec);
+                }
+                if let Some(id) = p("symdel").and_then(parse_num) {
+                    self.remove_sym_bps(|b| b.id != id);
+                }
                 if p("op") == Some("clear") {
-                    for a in std::mem::take(&mut self.breakpoints) {
-                        self.set_bp(a, false);
-                    }
+                    self.breakpoints.clear();
+                    self.remove_sym_bps(|b| b.owner != 0);
                 }
                 http::Response::json(self.state_json())
             }
@@ -737,6 +1029,46 @@ impl Ice {
                 http::Response::json(self.calls_json(since, limit, &f))
             }
             "/api/os9/services" => http::Response::json(Self::services_json()),
+            "/api/symbols" => {
+                if p("op") == Some("clear") {
+                    self.symbols.clear();
+                    self.reresolve();
+                }
+                if let Some(dir) = p("dir") {
+                    self.symbols.add_source_dir(dir.into());
+                }
+                if let Some(path) = p("path")
+                    && let Err(e) = self.load_symbols(path)
+                {
+                    return bad(&e);
+                }
+                self.refresh_symbols();
+                http::Response::json(self.symbols_json())
+            }
+            "/api/resolve" => {
+                self.refresh_symbols();
+                match p("expr").and_then(|e| self.symbols.resolve(&self.machine, e)) {
+                    Some(a) => http::Response::json(format!("{{\"addr\":{a}}}")),
+                    None => bad("expr"),
+                }
+            }
+            "/api/stack" => {
+                self.refresh_symbols();
+                let n = p("n").and_then(parse_num).unwrap_or(32).clamp(1, 256) as u16;
+                http::Response::json(self.stack_json(n))
+            }
+            "/api/source" => {
+                let (Some(t), Some(si)) = (p("table").and_then(parse_num), p("src").and_then(parse_num)) else {
+                    return bad("table/src");
+                };
+                match self.symbols.tables.get(t as usize).and_then(|t| t.sources.get(si as usize)) {
+                    Some(src) => {
+                        let lines: Vec<String> = src.text.iter().map(|(n, l)| format!("[{n},{}]", json_str(l))).collect();
+                        http::Response::json(format!("{{\"name\":{},\"lines\":[{}]}}", json_str(&src.name), lines.join(",")))
+                    }
+                    None => bad("source"),
+                }
+            }
             _ => http::Response::error(404, "unknown API"),
         }
     }
@@ -804,6 +1136,27 @@ impl Ice {
             self.machine.ram.len()
         );
         let bps: Vec<String> = self.breakpoints.iter().map(|a| a.to_string()).collect();
+        let sym_bps: Vec<String> = self
+            .sym_bps
+            .iter()
+            .map(|b| {
+                let at: Vec<String> = b
+                    .targets
+                    .iter()
+                    .filter_map(|t| self.symbols.logical(&self.machine, *t))
+                    .map(|a| a.to_string())
+                    .collect();
+                format!(
+                    "{{\"id\":{},\"owner\":{},\"text\":{},\"resolved\":{},\"addrs\":[{}]}}",
+                    b.id,
+                    b.owner,
+                    json_str(&b.text()),
+                    b.targets.len(),
+                    at.join(",")
+                )
+            })
+            .collect();
+        let _ = write!(o, "\"symBreakpoints\":[{}],\"symbols\":{},", sym_bps.join(","), self.symbols.tables.len());
         let ws: Vec<String> = self
             .watches
             .iter()
@@ -885,18 +1238,109 @@ impl Ice {
             } else {
                 ""
             };
+            let sym = &self.symbols;
+            let label = sym.exact(m, a).map_or("null".into(), json_str);
+            // Name the destination of branches, calls and extended operands.
+            let target = match l.target {
+                Some(t) if !l.text.starts_with("OS9 ") => sym.label(m, t),
+                _ => None,
+            };
+            let src = match sym.line(m, a) {
+                Some((ti, r)) if r.off == sym.locate(m, a).map_or(u16::MAX, |x| x.1) => {
+                    let s = &sym.tables[ti].sources[r.src];
+                    let text = s.text.get(&r.line).map_or("", String::as_str);
+                    format!(
+                        "{{\"file\":{},\"line\":{},\"text\":{}}}",
+                        json_str(&s.name),
+                        r.line,
+                        json_str(text)
+                    )
+                }
+                _ => "null".into(),
+            };
             items.push(format!(
-                "{{\"addr\":{},\"bytes\":\"{}\",\"text\":{},\"bp\":{},\"phys\":{},\"note\":{}}}",
+                "{{\"addr\":{},\"bytes\":\"{}\",\"text\":{},\"bp\":{},\"phys\":{},\"note\":{},\"label\":{},\"tsym\":{},\"src\":{}}}",
                 a,
                 bytes.join(" "),
                 json_str(&l.text),
-                self.bp_at(a),
+                self.bp_at(a) || self.phys_bp_at(a),
                 m.translate(a).map_or(-1, |p| p as i64),
-                json_str(explain)
+                json_str(explain),
+                label,
+                target.map_or("null".into(), |t| json_str(&t)),
+                src
             ));
             a = a.wrapping_add(l.len.max(1));
         }
         format!("{{\"lines\":[{}]}}", items.join(","))
+    }
+
+    fn symbols_json(&self) -> String {
+        let placed = |i: usize| self.symbols.placements.iter().filter(|p| p.table == i).count();
+        let tables: Vec<String> = self
+            .symbols
+            .tables
+            .iter()
+            .enumerate()
+            .map(|(i, t)| {
+                let sources: Vec<String> = t
+                    .sources
+                    .iter()
+                    .map(|s| {
+                        format!(
+                            "{{\"name\":{},\"path\":{}}}",
+                            json_str(&s.name),
+                            s.path.as_ref().map_or("null".into(), |p| json_str(&p.to_string_lossy()))
+                        )
+                    })
+                    .collect();
+                format!(
+                    "{{\"path\":{},\"kind\":\"{}\",\"module\":{},\"symbols\":{},\"lines\":{},\"placed\":{},\"sources\":[{}]}}",
+                    json_str(&t.path.to_string_lossy()),
+                    t.kind,
+                    t.module.as_ref().map_or("null".into(), |m| json_str(m)),
+                    t.symbols.len(),
+                    t.lines.len(),
+                    placed(i),
+                    sources.join(",")
+                )
+            })
+            .collect();
+        format!("{{\"tables\":[{}]}}", tables.join(","))
+    }
+
+    fn stack_json(&self, n: u16) -> String {
+        let m = &self.machine;
+        let s = self.cpu.s;
+        let items: Vec<String> = (0..n)
+            .map(|i| {
+                let at = s.wrapping_add(i * 2);
+                let w = m.peek16(at);
+                let ret = self.is_return_address(w);
+                let label = self.symbols.label(m, w);
+                format!(
+                    "{{\"addr\":{at},\"value\":{w},\"ret\":{ret},\"label\":{}}}",
+                    label.map_or("null".into(), |l| json_str(&l))
+                )
+            })
+            .collect();
+        let chain: Vec<String> = self
+            .call_chain(16)
+            .iter()
+            .map(|&(at, w)| {
+                format!(
+                    "{{\"addr\":{at},\"value\":{w},\"label\":{}}}",
+                    self.symbols.label(m, w).map_or("null".into(), |l| json_str(&l))
+                )
+            })
+            .collect();
+        format!(
+            "{{\"s\":{s},\"pc\":{},\"where\":{},\"words\":[{}],\"chain\":[{}]}}",
+            self.cpu.pc,
+            self.symbols.label(m, self.cpu.pc).map_or("null".into(), |l| json_str(&l)),
+            items.join(","),
+            chain.join(",")
+        )
     }
 
     fn mem_json(&self, addr: u16, len: u16, space: &str) -> String {
@@ -1119,30 +1563,43 @@ impl Ice {
         }
     }
 
-    /// Serve the UI on `listener` and run until the process is terminated.
-    pub fn serve(mut self, listener: TcpListener, start_running: bool) -> io::Result<()> {
-        let (tx, rx): (_, Receiver<http::Request>) = mpsc::channel();
-        http::start(listener, tx, UI);
+    fn dispatch(&mut self, m: Inbox) {
+        match m {
+            Inbox::Http(req) => {
+                let r = self.handle(&req);
+                let _ = req.reply.send(r);
+            }
+            Inbox::Dap { id, msg, out } => self.dap_message(id, &msg, out),
+            Inbox::DapClosed(id) => self.dap_closed(id),
+        }
+    }
+
+    /// Serve the UI on `listener` (and DAP on `dap`) until terminated.
+    pub fn serve(mut self, listener: TcpListener, dap: Option<TcpListener>, start_running: bool) -> io::Result<()> {
+        let (tx, rx): (_, Receiver<Inbox>) = mpsc::channel();
+        http::start(listener, tx.clone(), UI);
+        if let Some(l) = dap {
+            dap::start(l, tx);
+        } else {
+            drop(tx);
+        }
         if start_running {
             self.resume(Goal::None);
         }
         loop {
             if self.running {
                 self.run_slice(Duration::from_millis(8));
-                while let Ok(req) = rx.try_recv() {
-                    let r = self.handle(&req);
-                    let _ = req.reply.send(r);
+                while let Ok(m) = rx.try_recv() {
+                    self.dispatch(m);
                 }
             } else {
                 match rx.recv_timeout(Duration::from_millis(20)) {
-                    Ok(req) => {
-                        let r = self.handle(&req);
-                        let _ = req.reply.send(r);
-                    }
+                    Ok(m) => self.dispatch(m),
                     Err(RecvTimeoutError::Timeout) => self.poll_telnet(),
                     Err(RecvTimeoutError::Disconnected) => return Ok(()),
                 }
             }
+            self.dap_sync();
         }
     }
 }

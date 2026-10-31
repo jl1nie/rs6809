@@ -48,6 +48,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut measure_from = None;
     let mut ice_addr = None;
     let mut ice_halt = false;
+    let mut dap_addr = None;
+    let mut symbol_specs = Vec::new();
+    let mut source_dirs = Vec::new();
     while let Some(a) = args.next() {
         match a.as_str() {
             "--rom" => rom = Some(args.next().ok_or("missing ROM path")?),
@@ -86,6 +89,15 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 });
             }
             "--ice-halt" => ice_halt = true,
+            "--dap" => {
+                dap_addr = Some(if args.peek().is_some_and(|next| !next.starts_with("--")) {
+                    args.next().unwrap()
+                } else {
+                    "127.0.0.1:6810".to_string()
+                });
+            }
+            "--symbols" => symbol_specs.push(args.next().ok_or("missing symbols path")?),
+            "--source-dir" => source_dirs.push(args.next().ok_or("missing source directory")?),
             "--stats" => stats = true,
             "--measure-from" => {
                 measure_from = Some(args.next().ok_or("missing measurement marker")?);
@@ -93,7 +105,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
             "--help" | "-h" => {
                 println!(
-                    "rs6809 [--bin FILE --load 0x1000 --pc 0x1000]\n       [--rom FILE --disk FILE --boot] [--ram-kb N] [--script FILE]\n       [--acia-count N] [--telnet [127.0.0.1:0]] [--persist-disk|--volatile-disk]\n       [--until TEXT] [--max-cycles N] [--stats] [--measure-from TEXT]\n       [--ice [127.0.0.1:6809]] [--ice-halt]\n\nDefault: 64 KiB RAM, ACIA $8018/$8019, timer $8010.\nROM+disk: 512 KiB RAM (select 64/128/256/512/1024 with --ram-kb).\nMulticomp console $FFD0/$FFD1, SD $FFD8-$FFDC, timer $FFDD.\n--acia-count selects 1..4 Multicomp ACIAs (default 1, or 4 with --telnet).\n--telnet binds localhost on a free TCP port by default; OS-9 opens the available ACIAs.\nOne client per active ACIA; host stdin is disabled. Use the multi-user Level 2 disk.\n--boot types NITROS9 at the CamelForth prompt.\nScripts: lines PROMPT<TAB>RESPONSE, matched sequentially; response ends with CR.\nTelnet disk writes persist by default; --persist-disk also enables this without Telnet.\n--volatile-disk keeps writes in RAM. Cycle limit without --until exits successfully.\n--stats reports guest cycles and host elapsed seconds to stderr.\n--measure-from starts an output-marker interval, ending at --until.\n--ice serves the debugger UI (registers, disassembly, breakpoints, OS-9 views)\n  over HTTP; open the printed URL. ACIA 1 becomes the browser console.\n--ice-halt starts the CPU stopped at the reset vector."
+                    "rs6809 [--bin FILE --load 0x1000 --pc 0x1000]\n       [--rom FILE --disk FILE --boot] [--ram-kb N] [--script FILE]\n       [--acia-count N] [--telnet [127.0.0.1:0]] [--persist-disk|--volatile-disk]\n       [--until TEXT] [--max-cycles N] [--stats] [--measure-from TEXT]\n       [--ice [127.0.0.1:6809]] [--ice-halt] [--dap [127.0.0.1:6810]]\n       [--symbols FILE|DIR[@MODULE]]... [--source-dir DIR]...\n\nDefault: 64 KiB RAM, ACIA $8018/$8019, timer $8010.\nROM+disk: 512 KiB RAM (select 64/128/256/512/1024 with --ram-kb).\nMulticomp console $FFD0/$FFD1, SD $FFD8-$FFDC, timer $FFDD.\n--acia-count selects 1..4 Multicomp ACIAs (default 1, or 4 with --telnet).\n--telnet binds localhost on a free TCP port by default; OS-9 opens the available ACIAs.\nOne client per active ACIA; host stdin is disabled. Use the multi-user Level 2 disk.\n--boot types NITROS9 at the CamelForth prompt.\nScripts: lines PROMPT<TAB>RESPONSE, matched sequentially; response ends with CR.\nTelnet disk writes persist by default; --persist-disk also enables this without Telnet.\n--volatile-disk keeps writes in RAM. Cycle limit without --until exits successfully.\n--stats reports guest cycles and host elapsed seconds to stderr.\n--measure-from starts an output-marker interval, ending at --until.\n--ice serves the debugger UI (registers, disassembly, breakpoints, OS-9 views)\n  over HTTP; open the printed URL. ACIA 1 becomes the browser console.\n--ice-halt starts the CPU stopped at the reset vector.\n--dap also serves the Debug Adapter Protocol (VS Code etc.); implies --ice.\n--symbols loads LWASM/RMA listings and LWLINK/c.link maps (repeatable).\n--source-dir adds a directory searched for source files."
                 );
                 return Ok(());
             }
@@ -170,6 +182,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             actions.push_back((prompt.into(), response.into()));
         }
     }
+    if ice_addr.is_none() && (dap_addr.is_some() || !symbol_specs.is_empty()) {
+        ice_addr = Some("127.0.0.1:6809".to_string());
+    }
     if let Some(address) = ice_addr {
         if until.is_some() || max != 0 || measure_from.is_some() {
             return Err("--ice cannot be combined with --until, --max-cycles or --measure-from".into());
@@ -187,8 +202,33 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             eprintln!("rs6809: Telnet listening on {}", server.local_addr()?);
             debugger.set_telnet(server);
         }
+        for dir in source_dirs {
+            debugger.symbols.add_source_dir(dir.into());
+        }
+        for spec in &symbol_specs {
+            let loaded = debugger.load_symbols(spec).map_err(|e| format!("--symbols: {e}"))?;
+            for i in loaded {
+                let t = &debugger.symbols.tables[i];
+                eprintln!(
+                    "rs6809: symbols {} ({}, {} symbols, {} lines{})",
+                    t.path.display(),
+                    t.kind,
+                    t.symbols.len(),
+                    t.lines.len(),
+                    t.module.as_ref().map_or(String::new(), |m| format!(", module {m}"))
+                );
+            }
+        }
         eprintln!("rs6809: ICE UI at http://{}/", listener.local_addr()?);
-        return Ok(debugger.serve(listener, !ice_halt)?);
+        let dap = match dap_addr {
+            Some(a) => {
+                let l = std::net::TcpListener::bind(&a)?;
+                eprintln!("rs6809: DAP listening on {}", l.local_addr()?);
+                Some(l)
+            }
+            None => None,
+        };
+        return Ok(debugger.serve(listener, dap, !ice_halt)?);
     }
     let (tx, rx) = mpsc::sync_channel(1024);
     if server.is_none() {

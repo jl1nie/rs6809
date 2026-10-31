@@ -80,7 +80,7 @@ pub(crate) fn parse_target(target: &str) -> (String, Vec<(String, String)>) {
     (path.to_string(), query)
 }
 
-fn serve(stream: TcpStream, api: Sender<Request>, ui: &'static str) -> io::Result<()> {
+fn serve(stream: TcpStream, api: Sender<super::Inbox>, ui: &'static str) -> io::Result<()> {
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut stream = stream;
     loop {
@@ -123,7 +123,7 @@ fn serve(stream: TcpStream, api: Sender<Request>, ui: &'static str) -> io::Resul
                 body,
                 reply: tx,
             };
-            if api.send(req).is_err() {
+            if api.send(super::Inbox::Http(req)).is_err() {
                 return Ok(());
             }
             rx.recv()
@@ -150,7 +150,7 @@ fn serve(stream: TcpStream, api: Sender<Request>, ui: &'static str) -> io::Resul
 }
 
 /// Accept connections in the background, forwarding API requests to `api`.
-pub fn start(listener: TcpListener, api: Sender<Request>, ui: &'static str) {
+pub fn start(listener: TcpListener, api: Sender<super::Inbox>, ui: &'static str) {
     thread::spawn(move || {
         for stream in listener.incoming().flatten() {
             let api = api.clone();

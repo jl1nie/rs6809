@@ -1,8 +1,9 @@
 # ICE（インサーキット・エミュレータ）とOS-9モニタ
 
-エミュレータ内部にICE相当のデバッグ機能を持たせ、ブラウザのGUIから操作します。
+エミュレータ内部にICE相当のデバッグ機能を持たせ、ブラウザのGUIと、Debug Adapter Protocol（DAP）経由のエディタ（VS Codeなど）から操作します。
 同じ画面でNitrOS-9のシステムコール（プリミティブ）、プロセス、スケジューラ、モジュール、メモリを観察できます。
-外部crateは使わず、標準ライブラリのHTTPサーバーと1枚のHTML（`src/ice/ui.html`）で構成しています。
+外部crateは使わず、標準ライブラリのHTTP・DAPサーバーと1枚のHTML（`src/ice/ui.html`）で構成しています。
+LWASM・Microware RMAのリストとリンクマップを読み込むと、逆アセンブルとスタックにシンボルを付け、Cやアセンブリのソース行単位でブレーク・ステップできます。
 
 ## 起動
 
@@ -23,13 +24,16 @@ sh examples/nitros9-ice.sh 127.0.0.1:8080  # 待ち受けアドレスを変更
 
 ```text
  ブラウザ (ui.html)  ──HTTP/JSON──  HTTPスレッド群 (ice/http.rs)
-                                        │ mpsc（要求ごとに返信チャネル）
+ VS Code など        ──DAP/TCP───  DAPスレッド群  (ice/dap.rs)
+                                        │ mpsc（Inbox：HTTP要求・DAPメッセージ）
                                         ▼
                          エミュレータスレッド (ice/mod.rs: Ice)
                           ├ Cpu / Machine（所有）
                           ├ 実行制御・ブレーク判定・命令トレース
                           ├ disasm.rs   6809逆アセンブラ（OS9 F$xxx表記）
-                          └ os9.rs      OS-9構造の読み取り・システムコール追跡
+                          ├ os9.rs      OS-9構造の読み取り・システムコール追跡
+                          ├ symbols.rs  リスト・マップの読み込み、モジュール位置への配置
+                          └ dap.rs      DAPの要求処理とイベント（停止・出力）
 ```
 
 - CPUとマシンはエミュレータスレッドだけが持ちます。HTTPスレッドは要求をチャネルで渡すので、表示は常に命令境界の一貫した状態です。
@@ -53,6 +57,125 @@ sh examples/nitros9-ice.sh 127.0.0.1:8080  # 待ち受けアドレスを変更
 | メモリ表示 | CPU論理空間、OS-9システム空間、物理RAM先頭64KB |
 | MMU表示 | 2組のタスクマップ（各8バンク）、実行中のタスク、書き込み保護、固定上位領域 |
 | 実行トレース | 直近4096命令のレジスタと命令バイト。表示時に逆アセンブルします |
+| シンボル | 逆アセンブルにラベル行・ソース行・分岐先の名前（`LBSR $AA0E <_stkcheck>`）を表示。移動欄にシンボル名を入力可 |
+| ソース行・シンボルのブレーク | `sum`、`hello.c:19` のように指定。モジュールがロードされた位置に自動で配置し直します |
+| スタック | Sから32語。呼び出し命令の直後を指す値を戻り番地（↩）として示し、シンボルを付けます |
+
+## シンボルとソース行
+
+```sh
+rs6809 --rom ... --disk ... --boot --ice --symbols artifacts/level2/echo.lst --symbols artifacts/cdebug/hello --source-dir examples
+```
+
+`--symbols` は繰り返し指定でき、ファイルかディレクトリ（中の `.lst` と、対応する `.lst` がない `.map`）を読み込みます。
+ブラウザの「シンボル」欄やDAPの `attach` からも読み込めます。
+
+| 入力 | 内容 |
+|---|---|
+| LWASMのリスト（`lwasm --list`） | ラベル、各行のコード範囲、ソース本文。先頭が `$87CD` のモジュールはモジュール内オフセットとして扱います |
+| LWLINKのマップ（`Symbol: 名前 (ファイル) = XXXX`） | 絶対アドレスのシンボル |
+| Microware RMAのリスト（`c.asm -l`）＋同名の `.map`（`c.link -m -s`）＋ `.m`（`c.prep -l`） | Cの関数シンボル、命令ごとのモジュール内オフセットとCの行 |
+
+- `ファイル@モジュール名` でLWLINKのマップやリストをそのモジュールに配置し、`ファイル@abs` で絶対アドレスとして扱います。
+- OS-9のモジュールは位置独立で、ロードされる場所は実行ごとに変わります。モジュール内オフセットの表は、
+  モジュールディレクトリで同名のモジュールを探し、その**物理RAMの範囲**に配置します。
+  Level 1では論理アドレスそのまま、Level 2ではモジュールのDATイメージのブロックから物理アドレスを求めるため、
+  同じ表がどのプロセス空間で実行されても使えます。配置は `F$Link`・`F$Load`・`F$Fork`・`F$Chain`・`F$UnLink`・
+  `F$Exit` などの復帰時、プロセス切り替え時、停止・再開時に更新します。
+- ソース行やシンボルのブレークポイントは、モジュール内オフセットを物理アドレスに変換したビット表で判定します。
+  モジュールのロード前に設定しておくと、ロードされた時点で有効になります（コードを実行する前に配置されます）。
+- LWASMのリストのファイル名は左が切り詰められる（`s/source-echo.asm`）ため、リストのディレクトリ、その1階層下、
+  `--source-dir` で末尾一致するファイルを探します。見つからない場合もリスト内の本文でソースを表示します。
+- 局所ラベル（`l@`、Cコンパイラの `_3` など）は、その番地ちょうどのときだけ表示し、「名前+オフセット」の基準には大域ラベルを使います。
+
+### Cのソースレベルデバッグ
+
+Microware Cの `.a` には通常、行番号の情報がありません。`c.prep -l` を使うと、前処理器が各ソース行を
+`* *` で始まるコメントとしてアセンブリへ残し、`.m` に「ファイル名（`#7`）・ソース行（`#6`）」の記録を出します。
+RMAのリスト（`c.asm -l`）には各命令のセクション内オフセットと、そのコメントが同じ順に並び、
+`c.link -m -s` のマップがセクション（`hello_c`）のモジュール内位置と関数シンボルを与えます。
+この3つを突き合わせ、各命令を直前のソース行に対応付けます。
+
+```sh
+python3 scripts/build-c-disk.py            # 初回のみ（Level 2は build-level2-disk.py）
+python3 scripts/c-debug-build.py examples/hello.c            # Level 1のC開発用ディスク
+python3 scripts/c-debug-build.py examples/hello.c --level2 --out artifacts/cdebug/level2-hello
+```
+
+スクリプトはホストのCファイルをディスクの `/dd/SOURCES` へ書き込み、エミュレータでゲストを起動して
+
+```text
+c.prep -l hello.c >hello.m → c.pass1 → c.pass2 → c.asm hello.a -l >hello.lst → c.link ... -m -s >hello.map
+```
+
+を実行し、`hello.lst`・`hello.map`・`hello.m` を `artifacts/cdebug/hello/` へ取り出します。
+実行ファイルは `/dd/SOURCES/hello` です。行とコードの対応を保つため最適化（`c.opt`）は通しません。
+ディスクイメージに書き込むので、同じイメージを使うエミュレータは止めてから実行してください。
+
+```sh
+./target/release/rs6809 --rom reference/nitros9-basic09-starter-kit/nitros9-runtime/6809M.bin \
+  --disk artifacts/ccompiler/multicomp09-c.img --boot \
+  --dap --symbols artifacts/cdebug/hello --source-dir examples
+```
+
+ゲストで `/dd/SOURCES/hello` を実行すると、`hello.c:19` などのブレークポイントで止まり、
+行単位のステップオーバー・ステップイン（`sum` の `{` へ）・ステップアウトができます。
+
+- 行単位のステップは、同じプロセス・同じMMUタスクで別の行の命令に来た時点で止まります。
+  ステップオーバーでは深いフレーム（Sが開始時より下）を飛ばし、行情報のないライブラリ（`printf` など）は中に止まりません。
+  デバッグ対象のコードの `RTS`/`PULS PC` で呼び出し元の行情報のないコード（`_cstart`）へ戻った場合も止まります。
+- コンパイラは `while` の条件判定をループ本体の後ろに置くため、そのコードは直前のコメント行（例では `return total;`）に対応付きます。
+  関数の後始末（`leas`・`puls u,pc`）は最後の文の行に含まれます。`fcc` などの定数は行に対応付けません。
+- 変数の情報はないため、ローカル変数はスタック表示（`0,s`、`6,s` など）で確認します。
+
+## エディタ（DAP / VS Code）
+
+```sh
+rs6809 ... --dap                 # 127.0.0.1:6810。--ice も有効になり、ブラウザUIと同時に使えます
+rs6809 ... --dap 127.0.0.1:7000
+```
+
+エミュレータ自身がDAPサーバーです。各TCP接続が1つのセッションで、要求はHTTPと同じくエミュレータスレッドで処理します。
+ブラウザで止めればエディタにも停止が通知され、その逆も同じです。
+
+VS Codeでは `editors/vscode` の最小限の拡張（依存パッケージなし）を使います。
+
+```sh
+ln -s "$PWD/editors/vscode" ~/.vscode/extensions/rs6809.rs6809-debug-0.1.0   # VS Codeを再起動
+```
+
+`.vscode/launch.json`：
+
+```json
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "type": "rs6809",
+      "request": "attach",
+      "name": "rs6809: attach",
+      "port": 6810,
+      "symbols": ["${workspaceFolder}/artifacts/cdebug/hello"],
+      "sourceDirs": ["${workspaceFolder}/examples"]
+    }
+  ]
+}
+```
+
+| DAP | 内容 |
+|---|---|
+| `attach`（`launch` も同じ） | `symbols`・`sourceDirs` を読み込みます。`stopOnEntry` で一時停止します |
+| `setBreakpoints` | ソース行。コードのない行は次のコードのある行へ移し、未ロードのモジュールは後で有効になったことを `breakpoint` イベントで通知します |
+| `setFunctionBreakpoints` | シンボル名、または `$C000` |
+| `setInstructionBreakpoints` | 逆アセンブル表示の番地 |
+| `setExceptionBreakpoints` | 「OS-9 エラー復帰」「OS-9 プロセス切り替え」 |
+| `stackTrace` | PCと、スタック上の戻り番地（呼び出し命令の直後を指し、シンボルのある値）。戻り番地は呼び出し命令の行を示します |
+| `scopes`/`variables`/`setVariable` | レジスタ（変更可）、スタック32語、OS-9（プロセスID・モジュール・状態・直近のシステムコール） |
+| `next`/`stepIn`/`stepOut` | 行単位。`granularity: "instruction"` で命令単位。行情報のない場所では命令単位 |
+| `disassemble`/`readMemory`/`writeMemory` | CPU論理空間。逆アセンブルにはシンボルとソース位置を付けます |
+| `evaluate` | レジスタ名、シンボル、`$1234`、`[式]`（その番地の語）。デバッグコンソールで `>文字列` と入力するとゲストのコンソールへ1行送ります |
+| `source`/`loadedSources` | ホストにないソースはリスト内の本文を返します |
+| `output` イベント | ゲストのコンソール出力（ACIA 1）をデバッグコンソールに出します |
 
 ## OS-9連携の仕組み
 
@@ -144,6 +267,11 @@ P2 F$Wait     → 子3が終了 ステータス0
 | `POST /api/os9break?code=&when=call\|return&op=del`、`errors=` `switch=` `pid=` `trace=` | OS-9ブレーク条件 |
 | `GET /api/os9/procs` `modules` `memmap` `services` | OS-9構造 |
 | `GET /api/os9/calls?since=&user=1&pid=&parent=&limit=` | システムコール（`since` は更新番号） |
+| `GET /api/symbols`、`POST ...?path=`・`dir=`・`op=clear` | シンボル表の一覧・読み込み・ソース検索ディレクトリ |
+| `POST /api/bp?sym=名前\|ファイル:行`、`symdel=ID` | シンボル・ソース行のブレークポイント（`state` の `symBreakpoints`） |
+| `GET /api/resolve?expr=` | シンボル名・16進の番地を解決 |
+| `GET /api/stack?n=` | スタックの語・戻り番地の判定・ラベル、呼び出しの連鎖 |
+| `GET /api/source?table=&src=` | 読み込んだソースの本文 |
 
 テストやスクリプトからは `Ice::command("GET", "/api/state", b"")` で同じAPIを直接呼べます。
 
@@ -155,6 +283,12 @@ cargo test --release --test ice -- --ignored   # 参照キットのLevel 1・構
 ```
 
 `--ignored` のLevel 2テストには `python3 scripts/build-level2-disk.py` で構築したディスクが必要です。
+Cのソースレベルのテストには、さらに `python3 scripts/c-debug-build.py examples/hello.c` と
+`python3 scripts/c-debug-build.py examples/hello.c --level2 --out artifacts/cdebug/level2-hello` が必要です。
+
+```sh
+cargo test --release --test dap               # DAP（TCP）の一連の操作
+```
 
 - 逆アセンブラ、ステップオーバー／アウト、ブレークポイント、ウォッチポイント、メモリ・レジスタ操作。
 - 最小のLevel 1構造と、スタック上のPCを進めて `RTI` するカーネル相当のハンドラを置き、
@@ -165,6 +299,12 @@ cargo test --release --test ice -- --ignored   # 参照キットのLevel 1・構
 - 構築したLevel 2ディスクを起動し、startupの `echo` を `F$Fork` した復帰時点で停止して、
   SysGo→Shell→Shell→Echoのプロセス木、実行中プロセスのタスク番号、子のアクティブキュー、システムプロセスとシステムDAT、
   Krnの位置（ブロック7のオフセット$1000）、各モジュールが占めるブロック、ブロックマップの使用中フラグを確認します。
+- シンボル：LWASMのモジュールのリスト（`rmb` のデータオフセットや `equ` をラベルにしない）、RMAリスト・マップ・`.m` の対応。
+- Cのソースレベル（Level 1・Level 2）：ロード前に設定した `hello.c:19` で停止し、`main+` のラベル、
+  `LBSR` の分岐先 `sum`、スタック上の `_cstart+` の戻り番地を確認。`sum` の `{` へステップイン、ステップアウト、
+  `printf` の行をステップオーバーして出力を確認し、`return 0;` から `_cstart` へ戻るまで行単位で進めます。
+- DAP：LWASMで組んだ小さなプログラムにTCPで接続し、初期化、アタッチ、ソース行（空行は次の行へ移動）と関数のブレークポイント、
+  停止イベント、スタックフレームと戻り番地の行、レジスタの表示と変更、ステップ、ステップアウト、評価、逆アセンブル、メモリ読み出しを確認します。
 
 ## 制約と注意
 
@@ -177,12 +317,16 @@ cargo test --release --test ice -- --ignored   # 参照キットのLevel 1・構
 - ウォッチポイントはCPU論理アドレスで判定します。Level 2で別プロセスの同じ論理アドレスにも反応します。プロセスIDでの絞り込みはOS-9ブレーク条件のみです。
 - 待ち受けは既定でlocalhostのみ、認証はありません。外部に公開しないでください。
 - 停止中もタイマーは進みません（命令単位で時計を進めるため）。ステップ実行中に時計割り込みが入るのは正しい動作です。
+- 戻り番地の判定は経験則です（直前の2〜4バイトが `JSR`/`BSR`/`LBSR` として解釈できる値）。シンボルを読み込んでいる場合は、
+  シンボルのある範囲を指す値だけをスタックフレームにします。データがたまたま条件を満たすこともあります。
+- 同じ名前のモジュールが複数あるときは、そのすべてに配置します。モジュールの中身がリストと一致するかは確かめていません。
+  ソースを変更したら `c-debug-build.py` を実行し直してください。
+- DAPにも認証はありません。待ち受けは既定でlocalhostです。
 
 ## 今後の拡張（検討）
 
-- LWASMのリストやマップファイルからシンボルを読み込み、逆アセンブルとスタックにラベルを付ける。Cでは `c.asm` 出力と行番号の対応。
 - 条件付きブレークポイント（レジスタ・メモリの式）、通過回数、ログ出力のみのトレースポイント。
 - プロセスごと・モジュールごとのサイクルプロファイル。
 - スナップショットと逆実行（一定間隔の状態保存と命令トレースによる巻き戻し）。
-- Debug Adapter Protocol に対応し、VS Codeなどのエディタからも同じICEを操作する。
+- Cの変数の表示（`c.pass1` の記号表は残らないため、宣言の解析が必要）。
 - Level 2でタスクごとのMMUマップとプロセスのDATイメージを対応付けて表示する。

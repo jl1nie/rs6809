@@ -1,0 +1,48 @@
+{
+  "name": "rs6809-debug",
+  "displayName": "rs6809 ICE",
+  "description": "Debug 6809 / NitrOS-9 programs in the rs6809 emulator through its ICE (Debug Adapter Protocol over TCP).",
+  "version": "0.1.0",
+  "publisher": "rs6809",
+  "license": "MIT",
+  "engines": { "vscode": "^1.75.0" },
+  "categories": ["Debuggers"],
+  "main": "./extension.js",
+  "activationEvents": ["onDebugResolve:rs6809"],
+  "contributes": {
+    "breakpoints": [{ "language": "c" }, { "language": "asm" }, { "language": "plaintext" }],
+    "debuggers": [
+      {
+        "type": "rs6809",
+        "label": "rs6809 ICE",
+        "configurationAttributes": {
+          "attach": {
+            "properties": {
+              "host": { "type": "string", "default": "127.0.0.1", "description": "Host running rs6809 --dap" },
+              "port": { "type": "number", "default": 6810, "description": "DAP port (rs6809 --dap 127.0.0.1:6810)" },
+              "symbols": { "type": "array", "items": { "type": "string" }, "description": "Listings/maps or directories to load (LWASM .lst, RMA .lst + .map + .m, LWLINK/c.link .map). Paths are on the emulator host." },
+              "sourceDirs": { "type": "array", "items": { "type": "string" }, "description": "Directories searched for the source files named in the listings" },
+              "stopOnEntry": { "type": "boolean", "default": false, "description": "Pause the emulator when attaching" }
+            }
+          }
+        },
+        "initialConfigurations": [
+          {
+            "type": "rs6809",
+            "request": "attach",
+            "name": "rs6809: attach",
+            "port": 6810,
+            "symbols": ["${workspaceFolder}/artifacts/cdebug/hello"],
+            "sourceDirs": ["${workspaceFolder}/examples"]
+          }
+        ],
+        "configurationSnippets": [
+          {
+            "label": "rs6809: attach to the ICE",
+            "body": { "type": "rs6809", "request": "attach", "name": "rs6809: attach", "port": 6810, "symbols": [], "sourceDirs": [] }
+          }
+        ]
+      }
+    ]
+  }
+}
