@@ -312,6 +312,16 @@ python3 scripts/benchmark-emulator.py --workload basic09 --runs 7 --output artif
 以前の76×25・固定小数点版は `benchmarks/mandel_fixed.c` として保存しました。
 エミュレータの性能比較は凍結した旧版のディスクで続け、現在のデモとは混ぜません。
 
+## 68000 CPUコア
+
+`src/m68k/` に、68000の全命令・例外・割り込みを命令単位のサイクル数で実行するコアと逆アセンブラがあります（ICEへの組み込みは今後）。
+SingleStepTests/680x0の約100万件（アドレスエラーのフレームとサイクル数を含む）で検証しています。詳細は [68000 CPUコア](docs/m68k.md) を参照してください。
+
+```sh
+python3 scripts/fetch-68000-tests.py
+cargo test --release --test m68k_sst -- --ignored --nocapture
+```
+
 ## ICE（GUIデバッガ）とOS-9モニタ
 
 ブラウザから操作するインサーキット・エミュレータ相当のデバッガです。外部crateを使わず、エミュレータ自身がlocalhostでHTTPを提供します。
