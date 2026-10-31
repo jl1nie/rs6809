@@ -275,6 +275,12 @@ impl Machine {
             cpu.step(self)?;
         }
         let count = cpu.cycles - old;
+        self.tick(count);
+        Ok(count)
+    }
+    /// Advance the periodic timer by `count` CPU cycles.
+    #[inline]
+    pub fn tick(&mut self, count: u64) {
         self.elapsed += count;
         if self.tick_cycles != 0 {
             while self.elapsed >= self.tick_cycles {
@@ -284,7 +290,6 @@ impl Machine {
                 }
             }
         }
-        Ok(count)
     }
     pub fn disk_error(&mut self) -> Option<io::Error> {
         self.disk.as_mut().and_then(|d| d.error.take())
@@ -471,6 +476,86 @@ impl Machine {
         }
         if let Some(p) = self.physical(addr) {
             self.ram[p] = v;
+        }
+    }
+}
+/// MMU registers as seen by a debugger.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MmuView {
+    pub enabled: bool,
+    /// Hardware task (0 or 1) currently selected by `$FFDE` bit 6.
+    pub task: u8,
+    pub rom_disabled: bool,
+    pub fixed_top: bool,
+    /// Eight map entries per hardware task: bit7 write protect, bits 6-0 bank.
+    pub maps: [u8; 16],
+}
+
+/// Debugger access without I/O side effects: reads never pop ACIA data and
+/// writes never reach device registers.
+impl Machine {
+    pub fn mmu(&self) -> MmuView {
+        MmuView {
+            enabled: self.mapper & 0x20 != 0,
+            task: (self.mapper >> 6) & 1,
+            rom_disabled: self.rom_disabled,
+            fixed_top: self.fixed_top,
+            maps: self.maps,
+        }
+    }
+    pub fn has_rom(&self) -> bool {
+        self.rom.is_some()
+    }
+    /// Physical RAM address for a CPU address under the current mapping,
+    /// or `None` for ROM, I/O and unpopulated banks.
+    pub fn translate(&self, addr: u16) -> Option<usize> {
+        if self.is_io(addr) || (self.rom.is_some() && addr >= 0xe000 && !self.rom_disabled) {
+            return None;
+        }
+        self.physical(addr)
+    }
+    /// Physical RAM address through a given hardware task map, ignoring
+    /// the active task. Without the MMU this is the flat address.
+    pub fn translate_task(&self, task: u8, addr: u16) -> Option<usize> {
+        if self.mapper & 0x20 == 0 || (self.fixed_top && addr >= 0xfe00) {
+            return Some(usize::from(addr)).filter(|&p| p < self.ram.len());
+        }
+        let entry = self.maps[usize::from(addr >> 13) | if task & 1 != 0 { 8 } else { 0 }];
+        let p = (usize::from(entry & 0x7f) << 13) | (usize::from(addr) & 8191);
+        (p < self.ram.len()).then_some(p)
+    }
+    pub fn peek(&self, addr: u16) -> u8 {
+        if self.is_io(addr) {
+            if addr == self.acia_base {
+                return self.acia.status();
+            }
+            if addr == self.acia_base.wrapping_add(1) {
+                return self.acia.rx.front().copied().unwrap_or(0xff);
+            }
+            if addr == self.timer_base {
+                return self.timer;
+            }
+            if (0xffd2..=0xffd7).contains(&addr)
+                && let Some(acia) = self.extra_acias.get(usize::from(addr - 0xffd2) / 2)
+            {
+                return if addr & 1 == 0 {
+                    acia.status()
+                } else {
+                    acia.rx.front().copied().unwrap_or(0xff)
+                };
+            }
+            return 0xff;
+        }
+        self.read_memory(addr)
+    }
+    pub fn peek16(&self, addr: u16) -> u16 {
+        u16::from_be_bytes([self.peek(addr), self.peek(addr.wrapping_add(1))])
+    }
+    /// Store into RAM under the current mapping; ROM, I/O and protection
+    /// behave as for the CPU, except device registers are never written.
+    pub fn poke(&mut self, addr: u16, v: u8) {
+        if !self.is_io(addr) {
+            self.write_memory(addr, v);
         }
     }
 }

@@ -1,0 +1,774 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>rs6809 ICE</title>
+<style>
+:root {
+  --bg: #f6f7f9; --panel: #ffffff; --ink: #1d2330; --mute: #687083; --line: #dfe3ea;
+  --accent: #2463eb; --accent-soft: #e4ecfd; --pc: #fff2c2; --bp: #d93636; --ok: #1d8a4e;
+  --warn: #b26b00; --err: #c62828; --chip: #eef1f5; --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --term-bg: #10141c; --term-ink: #d7e0ea;
+  --cat-proc: #7c4dff; --cat-mem: #0a8f9c; --cat-io: #2e7d32; --cat-sys: #8d6e63;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0f131a; --panel: #171c25; --ink: #e2e7ef; --mute: #8c96a8; --line: #2a3140;
+    --accent: #6d9bff; --accent-soft: #1d2a45; --pc: #4a4120; --bp: #ff6b6b; --ok: #4cc38a;
+    --warn: #f0b44c; --err: #ff6b6b; --chip: #232a36; --term-bg: #0a0d12;
+    --cat-proc: #b39dff; --cat-mem: #4fd1db; --cat-io: #7bd389; --cat-sys: #c9a99a;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0f131a; --panel: #171c25; --ink: #e2e7ef; --mute: #8c96a8; --line: #2a3140;
+  --accent: #6d9bff; --accent-soft: #1d2a45; --pc: #4a4120; --bp: #ff6b6b; --ok: #4cc38a;
+  --warn: #f0b44c; --err: #ff6b6b; --chip: #232a36; --term-bg: #0a0d12;
+  --cat-proc: #b39dff; --cat-mem: #4fd1db; --cat-io: #7bd389; --cat-sys: #c9a99a;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; }
+body { background: var(--bg); color: var(--ink); font: 13px/1.45 system-ui, -apple-system, "Segoe UI", "Hiragino Sans", "Noto Sans JP", sans-serif; display: flex; flex-direction: column; }
+button, select, input { font: inherit; color: inherit; }
+button { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 4px 10px; cursor: pointer; }
+button:hover { border-color: var(--accent); }
+button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+button:disabled { opacity: .45; cursor: default; }
+input, select { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 3px 6px; }
+input.addr { width: 6em; font-family: var(--mono); }
+header { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-bottom: 1px solid var(--line); background: var(--panel); flex-wrap: wrap; }
+header h1 { font-size: 15px; margin: 0 8px 0 0; letter-spacing: .02em; }
+header .status { margin-left: auto; display: flex; gap: 10px; align-items: center; font-family: var(--mono); }
+.dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; background: var(--mute); }
+.dot.run { background: var(--ok); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 25%, transparent); }
+.dot.stop { background: var(--warn); }
+.tabs { display: flex; gap: 2px; padding: 0 12px; background: var(--panel); border-bottom: 1px solid var(--line); }
+.tabs button { border: 0; border-bottom: 2px solid transparent; border-radius: 0; padding: 8px 14px; background: none; }
+.tabs button.on { border-bottom-color: var(--accent); color: var(--accent); font-weight: 600; }
+main { flex: 1; display: flex; min-height: 0; }
+.page { flex: 1; min-width: 0; overflow: auto; padding: 10px; display: none; gap: 10px; }
+.page.on { display: grid; }
+#dbg { grid-template-columns: minmax(250px, 300px) minmax(380px, 1fr) minmax(380px, 1fr); grid-auto-rows: min-content; align-items: start; }
+#os9 { grid-template-columns: minmax(420px, 1fr) minmax(460px, 1.3fr); grid-auto-rows: min-content; align-items: start; }
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; min-width: 0; }
+.panel > h2 { margin: 0; font-size: 12px; font-weight: 600; letter-spacing: .04em; color: var(--mute); padding: 7px 10px; border-bottom: 1px solid var(--line); display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.panel > h2 .grow { flex: 1; }
+.panel .body { padding: 8px 10px; }
+.mono { font-family: var(--mono); }
+.mute { color: var(--mute); }
+.regs { display: grid; grid-template-columns: auto 1fr auto 1fr; gap: 3px 8px; font-family: var(--mono); }
+.regs .k { color: var(--mute); }
+.regs .v { cursor: pointer; }
+.regs .v.chg, .hex .chg { color: var(--err); font-weight: 600; }
+.flags { display: flex; gap: 3px; margin-top: 6px; }
+.flags span { font-family: var(--mono); width: 22px; text-align: center; border: 1px solid var(--line); border-radius: 4px; color: var(--mute); }
+.flags span.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+table { border-collapse: collapse; width: 100%; }
+td, th { padding: 2px 6px; text-align: left; white-space: nowrap; }
+th { color: var(--mute); font-weight: 500; font-size: 12px; border-bottom: 1px solid var(--line); position: sticky; top: 0; background: var(--panel); }
+.dis td { font-family: var(--mono); padding: 1px 6px; }
+.dis tr.pc td { background: var(--pc); }
+.dis td.g { width: 16px; cursor: pointer; text-align: center; color: var(--bp); }
+.dis td.g:hover::before { content: "○"; color: var(--mute); }
+.dis tr.bp td.g::before { content: "●"; color: var(--bp); }
+.dis td.b { color: var(--mute); }
+.dis tr.os9 td.t { color: var(--cat-proc); font-weight: 600; }
+.dis tr:hover td { background: var(--accent-soft); }
+.scroll { overflow: auto; }
+.hex { font-family: var(--mono); white-space: pre; line-height: 1.5; overflow-x: auto; }
+#console.hide { display: none; }
+.hex .a { color: var(--mute); }
+.hex .byte { cursor: pointer; }
+.hex .byte:hover { background: var(--accent-soft); }
+.list { display: flex; flex-direction: column; gap: 3px; }
+.item { display: flex; align-items: center; gap: 6px; font-family: var(--mono); }
+.item button { padding: 0 6px; }
+.row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.mmu { display: grid; grid-template-columns: auto repeat(8, 1fr); gap: 2px; font-family: var(--mono); font-size: 12px; }
+.mmu div { text-align: center; padding: 1px 0; border-radius: 3px; }
+.mmu .hd { color: var(--mute); }
+.mmu .cur { background: var(--accent-soft); }
+.mmu .wp { text-decoration: underline; }
+#console { width: 34%; min-width: 320px; max-width: 640px; display: flex; flex-direction: column; border-left: 1px solid var(--line); background: var(--term-bg); }
+#console .bar { display: flex; gap: 6px; align-items: center; padding: 6px 8px; color: var(--term-ink); font-size: 12px; border-bottom: 1px solid #ffffff1a; }
+#term { flex: 1; margin: 0; padding: 8px 10px; overflow: auto; color: var(--term-ink); font: 13px/1.35 var(--mono); white-space: pre-wrap; word-break: break-all; outline: none; }
+#term:focus { box-shadow: inset 0 0 0 2px #6d9bff66; }
+#term .cursor { background: var(--term-ink); color: var(--term-bg); animation: blink 1s steps(1) infinite; }
+@keyframes blink { 50% { background: transparent; color: var(--term-ink); } }
+#console input { flex: 1; background: #ffffff10; color: var(--term-ink); border-color: #ffffff22; font-family: var(--mono); }
+.chip { display: inline-flex; align-items: center; gap: 4px; padding: 0 7px; border-radius: 10px; background: var(--chip); font-family: var(--mono); font-size: 12px; line-height: 18px; }
+.pid { color: #fff; font-weight: 600; min-width: 22px; justify-content: center; }
+.queues { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+.queue { border: 1px dashed var(--line); border-radius: 8px; padding: 6px; min-height: 52px; }
+.queue h3 { margin: 0 0 4px; font-size: 11px; color: var(--mute); font-weight: 600; }
+.queue .chips { display: flex; gap: 4px; flex-wrap: wrap; }
+.calls { max-height: 420px; }
+.calls td { font-family: var(--mono); font-size: 12px; }
+.calls tr { cursor: pointer; }
+.calls tr:hover td { background: var(--accent-soft); }
+.calls tr.sel td { background: var(--accent-soft); box-shadow: inset 0 1px var(--accent), inset 0 -1px var(--accent); }
+.calls tr.pending td.r { color: var(--warn); }
+.calls tr.err td.r { color: var(--err); }
+.calls td.args, .calls td.r { white-space: normal; word-break: break-all; min-width: 160px; }
+.cat-proc { color: var(--cat-proc); } .cat-mem { color: var(--cat-mem); } .cat-io { color: var(--cat-io); } .cat-sys { color: var(--cat-sys); }
+.name { font-weight: 600; }
+.detail { border-top: 1px solid var(--line); padding: 8px 10px; }
+.detail h3 { margin: 0 0 4px; font-size: 14px; }
+.detail p { margin: 4px 0 8px; }
+.explain { background: var(--accent-soft); border-radius: 6px; padding: 8px 10px; }
+.regdiff td { font-family: var(--mono); }
+.regdiff .chg { color: var(--err); font-weight: 600; }
+.tree { font-family: var(--mono); font-size: 12px; max-height: 260px; overflow: auto; }
+.tree div { white-space: nowrap; }
+canvas { width: 100%; display: block; }
+.memgrid { display: grid; gap: 2px; }
+.memgrid div { aspect-ratio: 1; border-radius: 2px; background: var(--chip); font-size: 9px; display: flex; align-items: center; justify-content: center; font-family: var(--mono); color: #fff; overflow: hidden; }
+.legend { display: flex; gap: 10px; flex-wrap: wrap; font-size: 12px; color: var(--mute); margin-top: 6px; }
+.legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; vertical-align: -1px; margin-right: 3px; }
+.span2 { grid-column: span 2; }
+.state-flags { font-family: var(--mono); font-size: 11px; }
+.empty { color: var(--mute); padding: 12px; text-align: center; }
+.kbd { font-family: var(--mono); font-size: 11px; color: var(--mute); }
+@media (max-width: 1100px) {
+  main { flex-direction: column; }
+  #console { width: auto; max-width: none; min-height: 280px; border-left: 0; border-top: 1px solid var(--line); }
+  #dbg, #os9 { grid-template-columns: 1fr; }
+  .span2 { grid-column: auto; }
+}
+</style>
+</head>
+<body>
+<header>
+  <h1>rs6809 ICE</h1>
+  <button id="bRun" class="primary" title="実行 (F5)">▶ 実行</button>
+  <button id="bPause" title="一時停止 (F6)">⏸ 停止</button>
+  <button id="bStep" title="ステップイン (F11)">ステップ</button>
+  <button id="bOver" title="ステップオーバー (F10) — JSR/BSR/OS9呼び出しを1命令として実行">ステップオーバー</button>
+  <button id="bOut" title="ステップアウト (Shift+F11) — 現在のサブルーチンから戻るまで実行">ステップアウト</button>
+  <label class="row" title="実行速度の上限（仮想サイクル/秒）。遅くするとOS-9の動きを目で追えます">速度
+    <select id="speed">
+      <option value="0">最大</option>
+      <option value="10000000">10 MHz</option>
+      <option value="2000000">2 MHz</option>
+      <option value="1000000">1 MHz（実機相当）</option>
+      <option value="100000">100 kHz</option>
+      <option value="10000">10 kHz</option>
+      <option value="1000">1 kHz</option>
+    </select>
+  </label>
+  <div class="status">
+    <span id="dot" class="dot"></span>
+    <span id="stopText"></span>
+    <span class="mute" id="cycles"></span>
+    <button id="consoleToggle" title="コンソールの表示/非表示">コンソール</button>
+    <button id="theme" title="表示テーマ切り替え">◐</button>
+  </div>
+</header>
+<nav class="tabs">
+  <button data-tab="dbg" class="on">デバッガ</button>
+  <button data-tab="os9">OS-9 モニタ</button>
+</nav>
+<main>
+  <section id="dbg" class="page on">
+    <div class="list" style="gap:10px">
+      <div class="panel">
+        <h2>レジスタ<span class="grow"></span><span class="kbd" id="waitState"></span></h2>
+        <div class="body">
+          <div class="regs" id="regs"></div>
+          <div class="flags" id="flags"></div>
+        </div>
+      </div>
+      <div class="panel">
+        <h2>MMU（8KBバンク）<span class="grow"></span><span class="kbd" id="mmuInfo"></span></h2>
+        <div class="body"><div class="mmu" id="mmu"></div></div>
+      </div>
+      <div class="panel">
+        <h2>ブレークポイント</h2>
+        <div class="body">
+          <div class="row"><input id="bpAddr" class="addr" placeholder="C000"><button id="bpAdd">追加</button><button id="bpClear">全削除</button></div>
+          <div class="list" id="bpList" style="margin-top:6px"></div>
+        </div>
+      </div>
+      <div class="panel">
+        <h2>ウォッチポイント</h2>
+        <div class="body">
+          <div class="row">
+            <input id="wAddr" class="addr" placeholder="0050">
+            <input id="wLen" style="width:4em" value="2" title="バイト数">
+            <select id="wKind"><option value="w">書込</option><option value="r">読出</option><option value="rw">両方</option></select>
+            <button id="wAdd">追加</button>
+          </div>
+          <div class="list" id="wList" style="margin-top:6px"></div>
+        </div>
+      </div>
+    </div>
+    <div class="panel">
+      <h2>逆アセンブル
+        <span class="grow"></span>
+        <input id="disAddr" class="addr" placeholder="PC">
+        <button id="disGo">移動</button>
+        <label class="row"><input type="checkbox" id="follow" checked>PC追従</label>
+      </h2>
+      <div class="scroll" style="max-height: calc(100vh - 170px)">
+        <table class="dis"><tbody id="dis"></tbody></table>
+      </div>
+      <div class="body mute" style="font-size:12px">行頭クリックでブレークポイント、ダブルクリックでその行まで実行。<code>OS9</code> 行にカーソルを置くと処理内容を表示します。</div>
+    </div>
+    <div class="list" style="gap:10px">
+      <div class="panel">
+        <h2>メモリ
+          <span class="grow"></span>
+          <input id="memAddr" class="addr" value="0000">
+          <select id="memSpace" title="アドレス空間">
+            <option value="cpu">CPU論理</option>
+            <option value="sys">OS-9システム空間</option>
+            <option value="phys">物理RAM(先頭64KB)</option>
+          </select>
+          <button id="memGo">表示</button>
+        </h2>
+        <div class="body hex" id="mem"></div>
+      </div>
+      <div class="panel">
+        <h2>実行トレース（直近）<span class="grow"></span><select id="traceN"><option>32</option><option selected>64</option><option>256</option></select></h2>
+        <div class="scroll" style="max-height: 360px"><table class="dis"><thead><tr><th>サイクル</th><th>P</th><th>PC</th><th>命令</th><th>A B X Y U S</th></tr></thead><tbody id="trace"></tbody></table></div>
+      </div>
+    </div>
+  </section>
+
+  <section id="os9" class="page">
+    <div class="panel span2">
+      <h2>スケジューラ<span class="grow"></span><span id="osLevel" class="kbd"></span></h2>
+      <div class="body">
+        <div class="queues">
+          <div class="queue"><h3>実行中 D.Proc</h3><div class="chips" id="qRun"></div></div>
+          <div class="queue"><h3>アクティブ D.AProcQ（実行待ち）</h3><div class="chips" id="qActive"></div></div>
+          <div class="queue"><h3>待機 D.WProcQ（F$Wait）</h3><div class="chips" id="qWait"></div></div>
+          <div class="queue"><h3>睡眠 D.SProcQ（F$Sleep・I/O待ち）</h3><div class="chips" id="qSleep"></div></div>
+        </div>
+        <canvas id="timeline" height="150" style="margin-top:8px"></canvas>
+        <div class="row mute" style="font-size:12px;margin-top:4px">
+          タイムライン：横軸は仮想サイクル。帯はそのプロセスがCPUを持っていた区間、▲はユーザーのシステムコール。
+          <span class="grow"></span>範囲
+          <select id="tlRange"><option value="200000">0.2M</option><option value="1000000" selected>1M</option><option value="5000000">5M</option><option value="20000000">20M</option></select>サイクル
+        </div>
+      </div>
+    </div>
+    <div class="list" style="gap:10px">
+      <div class="panel">
+        <h2>プロセス</h2>
+        <div class="scroll"><table><thead><tr><th>ID</th><th>親</th><th>モジュール</th><th>状態</th><th>キュー</th><th>優先</th><th>エージ</th><th>パス</th><th id="thDat"></th></tr></thead><tbody id="procs"></tbody></table></div>
+      </div>
+      <div class="panel">
+        <h2>OS-9 ブレーク条件</h2>
+        <div class="body list" style="gap:6px">
+          <label class="row"><input type="checkbox" id="trTrace" checked>システムコールとプロセス切り替えを記録する</label>
+          <label class="row"><input type="checkbox" id="trErr">エラーで復帰したら停止</label>
+          <label class="row"><input type="checkbox" id="trSwitch">プロセスが切り替わったら停止</label>
+          <label class="row">対象プロセスID <input id="trPid" style="width:4em" placeholder="全て"></label>
+          <div class="row">
+            <input id="trCode" list="svcList" placeholder="F$Fork" style="width:9em">
+            <datalist id="svcList"></datalist>
+            <button id="trCall">呼び出しで停止</button>
+            <button id="trRet">復帰で停止</button>
+            <button id="trClear">解除</button>
+          </div>
+          <div class="list" id="trList"></div>
+        </div>
+      </div>
+      <div class="panel">
+        <h2>モジュールディレクトリ</h2>
+        <div class="scroll" style="max-height:320px"><table><thead><tr><th>名前</th><th>種別</th><th>言語</th><th>アドレス</th><th>サイズ</th><th>リンク</th><th id="thBlk"></th></tr></thead><tbody id="mods"></tbody></table></div>
+      </div>
+      <div class="panel">
+        <h2>メモリマップ<span class="grow"></span><span class="kbd" id="memUnit"></span></h2>
+        <div class="body"><div class="memgrid" id="memgrid"></div><div class="legend" id="memLegend"></div></div>
+      </div>
+    </div>
+    <div class="panel">
+      <h2>システムコール
+        <span class="grow"></span>
+        <label class="row"><input type="checkbox" id="cUser" checked>ユーザー呼び出しのみ</label>
+        <input id="cPid" placeholder="ID" style="width:3.5em" title="プロセスIDで絞り込み">
+        <input id="cFind" placeholder="名前で検索" style="width:8em">
+        <label class="row"><input type="checkbox" id="cTail" checked>最新へ追従</label>
+        <button id="cReset" title="表示を消去">消去</button>
+      </h2>
+      <div class="scroll calls" id="callsBox"><table class="calls"><thead><tr><th>#</th><th>P</th><th>呼び出し</th><th>引数</th><th>結果</th><th>サイクル</th></tr></thead><tbody id="calls"></tbody></table></div>
+      <div class="detail" id="callDetail"><div class="empty">行を選ぶと、そのプリミティブの意味、レジスタの変化、カーネル内部で発生した呼び出しを表示します。</div></div>
+    </div>
+  </section>
+
+  <aside id="console">
+    <div class="bar">
+      <strong>コンソール /term</strong><span style="opacity:.6">（クリックしてキー入力）</span>
+      <span style="flex:1"></span>
+      <button id="termClear" style="background:#ffffff12;color:inherit;border-color:#ffffff22">消去</button>
+    </div>
+    <pre id="term" tabindex="0"></pre>
+    <div class="bar"><input id="line" placeholder="1行入力して Enter（CRを付けて送信）"></div>
+  </aside>
+</main>
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const hex = (v, n) => v.toString(16).toUpperCase().padStart(n, "0");
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+async function api(path, body) {
+  const r = await fetch("/api/" + path, body === undefined ? {} : { method: "POST", body });
+  return r.json();
+}
+const pidColor = (p) => p === 0 ? "#6b7280" : `hsl(${(p * 67 + 200) % 360} 62% 46%)`;
+const pidChip = (p) => `<span class="chip pid" style="background:${pidColor(p)}" title="プロセス${p}">${p}</span>`;
+const CAT = {
+  proc: ["F$Fork", "F$Wait", "F$Chain", "F$Exit", "F$Send", "F$Icpt", "F$Sleep", "F$SSpd", "F$ID", "F$SPrior", "F$AProc", "F$NProc", "F$AllPrc", "F$DelPrc", "F$GPrDsc", "F$IOQu"],
+  mem: ["F$Link", "F$Load", "F$UnLink", "F$Mem", "F$SRqMem", "F$SRtMem", "F$All64", "F$Ret64", "F$Find64", "F$Move", "F$AllRAM", "F$AllImg", "F$DelImg", "F$SetImg", "F$AllTsk", "F$DelTsk", "F$SetTsk", "F$SLink", "F$VModul", "F$CpyMem", "F$UnLoad", "F$ELink", "F$FModul", "F$MapBlk", "F$ClrBlk", "F$DelRAM"],
+};
+const cat = (n) => n.startsWith("I$") ? "io" : CAT.proc.includes(n) ? "proc" : CAT.mem.includes(n) ? "mem" : "sys";
+
+let st = null, prevRegs = null, services = {}, tab = "dbg";
+let consoleNext = 0, termText = "", memPrev = {}, viewAddr = null;
+
+// ---------- toolbar ----------
+$("bRun").onclick = () => act("run");
+$("bPause").onclick = () => act("pause");
+$("bStep").onclick = () => act("step");
+$("bOver").onclick = () => act("over");
+$("bOut").onclick = () => act("out");
+$("consoleToggle").onclick = () => { $("console").classList.toggle("hide"); drawTimeline(); };
+$("speed").onchange = (e) => act("speed?hz=" + e.target.value);
+$("theme").onclick = () => {
+  const r = document.documentElement;
+  const dark = r.dataset.theme ? r.dataset.theme === "dark" : matchMedia("(prefers-color-scheme: dark)").matches;
+  r.dataset.theme = dark ? "light" : "dark";
+  try { localStorage.setItem("ice-theme", r.dataset.theme); } catch (e) {}
+  drawTimeline();
+};
+try { const t = localStorage.getItem("ice-theme"); if (t) document.documentElement.dataset.theme = t; } catch (e) {}
+document.querySelectorAll(".tabs button").forEach((b) => b.onclick = () => {
+  document.querySelectorAll(".tabs button").forEach((x) => x.classList.toggle("on", x === b));
+  document.querySelectorAll(".page").forEach((p) => p.classList.toggle("on", p.id === b.dataset.tab));
+  tab = b.dataset.tab;
+  refreshAll();
+});
+addEventListener("keydown", (e) => {
+  if (document.activeElement === $("term") || e.target.tagName === "INPUT") return;
+  const k = { F5: "run", F6: "pause", F10: "over", F11: e.shiftKey ? "out" : "step" }[e.key];
+  if (k) { e.preventDefault(); act(k); }
+});
+async function act(cmd) {
+  await api(cmd, "");
+  await poll(true);
+}
+
+// ---------- registers / MMU ----------
+function renderRegs() {
+  const r = st.regs, p = prevRegs || r;
+  const cell = (k, v, w, old) => `<span class="k">${k}</span><span class="v ${v !== old ? "chg" : ""}" data-r="${k.toLowerCase()}">${hex(v, w)}</span>`;
+  $("regs").innerHTML =
+    cell("A", r.a, 2, p.a) + cell("B", r.b, 2, p.b) +
+    cell("D", r.a * 256 + r.b, 4, p.a * 256 + p.b) + cell("DP", r.dp, 2, p.dp) +
+    cell("X", r.x, 4, p.x) + cell("Y", r.y, 4, p.y) +
+    cell("U", r.u, 4, p.u) + cell("S", r.s, 4, p.s) +
+    cell("PC", r.pc, 4, p.pc) + cell("CC", r.cc, 2, p.cc);
+  $("flags").innerHTML = "EFHINZVC".split("").map((f, i) => `<span class="${r.cc & (0x80 >> i) ? "on" : ""}" title="${["全レジスタ退避","FIRQマスク","ハーフキャリー","IRQマスク","負","ゼロ","オーバーフロー","キャリー（OS-9ではエラー）"][i]}">${f}</span>`).join("");
+  $("waitState").textContent = ["", "SYNC待ち", "CWAI待ち"][st.wait] || "";
+  document.querySelectorAll("#regs .v").forEach((el) => el.onclick = async () => {
+    if (st.running) return;
+    const v = prompt(el.dataset.r.toUpperCase() + " の新しい値（16進）", el.textContent);
+    if (v !== null) { await api(`reg?name=${el.dataset.r}&val=${encodeURIComponent(v)}`, ""); await poll(true); }
+  });
+  const m = st.mmu;
+  $("mmuInfo").textContent = m.enabled ? `有効・タスク${m.task}${m.frt ? "・FRT" : ""}${m.romdis ? "" : "・ROM"}` : "無効";
+  let h = '<div class="hd"></div>' + [0, 1, 2, 3, 4, 5, 6, 7].map((i) => `<div class="hd">${hex(i * 0x20, 2)}</div>`).join("");
+  for (const t of [0, 1]) {
+    h += `<div class="hd">T${t}</div>`;
+    for (let i = 0; i < 8; i++) {
+      const e = m.maps[t * 8 + i];
+      h += `<div class="${m.enabled && m.task === t ? "cur" : ""} ${e & 0x80 ? "wp" : ""}" title="論理 $${hex(i * 0x2000, 4)}–$${hex(i * 0x2000 + 0x1fff, 4)} → 物理 $${hex((e & 0x7f) * 0x2000, 5)}${e & 0x80 ? "（書込禁止）" : ""}">${hex(e & 0x7f, 2)}</div>`;
+    }
+  }
+  $("mmu").innerHTML = h;
+}
+
+// ---------- breakpoints ----------
+function renderBps() {
+  $("bpList").innerHTML = st.breakpoints.length ? st.breakpoints.map((a) => `<div class="item">● $${hex(a, 4)}<button data-a="${a}">×</button></div>`).join("") : '<span class="mute">なし</span>';
+  $("bpList").querySelectorAll("button").forEach((b) => b.onclick = async () => { await api(`bp?op=del&addr=${hex(+b.dataset.a, 4)}`, ""); poll(true); });
+  $("wList").innerHTML = st.watches.length ? st.watches.map((w, i) => `<div class="item">${{ r: "読", w: "書", rw: "読書" }[w.kind]} $${hex(w.start, 4)}${w.end > w.start ? "–$" + hex(w.end, 4) : ""}<button data-i="${i}">×</button></div>`).join("") : '<span class="mute">なし</span>';
+  $("wList").querySelectorAll("button").forEach((b) => b.onclick = async () => { await api(`watch?op=del&index=${b.dataset.i}`, ""); poll(true); });
+}
+$("bpAdd").onclick = async () => { await api(`bp?addr=${encodeURIComponent($("bpAddr").value)}`, ""); $("bpAddr").value = ""; poll(true); };
+$("bpClear").onclick = async () => { await api("bp?op=clear", ""); poll(true); };
+$("wAdd").onclick = async () => { await api(`watch?addr=${encodeURIComponent($("wAddr").value)}&len=${$("wLen").value}&kind=${$("wKind").value}`, ""); poll(true); };
+
+// ---------- disassembly ----------
+async function renderDis() {
+  const follow = $("follow").checked;
+  const addr = follow || viewAddr === null ? st.regs.pc : viewAddr;
+  const d = await api(`disasm?addr=${hex(addr, 4)}&back=${follow ? 8 : 0}&n=48`);
+  $("dis").innerHTML = d.lines.map((l) => {
+    const os9 = l.text.startsWith("OS9 ");
+    const title = os9 ? (services[l.text.slice(4)]?.desc || "") + (l.note ? "\n" + l.note : "") : "";
+    return `<tr class="${l.addr === st.regs.pc ? "pc" : ""} ${l.bp ? "bp" : ""} ${os9 ? "os9" : ""}" data-a="${l.addr}" title="${esc(title)}">` +
+      `<td class="g"></td><td>${hex(l.addr, 4)}</td><td class="b">${l.bytes}</td><td class="t">${esc(l.text)}</td>` +
+      `<td class="mute">${l.phys >= 0 ? "物理 " + hex(l.phys, 5) : "ROM/IO"}</td></tr>`;
+  }).join("");
+  $("dis").querySelectorAll("tr").forEach((tr) => {
+    tr.querySelector(".g").onclick = async () => { await api(`bp?op=toggle&addr=${hex(+tr.dataset.a, 4)}`, ""); poll(true); };
+    tr.ondblclick = () => act(`runto?addr=${hex(+tr.dataset.a, 4)}`);
+  });
+}
+$("disGo").onclick = () => { const v = parseInt($("disAddr").value, 16); if (!isNaN(v)) { viewAddr = v; $("follow").checked = false; renderDis(); } };
+
+// ---------- memory ----------
+async function renderMem() {
+  const addr = parseInt($("memAddr").value, 16) || 0;
+  const space = $("memSpace").value;
+  const d = await api(`mem?addr=${hex(addr, 4)}&len=256&space=${space}`);
+  const key = space + addr;
+  const prev = memPrev[key];
+  let out = "";
+  for (let row = 0; row < 16; row++) {
+    const a = (addr + row * 16) & 0xffff;
+    let h = "", s = "";
+    for (let i = 0; i < 16; i++) {
+      const off = (row * 16 + i) * 2;
+      const b = parseInt(d.hex.substr(off, 2), 16);
+      const chg = prev && prev.substr(off, 2) !== d.hex.substr(off, 2);
+      h += `<span class="byte ${chg ? "chg" : ""}" data-a="${(a + i) & 0xffff}">${d.hex.substr(off, 2)}</span>${i === 7 ? "  " : " "}`;
+      const c = b & 0x7f;
+      s += c >= 32 && c < 127 ? esc(String.fromCharCode(c)) : ".";
+    }
+    out += `<span class="a">${hex(a, 4)}</span>  ${h} ${s}\n`;
+  }
+  memPrev[key] = d.hex;
+  $("mem").innerHTML = out;
+  if (space === "cpu") $("mem").querySelectorAll(".byte").forEach((el) => el.ondblclick = async () => {
+    const v = prompt(`$${hex(+el.dataset.a, 4)} に書き込む値（16進、複数バイト可）`, el.textContent);
+    if (v !== null) { await api(`mem?addr=${hex(+el.dataset.a, 4)}&val=${v.replace(/\s/g, "")}`, ""); renderMem(); }
+  });
+}
+$("memGo").onclick = renderMem;
+$("memSpace").onchange = renderMem;
+$("memAddr").onkeydown = (e) => { if (e.key === "Enter") renderMem(); };
+
+async function renderTrace() {
+  const d = await api(`trace?n=${$("traceN").value}`);
+  $("trace").innerHTML = d.trace.slice().reverse().map((t) => {
+    const r = t.regs;
+    return `<tr><td class="mute">${t.cycle}</td><td>${t.pid ? pidChip(t.pid) : ""}</td><td>${hex(r.pc, 4)}</td><td>${esc(t.text)}</td>` +
+      `<td class="mute">${hex(r.a, 2)} ${hex(r.b, 2)} ${hex(r.x, 4)} ${hex(r.y, 4)} ${hex(r.u, 4)} ${hex(r.s, 4)}</td></tr>`;
+  }).join("");
+}
+$("traceN").onchange = renderTrace;
+
+// ---------- console ----------
+const term = $("term");
+function termWrite(text) {
+  text = text.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "").replace(/\r\n/g, "\n").replace(/\n\r/g, "\n");
+  for (const ch of text) {
+    if (ch === "\b") termText = termText.slice(0, -1);
+    else if (ch === "\r") termText += "\n";
+    else if (ch === "\x07" || ch === "\0") continue;
+    else termText += ch;
+  }
+  if (termText.length > 200000) termText = termText.slice(-150000);
+  const atBottom = term.scrollTop + term.clientHeight >= term.scrollHeight - 8;
+  term.innerHTML = esc(termText) + '<span class="cursor"> </span>';
+  if (atBottom) term.scrollTop = term.scrollHeight;
+}
+let keyQueue = "";
+function sendKeys(s) { keyQueue += s; }
+setInterval(() => { if (keyQueue) { const s = keyQueue; keyQueue = ""; api("console", s); } }, 40);
+term.addEventListener("keydown", (e) => {
+  let s = null;
+  if (e.key === "Enter") s = "\r";
+  else if (e.key === "Backspace") s = "\b";
+  else if (e.key === "Escape") s = "\x1b";
+  else if (e.key === "Tab") s = "\t";
+  else if (e.ctrlKey && e.key.length === 1) s = String.fromCharCode(e.key.toUpperCase().charCodeAt(0) & 31);
+  else if (e.key.length === 1 && !e.metaKey && !e.altKey) s = e.key;
+  if (s !== null) { e.preventDefault(); sendKeys(s); }
+});
+term.addEventListener("paste", (e) => { e.preventDefault(); sendKeys(e.clipboardData.getData("text").replace(/\r?\n/g, "\r")); });
+$("line").onkeydown = (e) => { if (e.key === "Enter") { sendKeys($("line").value + "\r"); $("line").value = ""; } };
+$("termClear").onclick = () => { termText = ""; termWrite(""); };
+async function pollConsole() {
+  if (st.console === consoleNext) return;
+  const d = await api(`console?since=${consoleNext}`);
+  consoleNext = d.next;
+  termWrite(d.text);
+}
+
+// ---------- OS-9 ----------
+let calls = new Map(), callVersion = 0, selCall = null, switches = [];
+const STATE_BITS = [[0x80, "Sys"], [0x40, "TSlp"], [0x20, "TOut"], [0x10, "Img"], [0x08, "Susp"], [0x02, "Cond"], [0x01, "Dead"]];
+const QNAME = { running: "実行中", active: "実行待ち", wait: "待機", sleep: "睡眠", "-": "—" };
+async function renderOs9() {
+  const o = st.os9;
+  if (!o) {
+    $("osLevel").textContent = "OS-9 未起動（Initモジュール未検出）";
+    for (const q of ["qRun", "qActive", "qWait", "qSleep"]) $(q).innerHTML = "";
+    $("procs").innerHTML = '<tr><td colspan="9" class="empty">OS-9が起動すると表示されます</td></tr>';
+    return;
+  }
+  $("osLevel").textContent = `NitrOS-9 Level ${o.level}`;
+  $("qRun").innerHTML = o.pid ? pidChip(o.pid) : '<span class="mute">アイドル（D.Proc=0）</span>';
+  $("qActive").innerHTML = o.active.map(pidChip).join("");
+  $("qWait").innerHTML = o.waiting.map(pidChip).join("");
+  $("qSleep").innerHTML = o.sleeping.map(pidChip).join("");
+  const [p, m, mm] = await Promise.all([api("os9/procs"), api("os9/modules"), api("os9/memmap")]);
+  renderProcs(p.procs, o.level);
+  renderMods(m.modules, o.level);
+  renderMemMap(mm, m.modules, p.procs, o.level);
+  await pollCalls();
+}
+function renderProcs(procs, level) {
+  $("thDat").textContent = level === 2 ? "DATイメージ" : "データ";
+  const kids = {};
+  procs.forEach((p) => (kids[p.parent] = kids[p.parent] || []).push(p));
+  const rows = [];
+  const walk = (parent, depth) => (kids[parent] || []).forEach((p) => { rows.push([p, depth]); walk(p.id, depth + 1); });
+  walk(0, 0);
+  procs.forEach((p) => { if (!rows.find((r) => r[0] === p)) rows.push([p, 0]); });
+  $("procs").innerHTML = rows.map(([p, d]) => {
+    const flags = STATE_BITS.filter(([b]) => p.state & b).map(([, n]) => n).join(" ");
+    const paths = p.paths.map((x, i) => x ? `${i}:${x}` : "").filter(Boolean).join(" ");
+    const dat = level === 2 ? p.dat.map((b) => b === 0x333e ? "··" : hex(b, 2)).join(" ") : `${p.pages}ページ`;
+    return `<tr><td>${"&nbsp;".repeat(d * 3)}${pidChip(p.id)}</td><td>${p.parent}</td><td class="mono">${esc(p.module)}</td>` +
+      `<td class="state-flags" title="P$State=$${hex(p.state, 2)}">${flags || "User"}</td><td>${QNAME[p.queue]}</td><td>${p.prior}</td><td>${p.age}</td>` +
+      `<td class="mono" title="ローカルパス:システムパス">${paths}</td><td class="mono">${dat}</td></tr>`;
+  }).join("");
+}
+const MTYPE = { 1: "Prgrm", 2: "Sbrtn", 3: "Multi", 4: "Data", 5: "ShellSub", 12: "Systm", 13: "FlMgr", 14: "Drivr", 15: "Devic" };
+const MLANG = { 0: "", 1: "6809", 2: "I-code", 3: "P-code", 4: "C", 5: "Cobol", 6: "Fortran", 7: "6309" };
+function renderMods(mods, level) {
+  $("thBlk").textContent = level === 2 ? "ブロック" : "";
+  $("mods").innerHTML = mods.map((m) => `<tr><td class="mono name">${esc(m.name)}</td><td>${MTYPE[m.type >> 4] || hex(m.type >> 4, 1)}</td><td>${MLANG[m.type & 15] ?? ""}</td>` +
+    `<td class="mono">$${hex(m.addr, 4)}</td><td class="mono">${m.size}</td><td>${m.links}</td><td class="mono">${level === 2 ? m.blocks.map((b) => hex(b, 2)).join(" ") : ""}</td></tr>`).join("");
+}
+function renderMemMap(mm, mods, procs, level) {
+  const g = $("memgrid");
+  if (level === 1) {
+    $("memUnit").textContent = "1マス＝256バイト（D.FMBM ビットマップ）";
+    const owner = {};
+    mods.forEach((m) => { for (let a = m.addr >> 8; a <= (m.addr + m.size - 1) >> 8; a++) owner[a] = owner[a] || ["mod", m.name]; });
+    procs.forEach((p) => { owner[p.addr >> 8] = owner[p.addr >> 8] || ["desc", "記述子 " + p.id]; });
+    g.style.gridTemplateColumns = "repeat(32, 1fr)";
+    g.innerHTML = mm.map.map((used, i) => {
+      const o = owner[i];
+      const bg = o && o[0] === "mod" ? "var(--cat-mem)" : o ? "var(--cat-proc)" : used ? "var(--warn)" : "var(--chip)";
+      return `<div style="background:${bg}" title="$${hex(i * 256, 4)}  ${used ? "使用中" : "空き"}${o ? " / " + esc(o[1]) : ""}"></div>`;
+    }).join("");
+    $("memLegend").innerHTML = '<span><i style="background:var(--cat-mem)"></i>モジュール</span><span><i style="background:var(--cat-proc)"></i>プロセス記述子</span><span><i style="background:var(--warn)"></i>使用中（データ・スタック等）</span><span><i style="background:var(--chip)"></i>空き</span>';
+  } else {
+    $("memUnit").textContent = "1マス＝8KB物理ブロック（D.BlkMap）";
+    const owner = {};
+    mm.sysdat.forEach((b) => { if (b !== 0x333e) owner[b] = ["sys", "システム"]; });
+    mods.forEach((m) => m.blocks.forEach((b) => owner[b] = owner[b] || ["mod", m.name]));
+    procs.forEach((p) => p.dat.forEach((b) => { if (b !== 0x333e) owner[b] = owner[b] || ["proc", "プロセス" + p.id, p.id]; }));
+    g.style.gridTemplateColumns = "repeat(16, 1fr)";
+    g.innerHTML = mm.map.map((f, i) => {
+      const o = owner[i];
+      const bg = f & 0x80 ? "transparent" : o && o[0] === "proc" ? pidColor(o[2]) : o && o[0] === "mod" ? "var(--cat-mem)" : o ? "var(--cat-sys)" : f & 1 ? "var(--warn)" : "var(--chip)";
+      return `<div style="background:${bg}" title="ブロック$${hex(i, 2)} 物理$${hex(i * 8192, 5)} flags=$${hex(f, 2)}${o ? " / " + esc(o[1]) : ""}">${hex(i, 2)}</div>`;
+    }).join("");
+    $("memLegend").innerHTML = '<span><i style="background:var(--cat-sys)"></i>システム空間</span><span><i style="background:var(--cat-mem)"></i>モジュール</span><span><i style="background:var(--warn)"></i>使用中</span><span>色付き＝各プロセスのDAT</span><span><i style="background:var(--chip)"></i>空き</span>';
+  }
+}
+function callFilter(c) {
+  if ($("cUser").checked && c.system) return false;
+  const pid = parseInt($("cPid").value);
+  if (!isNaN(pid) && c.pid !== pid) return false;
+  const f = $("cFind").value.trim().toLowerCase();
+  if (f && !c.name.toLowerCase().includes(f)) return false;
+  return true;
+}
+async function pollCalls() {
+  if (!st.os9 || st.os9.callVersion === callVersion) return;
+  const user = $("cUser").checked ? "&user=1" : "";
+  const d = await api(`os9/calls?since=${callVersion}&limit=${callVersion ? 3000 : 600}${user}`);
+  callVersion = d.version;
+  d.calls.forEach((c) => calls.set(c.id, c));
+  if (calls.size > 4000) [...calls.keys()].sort((a, b) => a - b).slice(0, calls.size - 3000).forEach((k) => calls.delete(k));
+  switches = d.switches.slice().reverse();
+  renderCalls();
+  drawTimeline();
+  if (selCall && calls.has(selCall)) renderDetail(calls.get(selCall), false);
+}
+function renderCalls() {
+  const rows = [...calls.values()].filter(callFilter).sort((a, b) => a.id - b.id).slice(-400);
+  const box = $("callsBox");
+  $("calls").innerHTML = rows.map((c) => {
+    const pending = c.end === null && !c.noReturn;
+    const cls = [pending ? "pending" : "", c.error !== null ? "err" : "", c.id === selCall ? "sel" : ""].join(" ");
+    const dur = c.end !== null ? c.end - c.cycle : pending ? "…" : "";
+    return `<tr class="${cls}" data-id="${c.id}"><td class="mute">${c.id}</td><td>${pidChip(c.pid)}</td>` +
+      `<td><span class="name cat-${cat(c.name)}">${"·".repeat(c.depth)}${esc(c.name)}</span>${c.system ? ' <span class="chip">sys</span>' : ""}</td>` +
+      `<td class="args">${esc(c.args)}</td><td class="r">${pending ? "実行中…" : esc(c.result)}</td><td class="mute">${dur}</td></tr>`;
+  }).join("") || '<tr><td colspan="6" class="empty">まだ記録がありません</td></tr>';
+  box.querySelectorAll("tr[data-id]").forEach((tr) => tr.onclick = () => { selCall = +tr.dataset.id; renderCalls(); renderDetail(calls.get(selCall), true); });
+  if ($("cTail").checked) box.scrollTop = box.scrollHeight;
+}
+["cUser", "cPid", "cFind"].forEach((id) => $(id).oninput = () => { if (id === "cUser") { calls.clear(); callVersion = 0; pollCalls(); } else renderCalls(); });
+$("cReset").onclick = () => { calls.clear(); renderCalls(); };
+
+async function renderDetail(c, loadChildren) {
+  if (!c) return;
+  const s = services[c.name] || {};
+  const regs = ["a", "b", "x", "y", "u", "s", "cc"];
+  const w = (k) => k === "a" || k === "b" || k === "cc" ? 2 : 4;
+  const outRow = c.out ? regs.map((k) => `<td class="${c.out[k] !== c.in[k] ? "chg" : ""}">${hex(c.out[k], w(k))}</td>`).join("") : `<td colspan="${regs.length}" class="mute">${c.noReturn ? "呼び出し元へは戻らない" : "未復帰"}</td>`;
+  let html = `<h3><span class="cat-${cat(c.name)}">${esc(c.name)}</span> <span class="mute" style="font-weight:400">${esc(s.desc || "")} · コード $${hex(c.code, 2)}</span></h3>` +
+    (s.explain ? `<div class="explain">${esc(s.explain)}</div>` : "") +
+    `<p>${pidChip(c.pid)} ${c.system ? "システム状態（カーネル・ドライバ内部）からの呼び出し" : "ユーザー状態からの呼び出し"}` +
+    ` · 開始 ${c.cycle}${c.end !== null ? ` · ${c.end - c.cycle} サイクル` : ""}</p>` +
+    `<table class="regdiff"><thead><tr><th></th>${regs.map((k) => `<th>${k.toUpperCase()}</th>`).join("")}</tr></thead>` +
+    `<tbody><tr><th>入力</th>${regs.map((k) => `<td>${hex(c.in[k], w(k))}</td>`).join("")}</tr><tr><th>出力</th>${outRow}</tr></tbody></table>` +
+    `<p><b>引数</b> ${esc(c.args)}<br><b>結果</b> ${esc(c.result || "")}</p>` +
+    `<div class="row"><button data-b="call">${esc(c.name)} の呼び出しで停止</button><button data-b="return">復帰で停止</button>` +
+    `<button data-b="mem">X のメモリを表示</button></div>` +
+    `<h3 style="margin-top:10px;font-size:13px">カーネル内部の呼び出し</h3>` +
+    (c.inner && c.inner.length ? `<p class="mono">${c.inner.slice().sort((a, b) => b[1] - a[1]).map(([n, k]) => `<span class="chip"><span class="cat-${cat(n)}">${esc(n)}</span>×${k}</span>`).join(" ")}</p>` : "") +
+    `<div class="tree" id="tree"><span class="mute">読み込み中…</span></div>`;
+  $("callDetail").innerHTML = html;
+  $("callDetail").querySelectorAll("button").forEach((b) => b.onclick = async () => {
+    if (b.dataset.b === "mem") { $("memSpace").value = "cpu"; $("memAddr").value = hex(c.in.x, 4); document.querySelector('[data-tab="dbg"]').click(); return; }
+    await api(`os9break?code=${encodeURIComponent(c.name)}&when=${b.dataset.b}`, ""); poll(true);
+  });
+  const tree = await childTree(c.id, 0);
+  if ($("tree")) $("tree").innerHTML = tree || `<span class="mute">${c.inner && c.inner.length ? "個々の内部呼び出しは記録の保持範囲外です（上は集計）" : "なし"}</span>`;
+}
+async function childTree(id, depth) {
+  if (depth > 3) return "";
+  const d = await api(`os9/calls?parent=${id}&limit=60`);
+  const kids = d.calls.sort((a, b) => a.id - b.id);
+  let out = "";
+  for (const k of kids) {
+    out += `<div>${"&nbsp;".repeat(depth * 4)}└ <span class="cat-${cat(k.name)} name">${esc(k.name)}</span> <span class="mute">${esc(k.args)}</span> → ${esc(k.result || (k.noReturn ? "(戻らない)" : "…"))}</div>`;
+    if (depth < 2 && kids.length < 20) out += await childTree(k.id, depth + 1);
+  }
+  if (kids.length === 60) out += `<div class="mute">${"&nbsp;".repeat(depth * 4)}… 最新60件のみ表示</div>`;
+  return out;
+}
+
+function drawTimeline() {
+  const cv = $("timeline");
+  if (!st || !cv.offsetWidth) return;
+  const dpr = devicePixelRatio || 1;
+  const W = cv.offsetWidth, H = 150;
+  cv.width = W * dpr; cv.height = H * dpr;
+  const g = cv.getContext("2d");
+  g.scale(dpr, dpr);
+  const css = getComputedStyle(document.documentElement);
+  const ink = css.getPropertyValue("--mute"), line = css.getPropertyValue("--line");
+  g.clearRect(0, 0, W, H);
+  const range = +$("tlRange").value, end = st.cycles, start = end - range;
+  const pids = [...new Set([0, ...switches.map((s) => s[2]), ...switches.map((s) => s[1]), ...[...calls.values()].map((c) => c.pid)])].sort((a, b) => a - b).slice(0, 12);
+  const lane = (H - 18) / Math.max(pids.length, 1);
+  const x = (c) => 40 + (W - 48) * (c - start) / range;
+  g.font = "11px system-ui"; g.textBaseline = "middle";
+  pids.forEach((p, i) => {
+    g.fillStyle = ink; g.fillText(p ? `P${p}` : "idle", 4, 9 + lane * i + lane / 2);
+    g.strokeStyle = line; g.beginPath(); g.moveTo(40, 9 + lane * (i + 1)); g.lineTo(W - 8, 9 + lane * (i + 1)); g.stroke();
+  });
+  // Running intervals from the switch history (newest last).
+  const sw = switches.filter((s) => s[0] >= start - range);
+  for (let i = 0; i < sw.length; i++) {
+    const s0 = Math.max(sw[i][0], start), s1 = i + 1 < sw.length ? sw[i + 1][0] : end;
+    if (s1 < start) continue;
+    const li = pids.indexOf(sw[i][2]);
+    if (li < 0) continue;
+    g.fillStyle = pidColor(sw[i][2]);
+    g.fillRect(x(s0), 11 + lane * li, Math.max(1, x(s1) - x(s0)), lane - 4);
+  }
+  for (const c of calls.values()) {
+    if (c.system || c.cycle < start) continue;
+    const li = pids.indexOf(c.pid);
+    if (li < 0) continue;
+    const cx = x(c.cycle), cy = 9 + lane * li + 2;
+    g.fillStyle = c.error !== null ? css.getPropertyValue("--err") : css.getPropertyValue("--ink");
+    g.beginPath(); g.moveTo(cx, cy); g.lineTo(cx - 3, cy + 6); g.lineTo(cx + 3, cy + 6); g.fill();
+  }
+  g.fillStyle = ink; g.textBaseline = "alphabetic";
+  g.fillText(`${start}`, 40, H - 2);
+  g.textAlign = "right"; g.fillText(`${end}`, W - 8, H - 2); g.textAlign = "left";
+}
+$("tlRange").onchange = drawTimeline;
+addEventListener("resize", drawTimeline);
+
+async function os9break(q) { await api("os9break?" + q, ""); poll(true); }
+$("trTrace").onchange = (e) => os9break("trace=" + (e.target.checked ? 1 : 0));
+$("trErr").onchange = (e) => os9break("errors=" + (e.target.checked ? 1 : 0));
+$("trSwitch").onchange = (e) => os9break("switch=" + (e.target.checked ? 1 : 0));
+$("trPid").onchange = (e) => os9break("pid=" + (parseInt(e.target.value) || 0));
+$("trCall").onclick = () => os9break(`code=${encodeURIComponent($("trCode").value)}&when=call`);
+$("trRet").onclick = () => os9break(`code=${encodeURIComponent($("trCode").value)}&when=return`);
+$("trClear").onclick = () => os9break("op=clear");
+function renderOs9Breaks() {
+  const b = st.os9break;
+  $("trTrace").checked = b.trace; $("trErr").checked = b.errors; $("trSwitch").checked = b.switch;
+  if (document.activeElement !== $("trPid")) $("trPid").value = b.pid || "";
+  const item = (n, w) => `<div class="item"><span class="cat-${cat(n)} name">${esc(n)}</span>${w === "call" ? "呼び出し" : "復帰"}<button data-n="${esc(n)}" data-w="${w}">×</button></div>`;
+  $("trList").innerHTML = b.calls.map((n) => item(n, "call")).join("") + b.returns.map((n) => item(n, "return")).join("");
+  $("trList").querySelectorAll("button").forEach((x) => x.onclick = () => os9break(`code=${encodeURIComponent(x.dataset.n)}&when=${x.dataset.w}&op=del`));
+}
+
+// ---------- polling ----------
+function renderHeader() {
+  $("dot").className = "dot " + (st.running ? "run" : "stop");
+  $("stopText").textContent = st.running ? (st.speed ? "実行中（速度制限）" : "実行中") : st.stop || "停止";
+  $("cycles").textContent = st.cycles.toLocaleString() + " cyc";
+  $("bRun").disabled = st.running;
+  $("bPause").disabled = !st.running;
+  for (const b of ["bStep", "bOver", "bOut"]) $(b).disabled = st.running;
+  if (document.activeElement !== $("speed")) $("speed").value = String(st.speed);
+}
+async function refreshAll() {
+  if (!st) return;
+  renderHeader();
+  renderRegs();
+  renderBps();
+  renderOs9Breaks();
+  if (tab === "dbg") await Promise.all([renderDis(), renderMem(), renderTrace()]);
+  else await renderOs9();
+}
+let busy = false, lastSlow = 0, shownCycles = -1, baseRegs = null;
+async function poll(force) {
+  if (busy && !force) return;
+  busy = true;
+  try {
+    st = await api("state");
+    const changed = st.cycles !== shownCycles;
+    if (!st.running && (changed || force)) {
+      // Highlight registers that differ from the previous stop.
+      if (changed) { prevRegs = baseRegs; baseRegs = st.regs; }
+      await refreshAll();
+      shownCycles = st.cycles;
+    } else if (st.running) {
+      renderHeader();
+      renderRegs();
+      const now = Date.now();
+      if (tab === "os9" && now - lastSlow > 700) { lastSlow = now; await renderOs9(); }
+      else if (tab === "dbg" && now - lastSlow > 1000) { lastSlow = now; await Promise.all([renderDis(), renderTrace()]); }
+    } else {
+      renderHeader();
+    }
+    await pollConsole();
+  } catch (e) {
+    $("stopText").textContent = "接続できません";
+    $("dot").className = "dot";
+  } finally {
+    busy = false;
+  }
+}
+(async () => {
+  const s = await api("os9/services");
+  s.services.forEach((x) => services[x.name] = x);
+  $("svcList").innerHTML = s.services.map((x) => `<option value="${esc(x.name)}">${esc(x.desc)}</option>`).join("");
+  await poll(true);
+  setInterval(() => poll(false), 250);
+})();
+</script>
+</body>
+</html>
