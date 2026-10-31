@@ -78,6 +78,15 @@ th { color: var(--mute); font-weight: 500; font-size: 12px; border-bottom: 1px s
 .dis tr.src td { color: var(--ok); font-style: italic; white-space: pre; }
 .dis td .sym { color: var(--accent); }
 .dis tr.ret td { color: var(--accent); }
+.vars { font-family: var(--mono); font-size: 12px; }
+.vars details > summary, .vars .leaf { list-style: none; padding: 1px 0; cursor: default; }
+.vars details > summary::before { content: "▸ "; color: var(--mute); }
+.vars details[open] > summary::before { content: "▾ "; }
+.vars .leaf::before { content: "  "; white-space: pre; }
+.vars details > div, .vars details > details { margin-left: 14px; }
+.vars .n { color: var(--accent); }
+.vars .t, .vars .a { color: var(--mute); }
+.vars h3 { font-size: 11px; color: var(--mute); margin: 6px 0 2px; font-weight: 600; }
 .scroll { overflow: auto; }
 .hex { font-family: var(--mono); white-space: pre; line-height: 1.5; overflow-x: auto; }
 #console.hide { display: none; }
@@ -197,6 +206,10 @@ canvas { width: 100%; display: block; }
         <h2>スタック<span class="grow"></span><span class="kbd mono" id="stackWhere"></span></h2>
         <div class="scroll" style="max-height:260px"><table class="dis"><tbody id="stack"></tbody></table></div>
         <div class="body mute" style="font-size:12px">↩ は呼び出し命令の直後を指す値（戻り番地）です。</div>
+      </div>
+      <div class="panel">
+        <h2>変数<span class="grow"></span><select id="varFrame" title="フレーム"></select></h2>
+        <div class="scroll" style="max-height:320px"><div class="body vars" id="vars"><span class="mute">なし</span></div></div>
       </div>
       <div class="panel">
         <h2>シンボル</h2>
@@ -437,6 +450,24 @@ $("symLoad").onclick = async () => {
   renderSymbols(); poll(true);
 };
 $("symClear").onclick = async () => { await api("symbols?op=clear", ""); renderSymbols(); poll(true); };
+let varFrame = 0;
+const varOpen = new Set();
+function varTree(v, path) {
+  const key = path + "/" + v.name;
+  const head = `<span class="n">${esc(v.name)}</span> <span class="t">${esc(v.type)}</span> = ${esc(v.value)} <span class="a">${esc(v.at)}</span>`;
+  if (!v.children.length) return `<div class="leaf">${head}</div>`;
+  return `<details data-k="${esc(key)}" ${varOpen.has(key) ? "open" : ""}><summary>${head}</summary>${v.children.map((c) => varTree(c, key)).join("")}</details>`;
+}
+async function renderVars() {
+  const d = await api(`vars?frame=${varFrame}`);
+  const sel = $("varFrame");
+  sel.innerHTML = d.frames.map((f, i) => `<option value="${i}" ${i === d.frame ? "selected" : ""}>#${i} ${esc(f.name)}${f.line ? " " + esc(f.line) : ""}</option>`).join("");
+  const part = (title, list) => list.length ? `<h3>${title}</h3>` + list.map((v) => varTree(v, title)).join("") : "";
+  const html = part("ローカル", d.locals) + part("大域", d.globals);
+  $("vars").innerHTML = html || '<span class="mute">変数情報なし（Cのデバッグビルドのシンボルを読み込むと表示します）</span>';
+  $("vars").querySelectorAll("details").forEach((el) => el.ontoggle = () => { el.open ? varOpen.add(el.dataset.k) : varOpen.delete(el.dataset.k); });
+}
+$("varFrame").onchange = () => { varFrame = +$("varFrame").value; renderVars(); };
 async function renderStack() {
   const d = await api("stack?n=32");
   $("stackWhere").textContent = d.where || "";
@@ -787,7 +818,7 @@ async function refreshAll() {
   renderRegs();
   renderBps();
   renderOs9Breaks();
-  if (tab === "dbg") await Promise.all([renderDis(), renderMem(), renderTrace(), renderStack(), renderSymbols()]);
+  if (tab === "dbg") await Promise.all([renderDis(), renderMem(), renderTrace(), renderStack(), renderSymbols(), renderVars()]);
   else await renderOs9();
 }
 let busy = false, lastSlow = 0, shownCycles = -1, baseRegs = null;
@@ -799,7 +830,7 @@ async function poll(force) {
     const changed = st.cycles !== shownCycles;
     if (!st.running && (changed || force)) {
       // Highlight registers that differ from the previous stop.
-      if (changed) { prevRegs = baseRegs; baseRegs = st.regs; }
+      if (changed) { prevRegs = baseRegs; baseRegs = st.regs; varFrame = 0; }
       await refreshAll();
       shownCycles = st.cycles;
     } else if (st.running) {

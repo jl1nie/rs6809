@@ -13,6 +13,8 @@
 //! Module-relative tables are placed through the live OS-9 module directory,
 //! as physical RAM ranges, so the same table works in Level 1 and in every
 //! Level 2 address space that maps the module.
+use super::debuginfo::DebugInfo;
+use super::microware::{self, Bases, DataKind, DataLabel, Insn};
 use super::os9::{Level, View};
 use crate::Machine;
 use std::collections::{BTreeMap, HashMap};
@@ -49,6 +51,8 @@ pub struct Table {
     /// Sorted by offset.
     pub lines: Vec<LineRec>,
     pub sources: Vec<Source>,
+    /// Variables and frames, when the compiler's output allows it.
+    pub debug: Option<DebugInfo>,
 }
 
 impl Table {
@@ -60,6 +64,7 @@ impl Table {
             symbols: Vec::new(),
             lines: Vec::new(),
             sources: Vec::new(),
+            debug: None,
         }
     }
     fn source(&mut self, name: &str) -> usize {
@@ -245,14 +250,17 @@ fn parse_lwlink(path: &Path, text: &str) -> Table {
 /// `c.link -m [-s]`: module name, section code offsets and code symbols.
 struct LinkMap {
     module: Option<String>,
-    sections: HashMap<String, u16>,
+    sections: HashMap<String, Bases>,
     symbols: Vec<(u16, String)>,
+    /// Data symbols (udat/idat/udpd/idpd) as offsets from the data base.
+    data: HashMap<String, u16>,
 }
 fn parse_linkmap(text: &str) -> LinkMap {
     let mut m = LinkMap {
         module: None,
         sections: HashMap::new(),
         symbols: Vec::new(),
+        data: HashMap::new(),
     };
     for line in text.lines() {
         if let Some(rest) = line.strip_prefix("Linkage map for ") {
@@ -262,26 +270,50 @@ fn parse_linkmap(text: &str) -> LinkMap {
         let w: Vec<&str> = line.split_whitespace().collect();
         if line.starts_with(' ') {
             if w.len() == 3
-                && w[1] == "code"
                 && let Some(v) = hex16(w[2])
             {
-                m.symbols.push((v, w[0].to_string()));
+                match w[1] {
+                    "code" => m.symbols.push((v, w[0].to_string())),
+                    "udat" | "idat" | "udpd" | "idpd" => {
+                        m.data.insert(w[0].to_string(), v);
+                    }
+                    _ => {}
+                }
             }
         } else if w.len() >= 7
-            && w[1..5]
+            && w[1..6]
                 .iter()
                 .all(|x| x.bytes().all(|c| c.is_ascii_hexdigit()))
-            && let Some(v) = hex16(w[1])
         {
-            m.sections.insert(w[0].to_string(), v);
+            let h = |x: &str| u16::from_str_radix(x, 16).unwrap_or(0);
+            m.sections.insert(
+                w[0].to_string(),
+                Bases {
+                    code: h(w[1]),
+                    idat: h(w[2]),
+                    udat: h(w[3]),
+                    idpd: h(w[4]),
+                    udpd: h(w[5]),
+                },
+            );
         }
     }
     m
 }
 
-/// `c.prep -l` output: `#7` file, `#6` source line (one per input line).
-fn parse_prep(text: &str) -> Vec<(String, u32, String)> {
-    let mut out = Vec::new();
+/// `c.prep -l` output: `#7` file, `#6` source line (one per input line),
+/// followed by the preprocessed text of that line.
+struct Prep {
+    /// (file, line, source text) per `#6` record.
+    records: Vec<(String, u32, String)>,
+    /// Preprocessed text: (file, line, text).
+    expanded: Vec<(String, u32, String)>,
+}
+fn parse_prep(text: &str) -> Prep {
+    let mut p = Prep {
+        records: Vec::new(),
+        expanded: Vec::new(),
+    };
     let mut stack: Vec<(String, u32)> = Vec::new();
     let mut lines = text.lines();
     while let Some(l) = lines.next() {
@@ -299,16 +331,24 @@ fn parse_prep(text: &str) -> Vec<(String, u32, String)> {
                 let src = lines.next().unwrap_or("").to_string();
                 if let Some(top) = stack.last_mut() {
                     top.1 += 1;
-                    out.push((top.0.clone(), top.1, src));
+                    p.records.push((top.0.clone(), top.1, src));
                 }
             }
-            "#5" | "#P" => {
+            "#5" => {
                 lines.next();
             }
-            _ => {}
+            "#P" => {
+                lines.next();
+                lines.next();
+            }
+            text => {
+                if let Some(top) = stack.last() {
+                    p.expanded.push((top.0.clone(), top.1, text.to_string()));
+                }
+            }
         }
     }
-    out
+    p
 }
 
 /// Microware RMA listing (`c.asm -l`): `NNNNN AAAA BYTES   label  op operand`.
@@ -328,12 +368,23 @@ fn parse_rma(path: &Path, text: &str) -> Result<Table, String> {
     t.module = map.module.clone();
     t.symbols = map.symbols.clone();
     if t.symbols.is_empty() {
-        t.symbols = map.sections.iter().map(|(n, &v)| (v, n.clone())).collect();
+        t.symbols = map
+            .sections
+            .iter()
+            .map(|(n, b)| (b.code, n.clone()))
+            .collect();
     }
     let listing = t.source(&path.file_name().unwrap_or_default().to_string_lossy());
     t.sources[listing].path = Some(path.to_path_buf());
     let mut base: Option<u16> = None;
+    let mut bases = Bases::default();
     let mut data = false;
+    let mut data_dp = false;
+    // Inputs for variable information.
+    let mut insns: Vec<Insn> = Vec::new();
+    let mut functions: Vec<(String, u16)> = Vec::new();
+    let mut data_labels: Vec<DataLabel> = Vec::new();
+    let mut code_end = 0u16;
     let mut comment = 0usize;
     let mut current: Option<(usize, u32)> = None;
     // (offset, source, line) for each code line; ends come from the next one.
@@ -346,7 +397,7 @@ fn parse_rma(path: &Path, text: &str) -> Result<Table, String> {
         }
         let rest = &line[6..];
         if let Some(c_text) = rest.strip_prefix("* *") {
-            if let Some((file, ln, _)) = prep.as_ref().and_then(|p| p.get(comment)) {
+            if let Some((file, ln, _)) = prep.as_ref().and_then(|p| p.records.get(comment)) {
                 let src = t.source(file);
                 t.sources[src].text.insert(*ln, c_text.to_string());
                 current = Some((src, *ln));
@@ -361,17 +412,55 @@ fn parse_rma(path: &Path, text: &str) -> Result<Table, String> {
         if labelled {
             words.next();
         }
+        let label = labelled.then(|| fields.split_whitespace().next().unwrap_or("").to_string());
         let op = words.next().unwrap_or("").to_ascii_lowercase();
         let operand = words.next().unwrap_or("");
+        let c_line = current.map(|(src, ln)| (t.sources[src].name.clone(), ln));
+        if data {
+            if let (Some(l), Some(a)) = (&label, addr)
+                && !matches!(op.as_str(), "endsect" | "equ" | "set")
+            {
+                let kind = match (op.as_str(), data_dp) {
+                    ("rmb", false) => DataKind::Udat,
+                    ("rmb", true) => DataKind::Udpd,
+                    (_, false) => DataKind::Idat,
+                    (_, true) => DataKind::Idpd,
+                };
+                data_labels.push(DataLabel {
+                    name: l.trim_end_matches(':').to_string(),
+                    kind,
+                    off: a,
+                    line: c_line.clone(),
+                });
+            }
+        } else if let (Some(b), Some(a)) = (base, addr)
+            && !matches!(
+                op.as_str(),
+                "equ" | "set" | "psect" | "vsect" | "endsect" | "nam" | "opt"
+            )
+        {
+            if op == "ttl" {
+                functions.push((operand.to_string(), b.wrapping_add(a)));
+            } else {
+                insns.push(Insn {
+                    off: b.wrapping_add(a),
+                    label: label.clone(),
+                    op: op.clone(),
+                    operand: operand.to_string(),
+                });
+            }
+        }
         match op.as_str() {
             "psect" => {
                 let name = operand.split(',').next().unwrap_or("");
-                base = map.sections.get(name).copied();
+                bases = map.sections.get(name).copied().unwrap_or_default();
+                base = map.sections.get(name).map(|b| b.code);
                 data = false;
                 continue;
             }
             "vsect" => {
                 data = true;
+                data_dp = operand.eq_ignore_ascii_case("dp");
                 continue;
             }
             "endsect" => {
@@ -382,6 +471,7 @@ fn parse_rma(path: &Path, text: &str) -> Result<Table, String> {
                         && let Some(a) = addr
                     {
                         code.push((b.wrapping_add(a), usize::MAX, 0));
+                        code_end = b.wrapping_add(a);
                     }
                     base = None;
                 }
@@ -416,6 +506,7 @@ fn parse_rma(path: &Path, text: &str) -> Result<Table, String> {
             }
         }
     }
+    loop_tails(&mut code, &insns);
     for w in code.windows(2) {
         let (off, src, line) = w[0];
         if src == usize::MAX || w[1].0 <= off {
@@ -432,7 +523,71 @@ fn parse_rma(path: &Path, text: &str) -> Result<Table, String> {
         }
     }
     t.finish();
+    if let Some(p) = prep {
+        let program = super::cdecl::parse(&p.expanded);
+        t.debug = Some(microware::build(microware::Input {
+            insns: &insns,
+            functions: &functions,
+            code_end,
+            data: &data_labels,
+            bases,
+            map_data: &map.data,
+            program,
+        }));
+    }
     Ok(t)
+}
+
+/// Microware C places a loop's increment and condition after the body,
+/// after the comment of the next statement. Code that ends in a backward
+/// conditional branch and is entered by a forward jump from the loop
+/// header belongs to the header's line (`for`/`while`), not the next one.
+fn loop_tails(code: &mut [(u16, usize, u32)], insns: &[Insn]) {
+    let labels: HashMap<&str, u16> = insns
+        .iter()
+        .filter_map(|i| i.label.as_deref().map(|l| (l.trim_end_matches(':'), i.off)))
+        .collect();
+    let target = |i: &Insn| {
+        labels
+            .get(i.operand.split(',').next().unwrap_or(""))
+            .copied()
+    };
+    let conditional = |op: &str| {
+        (op.starts_with('b') || op.starts_with("lb"))
+            && !matches!(op, "bra" | "lbra" | "bsr" | "lbsr" | "brn" | "lbrn")
+            && !op.starts_with("bit")
+    };
+    for back in insns.iter().filter(|i| conditional(&i.op)) {
+        let Some(t) = target(back).filter(|&t| t < back.off) else {
+            continue;
+        };
+        let Some(b) = code.iter().position(|c| c.0 == back.off) else {
+            continue;
+        };
+        let key = (code[b].1, code[b].2);
+        let mut s = b;
+        while s > 0 && (code[s - 1].1, code[s - 1].2) == key {
+            s -= 1;
+        }
+        let start = code[s].0;
+        if t >= start {
+            continue;
+        }
+        let entry = insns.iter().find(|j| {
+            matches!(j.op.as_str(), "bra" | "lbra")
+                && j.off < t
+                && target(j).is_some_and(|x| x >= start && x <= back.off)
+        });
+        let Some(header) = entry
+            .and_then(|j| code.iter().find(|c| c.0 == j.off))
+            .map(|c| (c.1, c.2))
+        else {
+            continue;
+        };
+        for c in &mut code[s..=b] {
+            (c.1, c.2) = header;
+        }
+    }
 }
 
 /// Where a module-relative table lives right now, in physical RAM.

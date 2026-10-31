@@ -462,3 +462,131 @@ fn c_source_debugging_level1() {
 fn c_source_debugging_level2() {
     debug_hello("artifacts/level2/multicomp09-level2.img", "artifacts/cdebug/level2-hello", true);
 }
+
+/// C variables at source breakpoints: requires the disk and
+/// `python3 scripts/c-debug-build.py examples/cvars.c [--level2 --out ...]`.
+fn debug_cvars(disk: &str, symbols: &str, level2: bool) {
+    let kit = "reference/nitros9-basic09-starter-kit/nitros9-runtime";
+    let mut m = Machine::multicomp_with_ram(
+        &fs::read(format!("{kit}/6809M.bin")).unwrap(),
+        File::open(disk).unwrap(),
+        512 * 1024,
+    )
+    .unwrap();
+    let mut c = Cpu::default();
+    c.reset(&mut m);
+    let mut actions = VecDeque::from([("CamelForth".to_string(), "NITROS9".to_string())]);
+    if !level2 {
+        actions.push_back(("Time ?".into(), "2026/10/31 12:00:00".into()));
+    }
+    actions.push_back(("OS9:".into(), "/dd/SOURCES/cvars".into()));
+    let mut d = Ice::new(c, m, Options { actions, echo_console: false });
+    d.symbols.add_source_dir("examples".into());
+    d.load_symbols(symbols).unwrap();
+    d.command("POST", "/api/bp?sym=cvars.c:45", b"");
+    d.command("POST", "/api/bp?sym=cvars.c:70", b"");
+    let run = |d: &mut Ice| {
+        ok(d, "/api/run");
+        for _ in 0..400 {
+            d.run_steps(1_000_000);
+            if !d.running {
+                break;
+            }
+        }
+    };
+    let var = |json: &str, name: &str| -> String {
+        let j = rs6809::ice::json::Json::parse(json).unwrap();
+        let all = j.get("locals").arr().iter().chain(j.get("globals").arr());
+        let v = all.into_iter().find(|v| v.get("name").str() == Some(name));
+        v.unwrap_or_else(|| panic!("{name}: {json}")).get("value").str().unwrap().to_string()
+    };
+    let at = |json: &str, name: &str| -> String {
+        let j = rs6809::ice::json::Json::parse(json).unwrap();
+        let v = j.get("locals").arr().iter().find(|v| v.get("name").str() == Some(name)).cloned();
+        v.unwrap().get("at").str().unwrap().to_string()
+    };
+    run(&mut d);
+    // The loop's increment and test belong to the `for` line: line 45 is hit once.
+    let (_, v) = d.command("GET", "/api/vars", b"");
+    assert!(v.contains(r#""line":"cvars.c:45""#), "{v}");
+    for (name, value) in [
+        ("n", "2 ($0002)"),
+        ("c1", "65 'A'"),
+        ("i", "2 ($0002)"),
+        ("l", "287454020 ($11223344)"),
+        ("c2", "66 'B'"),
+        ("arr", "{1 ($0001), 2 ($0002), 3 ($0003)}"),
+        ("s", "{tag=84 'T', x=21930 ($55AA), y=258 ($00000102)}"),
+        ("k", "34 ($0022)"),
+        ("gcount", "3 ($0003)"),
+        ("gflag", "103 'g'"),
+        ("gbig", "70000 ($00011170)"),
+        ("scount", "5 ($0005)"),
+    ] {
+        assert_eq!(var(&v, name), value, "{name}");
+    }
+    assert!(var(&v, "gname").ends_with("\"cvars\""), "{v}");
+    // `inner` is only in scope inside the loop body.
+    assert!(!v.contains(r#""name":"inner""#), "{v}");
+    // The caller's frame: main's array and static.
+    let (_, v1) = d.command("GET", "/api/vars?frame=1", b"");
+    assert_eq!(var(&v1, "v"), "{7 ($0007), 9 ($0009)}");
+    assert_eq!(var(&v1, "calls"), "1 ($0001)");
+    assert_eq!(var(&v, "p"), at(&v1, "v"), "p points to main's v");
+
+    run(&mut d);
+    let (_, v) = d.command("GET", "/api/vars", b"");
+    assert!(v.contains(r#""line":"cvars.c:70""#), "{v}");
+    for (name, value) in [("n", "1 ($0001)"), ("m", "2 ($0002)"), ("a", "3 ($0003)"), ("u", "40000 ($9C40)"), ("sh", "-3 ($FFFD)"), ("buf", "\"ok\""), ("y1", "3 ($00000003)")] {
+        assert_eq!(var(&v, name), value, "{name}");
+    }
+    assert!(var(&v, "q").ends_with("\"ok\""));
+    // Expressions through pointers and members.
+    let (_, t, p) = d.eval_var(0, "nd.next->val").unwrap();
+    assert_eq!(d.with_ctx(0, |c| c.format(&t, p)).unwrap(), "99 ($0063)");
+    let (_, t, p) = d.eval_var(0, "buf[1]").unwrap();
+    assert_eq!(d.with_ctx(0, |c| c.format(&t, p)).unwrap(), "107 'k'");
+
+    // The same through DAP: scopes, expanding a struct, evaluate, setVariable.
+    use rs6809::ice::json::Json;
+    let (tx, rx) = std::sync::mpsc::channel::<String>();
+    let mut seq = 0;
+    let mut dap = |d: &mut Ice, command: &str, args: &str| -> Json {
+        seq += 1;
+        let msg = Json::parse(&format!(r#"{{"seq":{seq},"type":"request","command":"{command}","arguments":{args}}}"#)).unwrap();
+        d.dap_message(1, &msg, tx.clone());
+        loop {
+            let m = Json::parse(&rx.recv().unwrap()).unwrap();
+            if m.get("type").str() == Some("response") {
+                assert_eq!(m.get("success").bool(), Some(true), "{command}: {m}");
+                return m.get("body").clone();
+            }
+        }
+    };
+    let scopes = dap(&mut d, "scopes", r#"{"frameId":0}"#);
+    let locals = scopes.get("scopes").arr().iter().find(|s| s.get("name").str() == Some("ローカル")).unwrap().get("variablesReference").clone();
+    let vars = dap(&mut d, "variables", &format!(r#"{{"variablesReference":{locals}}}"#));
+    let nd = vars.get("variables").arr().iter().find(|v| v.get("name").str() == Some("nd")).unwrap().clone();
+    assert_eq!(nd.get("type").str(), Some("struct node"));
+    let kids = dap(&mut d, "variables", &format!(r#"{{"variablesReference":{}}}"#, nd.get("variablesReference")));
+    let next = kids.get("variables").arr().iter().find(|v| v.get("name").str() == Some("next")).unwrap().clone();
+    assert_eq!(next.get("type").str(), Some("struct node *"));
+    let e = dap(&mut d, "evaluate", r#"{"expression":"nd.next->val","frameId":0,"context":"hover"}"#);
+    assert_eq!(e.get("result").str(), Some("99 ($0063)"));
+    let set = dap(&mut d, "setVariable", &format!(r#"{{"variablesReference":{locals},"name":"m","value":"5"}}"#));
+    assert_eq!(set.get("value").str(), Some("5 ($0005)"));
+    let (_, v) = d.command("GET", "/api/vars", b"");
+    assert_eq!(var(&v, "m"), "5 ($0005)");
+}
+
+#[test]
+#[ignore]
+fn c_variables_level1() {
+    debug_cvars("artifacts/ccompiler/multicomp09-c.img", "artifacts/cdebug/cvars", false);
+}
+
+#[test]
+#[ignore]
+fn c_variables_level2() {
+    debug_cvars("artifacts/level2/multicomp09-level2.img", "artifacts/cdebug/level2-cvars", true);
+}

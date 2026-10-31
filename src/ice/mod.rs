@@ -2,10 +2,14 @@
 //!
 //! The emulator thread owns the CPU and machine. The HTTP threads forward API
 //! requests over a channel, so inspection always sees a consistent state.
+pub mod cdecl;
 pub mod dap;
+pub mod debuginfo;
 pub mod disasm;
+pub mod frames;
 pub mod http;
 pub mod json;
+pub mod microware;
 pub mod os9;
 pub mod symbols;
 mod tables;
@@ -288,6 +292,8 @@ pub struct Ice {
     /// Bumped whenever the effective breakpoints change.
     pub bp_version: u64,
     dap: dap::Hub,
+    /// DAP variable tree nodes, valid while stopped.
+    var_refs: Vec<frames::VarRef>,
 }
 
 impl Ice {
@@ -328,6 +334,7 @@ impl Ice {
             phys_count: 0,
             bp_version: 0,
             dap: dap::Hub::default(),
+            var_refs: Vec::new(),
         }
     }
     pub fn set_telnet(&mut self, server: TelnetServer) {
@@ -454,24 +461,7 @@ impl Ice {
     }
     /// Return addresses on the stack, innermost first: (stack address, value).
     pub fn call_chain(&self, max: usize) -> Vec<(u16, u16)> {
-        let m = &self.machine;
-        let labelled = !self.symbols.tables.is_empty();
-        let mut out = Vec::new();
-        let s = self.cpu.s;
-        for i in 0..512u16 {
-            if out.len() >= max {
-                break;
-            }
-            let at = s.wrapping_add(i);
-            if at < s {
-                break;
-            }
-            let w = m.peek16(at);
-            if self.is_return_address(w) && (!labelled || self.symbols.locate(m, w).is_some()) {
-                out.push((at, w));
-            }
-        }
-        out
+        self.call_chain_from(self.cpu.s, max)
     }
     pub fn view(&self) -> Option<View<'_>> {
         self.level.map(|level| View::new(&self.machine, level))
@@ -699,6 +689,7 @@ impl Ice {
         self.running = true;
         self.stop = None;
         self.skip_checks = true;
+        self.var_refs.clear();
         self.refresh_symbols();
     }
     fn halt(&mut self, s: Stop) {
@@ -1051,6 +1042,11 @@ impl Ice {
                     Some(a) => http::Response::json(format!("{{\"addr\":{a}}}")),
                     None => bad("expr"),
                 }
+            }
+            "/api/vars" => {
+                self.refresh_symbols();
+                let f = p("frame").and_then(parse_num).unwrap_or(0) as usize;
+                http::Response::json(self.vars_json(f))
             }
             "/api/stack" => {
                 self.refresh_symbols();

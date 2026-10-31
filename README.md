@@ -328,7 +328,8 @@ sh examples/nitros9-level2.sh --ice   # Level 2（ディスク構築後）
   モジュールディレクトリ、メモリマップを表示し、「F$Forkの呼び出しで停止」「エラー復帰で停止」などをICEのブレーク条件として設定できます。
 - **シンボルとソース行**：LWASM・Microware RMAのリストとリンクマップ（`--symbols`）から逆アセンブルとスタックにラベルを付け、
   Cやアセンブリのソース行でブレーク・ステップできます。OS-9のモジュールはロードされた位置へ自動で配置します（Level 1／2）。
-  Cは `python3 scripts/c-debug-build.py examples/hello.c` でゲスト上で行情報付きにコンパイルします。
+  Cは `python3 scripts/c-debug-build.py examples/hello.c` でゲスト上で行情報付きにコンパイルし、
+  引数・ローカル変数・大域変数を型に応じて表示・変更できます（構造体・配列・ポインタの展開、`p->next->val` などの式）。
 - **エディタ連携**：`--dap` でDebug Adapter Protocolを提供し、VS Code（`editors/vscode`）などから同じICEを操作できます。
 
 詳細・仕組み・APIは [ICEとOS-9モニタ](docs/ice.md) を参照してください。

@@ -2,7 +2,9 @@
 //! as the browser UI. Each TCP connection is one session; requests are
 //! handled on the emulator thread like HTTP requests, so both views always
 //! agree. Messages use `Content-Length` framing and JSON bodies.
+use super::debuginfo::{Place, encode};
 use super::disasm::disassemble;
+use super::frames::VarRef;
 use super::json::{Json, base64, obj, unbase64};
 use super::os9::{self, Regs};
 use super::symbols::Target;
@@ -17,6 +19,8 @@ const THREAD: i64 = 1;
 const REGISTERS: i64 = 1;
 const STACK: i64 = 2;
 const PROCESS: i64 = 3;
+/// Variable tree nodes are numbered from here.
+const DYNAMIC: i64 = 1000;
 
 struct Session {
     id: u32,
@@ -440,9 +444,7 @@ impl Ice {
             "stackTrace" => {
                 self.refresh_symbols();
                 let mut frames = Vec::new();
-                let pcs: Vec<u16> = std::iter::once(self.cpu.pc)
-                    .chain(self.call_chain(31).into_iter().map(|(_, w)| w))
-                    .collect();
+                let pcs: Vec<u16> = self.frames(32).iter().map(|f| f.pc).collect();
                 for (i, &pc) in pcs.iter().enumerate() {
                     // A return address belongs to the line of its call.
                     let at = if i == 0 { pc } else { pc.wrapping_sub(1) };
@@ -481,31 +483,89 @@ impl Ice {
                     ("totalFrames", total.into()),
                 ]))
             }
-            "scopes" => Ok(obj([(
-                "scopes",
-                Json::Arr(vec![
-                    obj([
-                        ("name", "レジスタ".into()),
-                        ("variablesReference", REGISTERS.into()),
+            "scopes" => {
+                let frame = args.get("frameId").int().unwrap_or(0).max(0) as usize;
+                let mut scopes = Vec::new();
+                let frames = self.frames(frame + 1);
+                if let Some(f) = frames.get(frame)
+                    && let Some((ti, _)) = f.func
+                {
+                    let r = self.var_ref(VarRef::Locals(frame));
+                    scopes.push(obj([
+                        ("name", "ローカル".into()),
+                        ("variablesReference", r.into()),
                         ("expensive", false.into()),
-                        ("presentationHint", "registers".into()),
-                    ]),
-                    obj([
-                        ("name", "スタック".into()),
-                        ("variablesReference", STACK.into()),
+                        ("presentationHint", "locals".into()),
+                    ]));
+                    let g = self.var_ref(VarRef::Globals(ti));
+                    scopes.push(obj([
+                        ("name", "大域".into()),
+                        ("variablesReference", g.into()),
                         ("expensive", false.into()),
-                    ]),
-                    obj([
-                        ("name", "OS-9".into()),
-                        ("variablesReference", PROCESS.into()),
-                        ("expensive", false.into()),
-                    ]),
-                ]),
-            )])),
-            "variables" => Ok(obj([(
-                "variables",
-                Json::Arr(self.dap_variables(args.get("variablesReference").int().unwrap_or(0))),
-            )])),
+                    ]));
+                }
+                let Json::Obj(mut fixed) = self.dap_fixed_scopes() else {
+                    unreachable!()
+                };
+                let mut list = scopes;
+                if let Some(Json::Arr(v)) = fixed.remove("scopes") {
+                    list.extend(v);
+                }
+                Ok(obj([("scopes", Json::Arr(list))]))
+            }
+            "variables" => {
+                let r = args.get("variablesReference").int().unwrap_or(0);
+                let vars = if r >= DYNAMIC {
+                    self.dap_var_children(r)
+                } else {
+                    self.dap_variables(r)
+                };
+                Ok(obj([("variables", Json::Arr(vars))]))
+            }
+            "setVariable"
+                if args
+                    .get("variablesReference")
+                    .int()
+                    .is_some_and(|r| r >= DYNAMIC) =>
+            {
+                let r = args.get("variablesReference").int().unwrap_or(0);
+                let name = args.get("name").str().unwrap_or("").to_string();
+                let value = args.get("value").str().unwrap_or("").to_string();
+                let child = self
+                    .dap_var_nodes(r)
+                    .into_iter()
+                    .find(|(n, ..)| *n == name)
+                    .ok_or("変数")?;
+                let (_, table, ty, place) = child;
+                let place = place.map_err(|e| e.to_string())?;
+                let info = self.symbols.tables[table].debug.as_ref().ok_or("変数")?;
+                let bytes = encode(info, &ty, &value)
+                    .ok_or("整数・文字・ポインタの値を指定してください")?;
+                match place {
+                    Place::Mem(a) => {
+                        for (i, b) in bytes.iter().enumerate() {
+                            self.machine.poke(a.wrapping_add(i as u16), *b);
+                        }
+                    }
+                    Place::Value(_) => {
+                        // A register variable of the current frame.
+                        let v = bytes.iter().fold(0u16, |acc, b| acc << 8 | u16::from(*b));
+                        self.cpu.u = v;
+                    }
+                }
+                let shown = self
+                    .with_ctx(table, |c| {
+                        c.format(
+                            &ty,
+                            match place {
+                                Place::Value(_) => Place::Value(self.cpu.u),
+                                p => p,
+                            },
+                        )
+                    })
+                    .unwrap_or_default();
+                Ok(obj([("value", shown.into())]))
+            }
             "setVariable" => {
                 if args.get("variablesReference").int() != Some(REGISTERS) {
                     return Err("レジスタのみ変更できます".into());
@@ -566,10 +626,49 @@ impl Ice {
                 }
                 Ok(Json::Null)
             }
-            "evaluate" => self.dap_evaluate(
-                args.get("expression").str().unwrap_or(""),
-                args.get("context").str().unwrap_or(""),
-            ),
+            "evaluate" => {
+                let frame = args.get("frameId").int().unwrap_or(0).max(0) as usize;
+                let expr = args
+                    .get("expression")
+                    .str()
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
+                self.refresh_symbols();
+                // C variables and expressions first (`n`, `s.x`, `p->next`, `arr[1]`).
+                if !expr.starts_with('>')
+                    && let Some((table, ty, place)) = self.eval_var(frame, &expr)
+                {
+                    let value = self
+                        .with_ctx(table, |c| c.format(&ty, place))
+                        .unwrap_or_default();
+                    let expandable = self.with_ctx(table, |c| c.expandable(&ty)).unwrap_or(false);
+                    let r = if expandable {
+                        self.var_ref(VarRef::Node {
+                            table,
+                            ty: ty.clone(),
+                            place,
+                        })
+                    } else {
+                        0
+                    };
+                    let tname = self.symbols.tables[table]
+                        .debug
+                        .as_ref()
+                        .map(|d| d.type_name(&ty));
+                    let mem = match place {
+                        Place::Mem(a) => hex_ref(a),
+                        Place::Value(_) => Json::Null,
+                    };
+                    return Ok(obj([
+                        ("result", value.into()),
+                        ("type", tname.into()),
+                        ("variablesReference", r.into()),
+                        ("memoryReference", mem),
+                    ]));
+                }
+                self.dap_evaluate(&expr, args.get("context").str().unwrap_or(""))
+            }
             "disassemble" => {
                 self.refresh_symbols();
                 let base = parse_ref(args.get("memoryReference")).ok_or("memoryReference")?;
@@ -684,6 +783,131 @@ impl Ice {
             }
             _ => Err(format!("unsupported request: {command}")),
         }
+    }
+
+    fn var_ref(&mut self, r: VarRef) -> i64 {
+        self.var_refs.push(r);
+        DYNAMIC + self.var_refs.len() as i64 - 1
+    }
+
+    fn dap_fixed_scopes(&self) -> Json {
+        obj([(
+            "scopes",
+            Json::Arr(vec![
+                obj([
+                    ("name", "レジスタ".into()),
+                    ("variablesReference", REGISTERS.into()),
+                    ("expensive", false.into()),
+                    ("presentationHint", "registers".into()),
+                ]),
+                obj([
+                    ("name", "スタック".into()),
+                    ("variablesReference", STACK.into()),
+                    ("expensive", false.into()),
+                ]),
+                obj([
+                    ("name", "OS-9".into()),
+                    ("variablesReference", PROCESS.into()),
+                    ("expensive", false.into()),
+                ]),
+            ]),
+        )])
+    }
+
+    /// (name, table, type, place) for the members of a variables node.
+    #[allow(clippy::type_complexity)]
+    fn dap_var_nodes(
+        &self,
+        r: i64,
+    ) -> Vec<(
+        String,
+        usize,
+        super::debuginfo::Type,
+        Result<Place, &'static str>,
+    )> {
+        let Some(node) = self.var_refs.get((r - DYNAMIC) as usize).cloned() else {
+            return Vec::new();
+        };
+        match node {
+            VarRef::Locals(frame) => {
+                let frames = self.frames(frame + 1);
+                let Some(f) = frames.get(frame) else {
+                    return Vec::new();
+                };
+                let Some((ti, _)) = f.func else {
+                    return Vec::new();
+                };
+                self.frame_vars(frame, f)
+                    .into_iter()
+                    .map(|v| (v.name.clone(), ti, v.ty.clone(), self.place_of(f, v)))
+                    .collect()
+            }
+            VarRef::Globals(ti) => {
+                let dummy = super::frames::Frame {
+                    pc: 0,
+                    s: 0,
+                    cfa: None,
+                    u: 0,
+                    func: None,
+                };
+                let Some(d) = self.symbols.tables.get(ti).and_then(|t| t.debug.as_ref()) else {
+                    return Vec::new();
+                };
+                d.globals
+                    .iter()
+                    .filter(|g| !matches!(g.loc, super::debuginfo::Loc::Unknown(_)))
+                    .map(|g| (g.name.clone(), ti, g.ty.clone(), self.place_of(&dummy, g)))
+                    .collect()
+            }
+            VarRef::Node { table, ty, place } => self
+                .with_ctx(table, |c| c.children(&ty, place))
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(n, t, p)| (n, table, t, Ok(p)))
+                .collect(),
+        }
+    }
+
+    fn dap_var_children(&mut self, r: i64) -> Vec<Json> {
+        let mut out = Vec::new();
+        for (name, table, ty, place) in self.dap_var_nodes(r) {
+            let tname = self.symbols.tables[table]
+                .debug
+                .as_ref()
+                .map(|d| d.type_name(&ty));
+            let (value, child, mem) = match place {
+                Ok(p) => {
+                    let value = self
+                        .with_ctx(table, |c| c.format(&ty, p))
+                        .unwrap_or_default();
+                    let expandable = self.with_ctx(table, |c| c.expandable(&ty)).unwrap_or(false);
+                    let child = if expandable {
+                        self.var_ref(VarRef::Node {
+                            table,
+                            ty: ty.clone(),
+                            place: p,
+                        })
+                    } else {
+                        0
+                    };
+                    let mem = match p {
+                        Place::Mem(a) => hex_ref(a),
+                        Place::Value(_) => Json::Null,
+                    };
+                    (value, child, mem)
+                }
+                Err(why) => (format!("（{why}）"), 0, Json::Null),
+            };
+            out.push(obj([
+                ("name", name.into()),
+                ("value", value.into()),
+                ("type", tname.into()),
+                ("variablesReference", child.into()),
+                ("memoryReference", mem),
+                ("evaluateName", Json::Null),
+            ]));
+        }
+        out
     }
 
     fn dap_bp(&self, id: u32, requested: Option<u32>) -> Json {
