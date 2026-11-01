@@ -1,8 +1,20 @@
 # rs6809
 
-Pure RustのMotorola 6809エミュレータです。外部crate・Cコード・FFIを使わず、標準ライブラリのみで動作します。
-標準構成は64KB RAMとACIA相当のシリアルコンソールです。Multicomp互換モードは既定512KB・最大1MBのRAMを備え、NitrOS-9 Level 1 / BASIC09とLevel 2を起動できます。
-Level 2では1つのOSを共有してTelnetから複数ユーザー・複数プロセスを同時に動かせます。
+Pure RustのMotorola 6809・68000エミュレータです。外部crate・Cコード・FFIを使わず、標準ライブラリだけで動きます。
+
+- **6809**：Multicomp互換機でNitrOS-9 Level 1 / BASIC09とLevel 2を起動します。Level 2ではTelnetから複数ユーザーが同時に使え、ゲスト上のCコンパイラのデモもあります。
+- **68000**：全命令・例外・割り込みを実装し、公開の命令テスト（SingleStepTests、約100万件）で検証したコアです。
+  Tiny68K互換機でCP/M-68K 1.3（Alcyon Cでのコンパイルを含む）と、Unix系のFUZIX 0.5（2端末）を動かします。
+- **ICE**：ブラウザのデバッガとVS Code（DAP）から、ブレーク・ステップ・ソース行・Cの変数を扱えます。
+  OSモニタが、NitrOS-9・CP/M-68K・FUZIXのシステムコールを呼び出しから復帰まで追い、プロセス表・スケジューラ・メモリを日本語の説明付きで見せます。
+  リセットと、機械の状態の保存・読み込みもできます。
+
+| 説明 | 内容 |
+|---|---|
+| [ICEとOSモニタ](docs/ice.md) | デバッガ、OSの差し替え口、HTTP API、DAP |
+| [68000 CPUコア](docs/m68k.md) | 68000の実装と検証、機械の構成 |
+| [CP/M-68K](docs/cpm68k.md)・[FUZIX/68000](docs/fuzix68k.md) | BIOS、ディスク、BDOSモニタ／FUZIXのビルドとプロセスモニタ |
+| [fork・exec・waitとOS-9のF$Fork・F$Wait](docs/fork-compare.md) | 同じICEで取った記録で2つのOSを比べた資料 |
 
 ## 簡単セットアップ
 
@@ -30,14 +42,6 @@ git clone https://github.com/jl1nie/rs6809.git && cd rs6809
 各イメージの中身・ライセンス・ソースの入手先はReleaseの `NOTICE.md`（`release/NOTICE.md`）にあります。
 FUZIXの書き込みを残す `./run.sh fuzix --persist`（終わる前に `telinit 6`）、2つ目の端末の `./run.sh fuzix --tty2`（`telnet 127.0.0.1 6812`）も使えます。
 
-Releaseのイメージを作り直すとき（開発者向け）：
-
-```sh
-sh scripts/build-m68k-elf.sh && sh scripts/build-fuzix-tiny68k.sh && python3 scripts/fetch-cpm68k.py
-sh scripts/make-release.sh   # artifacts/release と release/images.sha256 を作る（images.sha256 はコミットする）
-gh release create images-v1 artifacts/release/* --title "rs6809 images v1" --notes-file release/NOTICE.md
-```
-
 ## ビルドと最小サンプル
 
 Rust 1.89以降（edition 2024対応）のツールチェーンを使用します。
@@ -50,7 +54,9 @@ cargo test
 
 `hello`は6809の機械語を実行し、メモリマップされたACIA経由で `Hello, 6809!` を出力します。
 
-## NitrOS-9 / BASIC09
+## 6809とNitrOS-9
+
+### NitrOS-9 / BASIC09
 
 [kyo-ta04/nitros9-basic09-starter-kit](https://github.com/kyo-ta04/nitros9-basic09-starter-kit) の起動ROMとSDイメージを利用します。
 検証したコミットは `bf60370cfa180636cde3ee305d089d94872de82a` です。
@@ -92,7 +98,7 @@ cargo test --release --test nitros9 -- --ignored --nocapture
 このテストはROM→NitrOS-9→シェル→BASIC09→編集モード→`RUN test`→`42`→`B:` の全経路を確認します。
 参照キットが必要なので通常の `cargo test` では無視されます。
 
-## NitrOS-9 Level 2（512KB／1MB）
+### NitrOS-9 Level 2（512KB／1MB）
 
 上記と同じ参照キット（コミット `bf60370cfa180636cde3ee305d089d94872de82a`）から、
 Multicomp用Level 2カーネルと専用ディスクを構築できます。
@@ -145,7 +151,7 @@ Level 2カーネルは起動時に512KBか1MBかを検出するため、同じ�
 Level 2には512KB以上が必要です。起動スクリプトにも `--ram-kb 1024` を追加できます（例：`sh examples/nitros9-telnet.sh --ram-kb 1024`）。
 CoCo 3専用のROM・ディスク・GIMEには対応しません。
 
-## Telnet・マルチユーザー
+### Telnet・マルチユーザー
 
 OS-9 Level 2の端末設定に合わせて同時1〜4セッションを利用できます。
 各接続を空きACIAへ割り当て、OS-9の `login` で認証します。プロセスとSIGHUP処理もOS-9が管理します。
@@ -186,7 +192,7 @@ python3 scripts/test-telnet.py --acia-count 4
 テスト用ディスクは一時ディレクトリに作成します。
 設定・切断時の動作・保存先・検証手順は [Telnet接続の説明](docs/telnet.md) にまとめています。
 
-### 複数ユーザーで同時にマンデルブロー
+#### 複数ユーザーで同時にマンデルブロー
 
 複数のTelnetユーザーが1台の6809を共有し、それぞれのホームで `mandel.c` を `cc1` でコンパイルして実行します。
 参照キットと「Cコンパイラ」の必要ツール、`cargo build --release` を事前に済ませてください。
@@ -216,7 +222,7 @@ telnet 127.0.0.1 ポート番号
 アカウントは `artifacts/level2-mandel/accounts.txt` にあります。
 エミュレータの標準出力には起動ログだけを表示するため、同じ端末でtelnetを使っても出力は混ざりません。
 
-## Cコンパイラ
+### Cコンパイラ
 
 Microware Cの各段階・ヘッダ・標準ライブラリと、64KB向けの小さな `cc` ドライバを追加したディスクを使用します。
 元のBASIC09用イメージは保持します。C開発用イメージの作成：
@@ -272,7 +278,7 @@ Cのコンパイル、再コンパイル、失敗後のシェル復帰のテス�
 cargo test --release --test ccompiler -- --ignored
 ```
 
-## マンデルブロー集合のCデモ
+### マンデルブロー集合のCデモ
 
 リポジトリのルートで、エミュレータのコマンド作成、C開発用ディスク作成、
 ゲスト内でのCベンチマークのコンパイル・実行を順に行います。
@@ -346,94 +352,7 @@ python3 scripts/benchmark-emulator.py --workload basic09 --runs 7 --output artif
 以前の76×25・固定小数点版は `benchmarks/mandel_fixed.c` として保存しました。
 エミュレータの性能比較は凍結した旧版のディスクで続け、現在のデモとは混ぜません。
 
-## 68000 CPUコア
-
-`src/m68k/` に、68000の全命令・例外・割り込みを命令単位のサイクル数で実行するコアと逆アセンブラがあります。
-`--cpu 68000` で、RAMとコンソールだけの素の機械か、Tiny68K互換の機械（`--machine tiny68k`：68681 DUART・IDE）でプログラムを動かし、ICE（ブラウザ・DAP）で調べられます。
-SingleStepTests/680x0の約100万件（アドレスエラーのフレームとサイクル数を含む）で検証しています。詳細は [68000 CPUコア](docs/m68k.md) を参照してください。
-
-```sh
-python3 scripts/fetch-68000-tests.py
-cargo test --release --test m68k_sst -- --ignored --nocapture
-rs6809 --cpu 68000 --bin prog.s68 --ice --ice-halt   # http://127.0.0.1:6809/
-```
-
-## CP/M-68KとBDOSモニタ
-
-CP/M-68K 1.3を、Tiny68K互換の機械と自作のBIOS（`examples/cpm68k/bios.s`）で動かします。
-ICEのOSタブでBDOS・BIOSの呼び出し（名前・引数・結果）、読み込んだプログラム、メモリ領域を観察し、名前で呼び出し・復帰に停止できます。
-Alcyon CでCのコンパイルと実行もできます。詳細は [CP/M-68K](docs/cpm68k.md) を参照してください。
-
-```sh
-sh examples/cpm68k.sh            # 初回は配布物を取得してディスクを作る。A> が出る
-sh examples/cpm68k.sh --ice      # ICE: http://127.0.0.1:6809/
-```
-
-## FUZIX/68000とプロセスモニタ
-
-小さなUnix系OSのFUZIX 0.5（Tiny68K版）を、モニタROMなしでディスクから起動し、シェルでコマンドを動かします。
-ICEのOSタブで、システムコール（`_fork`・`execve`・`waitpid` など、名前・引数・結果付き）、プロセス表、プロセス切り替えのタイムラインを観察できます。
-詳細は [FUZIX/68000](docs/fuzix68k.md)、OS-9との比較は [fork・exec・waitとOS-9のF$Fork・F$Wait](docs/fork-compare.md) を参照してください。
-
-```sh
-sh scripts/build-m68k-elf.sh          # 初回だけ。m68k-elfのbinutilsとgcc
-sh scripts/build-fuzix-tiny68k.sh     # FUZIXのビルドとディスク
-sh examples/fuzix68k.sh --ice         # http://127.0.0.1:6809/
-sh examples/fuzix68k.sh --tty2        # 2つ目の端末：telnet 127.0.0.1 6812
-```
-
-ICEには、リセット（「↺ リセット」・DAPの `restart`）と、68000の機械の状態の保存・読み込み（「保存」「読込」・`--load-state`）があります。
-
-## ICE（GUIデバッガ）とOS-9モニタ
-
-ブラウザから操作するインサーキット・エミュレータ相当のデバッガです。外部crateを使わず、エミュレータ自身がlocalhostでHTTPを提供します。
-
-```sh
-sh examples/nitros9-ice.sh            # NitrOS-9 Level 1 → http://127.0.0.1:6809/
-sh examples/nitros9-level2.sh --ice   # Level 2（ディスク構築後）
-```
-
-- **デバッガ**：実行・停止・ステップ・ステップオーバー／アウト・その行まで実行、ブレークポイント、ウォッチポイント、
-  逆アセンブル（`OS9 F$Fork` 形式）、メモリ（CPU論理・OS-9システム空間・物理）、レジスタ編集、MMUマップ、実行トレース、速度上限。
-- **OS-9モニタ**：すべての `OS9` システムコールを呼び出しから復帰まで追跡し、引数・結果・所要サイクルを表示します。
-  各プリミティブの日本語の説明、カーネル内部で発生した呼び出しの木、スケジューラのキューとタイムライン、プロセス表、
-  モジュールディレクトリ、メモリマップを表示し、「F$Forkの呼び出しで停止」「エラー復帰で停止」などをICEのブレーク条件として設定できます。
-- **シンボルとソース行**：LWASM・Microware RMAのリストとリンクマップ（`--symbols`）から逆アセンブルとスタックにラベルを付け、
-  Cやアセンブリのソース行でブレーク・ステップできます。OS-9のモジュールはロードされた位置へ自動で配置します（Level 1／2）。
-  Cは `python3 scripts/c-debug-build.py examples/hello.c` でゲスト上で行情報付きにコンパイルし、
-  引数・ローカル変数・大域変数を型に応じて表示・変更できます（構造体・配列・ポインタの展開、`p->next->val` などの式）。
-- **エディタ連携**：`--dap` でDebug Adapter Protocolを提供し、VS Code（`editors/vscode`）などから同じICEを操作できます。
-
-詳細・仕組み・APIは [ICEとOS-9モニタ](docs/ice.md) を参照してください。
-
-## 第0版と性能計測
-
-現状を第0版（v0）としてソース・実行ファイル・入力ハッシュとともに保存しています。
-マンデルブローを7回測定した中央値は1.481785秒（331.2MHz相当）でした。
-最大のホットスポットはメモリ読み取りで、描画後半の約34%です。
-詳細と改善順序は [第0版の性能調査](docs/v0-performance.md)、機械可読の記録は [v0-baseline.json](docs/v0-baseline.json) を参照してください。
-
-```sh
-python3 scripts/benchmark-emulator.py
-```
-
-既存のrelease実行ファイルとC開発用ディスクを使い、ウォームアップ後に7回測定します。
-既定は現在のBASIC09移植版です。
-結果は `artifacts/benchmark/current.json` に保存します。
-過去の測定と比較する場合は `--workload fixed` を指定します。このモードは
-`benchmarks/fixed-inputs.json` に記録した、この作業環境に保存済みの旧固定小数点版の入力が必要です。
-
-## Rust向けの最適化
-
-releaseビルドはopt-level=3、ThinLTO、codegen-units=1です。
-通常のメモリアクセスを小さな関数に分け、I/O処理を別関数へ出しています。
-さらに、MMU使用時のアドレス変換と保護属性を事前計算し、その表を別オブジェクトへ分けました。
-
-固定小数点版を前後交互に7回測定した中央値は0.972秒→0.878秒で、今回の変更により約1.11倍になりました。
-通常RAM・MMU・シリアル出力の別負荷も比較しています。
-最新の調査は [実装パターンの再検証](docs/pattern-validation.md)、前回の段階は [Rust最適化の記録](docs/rust-optimization.md) を参照してください。
-
-## 構成
+### 6809の機械の構成
 
 | 項目 | 標準マシン | NitrOS-9用Multicomp互換モード |
 |---|---|---|
@@ -464,9 +383,130 @@ cargo run --release -- --bin program.bin --load 0x1000 --pc 0x1000 --max-cycles 
 命令エラーとディスク読み込みエラーは実行を失敗として報告します。
 `--until` は出力文字列への到達で成功終了し、到達前にサイクル上限に達すると失敗します。
 
+## 68000とCP/M-68K・FUZIX
+
+### 68000 CPUコア
+
+`src/m68k/` に、68000の全命令・例外・割り込みを命令単位のサイクル数で実行するコアと逆アセンブラがあります。
+`--cpu 68000` で、RAMとコンソールだけの素の機械か、Tiny68K互換の機械（`--machine tiny68k`：68681 DUART・IDE）でプログラムを動かし、ICE（ブラウザ・DAP）で調べられます。
+SingleStepTests/680x0の約100万件（アドレスエラーのフレームとサイクル数を含む）で検証しています。詳細は [68000 CPUコア](docs/m68k.md) を参照してください。
+
+```sh
+python3 scripts/fetch-68000-tests.py
+cargo test --release --test m68k_sst -- --ignored --nocapture
+rs6809 --cpu 68000 --bin prog.s68 --ice --ice-halt   # http://127.0.0.1:6809/
+```
+
+### CP/M-68KとBDOSモニタ
+
+CP/M-68K 1.3を、Tiny68K互換の機械と自作のBIOS（`examples/cpm68k/bios.s`）で動かします。
+ICEのOSタブでBDOS・BIOSの呼び出し（名前・引数・結果）、読み込んだプログラム、メモリ領域を観察し、名前で呼び出し・復帰に停止できます。
+Alcyon CでCのコンパイルと実行もできます。詳細は [CP/M-68K](docs/cpm68k.md) を参照してください。
+
+```sh
+sh examples/cpm68k.sh            # 初回は配布物を取得してディスクを作る。A> が出る
+sh examples/cpm68k.sh --ice      # ICE: http://127.0.0.1:6809/
+```
+
+### FUZIX/68000とプロセスモニタ
+
+小さなUnix系OSのFUZIX 0.5（Tiny68K版）を、モニタROMなしでディスクから起動し、シェルでコマンドを動かします。
+ICEのOSタブで、システムコール（`_fork`・`execve`・`waitpid` など、名前・引数・結果付き）、プロセス表、プロセス切り替えのタイムラインを観察できます。
+詳細は [FUZIX/68000](docs/fuzix68k.md)、OS-9との比較は [fork・exec・waitとOS-9のF$Fork・F$Wait](docs/fork-compare.md) を参照してください。
+
+```sh
+sh scripts/build-m68k-elf.sh          # 初回だけ。m68k-elfのbinutilsとgcc
+sh scripts/build-fuzix-tiny68k.sh     # FUZIXのビルドとディスク
+sh examples/fuzix68k.sh --ice         # http://127.0.0.1:6809/
+sh examples/fuzix68k.sh --tty2        # 2つ目の端末：telnet 127.0.0.1 6812
+```
+
+ICEには、リセット（「↺ リセット」・DAPの `restart`）と、68000の機械の状態の保存・読み込み（「保存」「読込」・`--load-state`）があります。
+
+## ICE（GUIデバッガ）とOSモニタ
+
+ブラウザから操作するインサーキット・エミュレータ相当のデバッガです。外部crateを使わず、エミュレータ自身がlocalhostでHTTPを提供します。
+
+```sh
+sh examples/nitros9-ice.sh            # NitrOS-9 Level 1 → http://127.0.0.1:6809/
+sh examples/nitros9-level2.sh --ice   # Level 2（ディスク構築後）
+./run.sh cpm68k --ice                 # CP/M-68K（BDOSモニタ）
+./run.sh fuzix --ice                  # FUZIX（プロセスモニタ）
+```
+
+- **デバッガ**：実行・停止・ステップ・ステップオーバー／アウト・その行まで実行、ブレークポイント、ウォッチポイント、
+  逆アセンブル（`OS9 F$Fork` 形式）、メモリ（CPU論理・OS-9システム空間・物理）、レジスタ編集、MMUマップ、実行トレース、速度上限。
+- **OS-9モニタ**：すべての `OS9` システムコールを呼び出しから復帰まで追跡し、引数・結果・所要サイクルを表示します。
+  各プリミティブの日本語の説明、カーネル内部で発生した呼び出しの木、スケジューラのキューとタイムライン、プロセス表、
+  モジュールディレクトリ、メモリマップを表示し、「F$Forkの呼び出しで停止」「エラー復帰で停止」などをICEのブレーク条件として設定できます。
+- **シンボルとソース行**：LWASM・Microware RMAのリストとリンクマップ（`--symbols`）から逆アセンブルとスタックにラベルを付け、
+  Cやアセンブリのソース行でブレーク・ステップできます。OS-9のモジュールはロードされた位置へ自動で配置します（Level 1／2）。
+  Cは `python3 scripts/c-debug-build.py examples/hello.c` でゲスト上で行情報付きにコンパイルし、
+  引数・ローカル変数・大域変数を型に応じて表示・変更できます（構造体・配列・ポインタの展開、`p->next->val` などの式）。
+- **CP/M-68K・FUZIXのモニタ**：BDOS・BIOSの呼び出し、FUZIXの `fork`・`execve`・`waitpid` などのシステムコール、プロセス表、
+  タイムライン、メモリ領域を同じ画面で表示します（[CP/M-68K](docs/cpm68k.md)・[FUZIX/68000](docs/fuzix68k.md)）。
+- **リセットと状態**：「↺ リセット」で起動時の状態に戻し、68000では「保存」「読込」・`--load-state` で途中の状態から再開できます。
+- **エディタ連携**：`--dap` でDebug Adapter Protocolを提供し、VS Code（`editors/vscode`）などから同じICEを操作できます。
+
+詳細・仕組み・APIは [ICEとOS-9モニタ](docs/ice.md) を参照してください。
+
+## 速さ
+
+CPUを使い切る処理で、1秒あたりに進むゲストのサイクル数を測りました（AMD Ryzen 9 9900X、WSL2、rustc 1.99.1。2026年11月）。
+
+| CPU | 処理 | 1命令の平均 | ICEなし | ICEの中 | 実機との比（ICEなし） |
+|---|---|---|---|---|---|
+| 6809 | NitrOS-9 Level 1上のCのマンデルブローの描画（`scripts/benchmark-emulator.py`、3回の中央値） | 5.9サイクル | 約391MHz相当（約6,600万命令／秒） | 約175MHz相当（約3,000万命令／秒） | 実機を1MHzとして約390倍 |
+| 68000 | CP/M-68K上でAlcyon Cの `hello.c` をコンパイル・リンク・実行（3億7,550万サイクル、3回） | 13.7サイクル | 約750MHz相当（約5,500万命令／秒） | 約300MHz相当（約2,200万命令／秒） | Tiny68Kを10MHzとして約75倍 |
+
+- 「MHz相当」はゲストのクロック数です。68000はメモリの1回の読み書きに4クロック、命令は最短4クロックかかり、1命令あたりのクロックが6809（1回の読み書きが1クロック）よりずっと多いため、大きな数字になります。
+  命令の数で比べると、実効アドレスや32ビットの演算が重い68000のほうが2割ほど遅くなります。1命令の平均は、ICEの `/api/step?n=` で実行中に測りました。
+- ICEの中は、命令ごとにブレークポイントの確認、トレースの記録、システムコールの追跡をするぶん遅くなります。
+- 68000がゲストの割り込み待ち（`STOP`）にいる間は命令を回さず、時間を実時間で進めます（ゲストが休んでいる間、ホストのCPUはほとんど使いません）。上の値はCPUを使い切っているときのものです。
+- 6809の性能の調べ方と最適化の経緯は、下の「第0版と性能計測」「Rust向けの最適化」にあります。
+
+## 開発者向け
+
+### Releaseのイメージの作り直し
+
+```sh
+sh scripts/build-m68k-elf.sh && sh scripts/build-fuzix-tiny68k.sh && python3 scripts/fetch-cpm68k.py
+sh scripts/make-release.sh   # artifacts/release と release/images.sha256 を作る（images.sha256 はコミットする）
+gh release create images-v1 artifacts/release/* --title "rs6809 images v1" --notes-file release/NOTICE.md
+```
+
+### 第0版と性能計測
+
+現状を第0版（v0）としてソース・実行ファイル・入力ハッシュとともに保存しています。
+マンデルブローを7回測定した中央値は1.481785秒（331.2MHz相当）でした。
+最大のホットスポットはメモリ読み取りで、描画後半の約34%です。
+詳細と改善順序は [第0版の性能調査](docs/v0-performance.md)、機械可読の記録は [v0-baseline.json](docs/v0-baseline.json) を参照してください。
+
+```sh
+python3 scripts/benchmark-emulator.py
+```
+
+既存のrelease実行ファイルとC開発用ディスクを使い、ウォームアップ後に7回測定します。
+既定は現在のBASIC09移植版です。
+結果は `artifacts/benchmark/current.json` に保存します。
+過去の測定と比較する場合は `--workload fixed` を指定します。このモードは
+`benchmarks/fixed-inputs.json` に記録した、この作業環境に保存済みの旧固定小数点版の入力が必要です。
+
+### Rust向けの最適化
+
+releaseビルドはopt-level=3、ThinLTO、codegen-units=1です。
+通常のメモリアクセスを小さな関数に分け、I/O処理を別関数へ出しています。
+さらに、MMU使用時のアドレス変換と保護属性を事前計算し、その表を別オブジェクトへ分けました。
+
+固定小数点版を前後交互に7回測定した中央値は0.972秒→0.878秒で、今回の変更により約1.11倍になりました。
+通常RAM・MMU・シリアル出力の別負荷も比較しています。
+最新の調査は [実装パターンの再検証](docs/pattern-validation.md)、前回の段階は [Rust最適化の記録](docs/rust-optimization.md) を参照してください。
+
 ## ライセンスと参照
 
 rs6809のコードはMITライセンスです。`reference/` は本体の配布対象外で、取得したキット、ROM、OS、BASIC09にはそれぞれの権利・ライセンスが適用されます。
+Releaseで配布するCP/M-68K・FUZIXのイメージの中身・ライセンス・ソースの入手先は [release/NOTICE.md](release/NOTICE.md) にあります。
 
 CPU仕様：[Motorola MC6809/MC6809E Programming Manual](https://www.maddes.net/m6809pm/index.htm)。
 Multicompのレジスタ仕様と起動手順は参照キットの `exec09/miscsbc.c`、`nitros9-mc09-build/defs/mc09.d`、`nitros9-runtime/` を確認しています。
+68000の仕様：MC68000 User's Manual（命令の時間は8章）。命令テスト：[SingleStepTests/680x0](https://github.com/SingleStepTests/680x0)。
