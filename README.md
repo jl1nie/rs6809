@@ -33,7 +33,7 @@ git clone https://github.com/jl1nie/rs6809.git && cd rs6809
 
 | 段階 | 内容 |
 |---|---|
-| エミュレータ | Rustがあれば `cargo build --release`。なければLinux x86-64用の実行ファイルを [Releases](https://github.com/jl1nie/rs6809/releases) から取得 |
+| エミュレータ | Rust 1.89以降があれば `cargo build --release`。なければ（または古ければ）実行ファイルを [Releases](https://github.com/jl1nie/rs6809/releases) から取得：Linux x86-64（静的リンクで、ディストリビューションを問わない）、macOS（Apple Silicon）。システムには何もインストールしない |
 | NitrOS-9 | ブートROMとSDイメージを [nitros9-basic09-starter-kit](https://github.com/kyo-ta04/nitros9-basic09-starter-kit) のコミット `bf60370` から取得（明示的なライセンスがないため再配布しない） |
 | CP/M-68K・FUZIX | コンパイル済みのイメージをReleasesから取得（CP/M-68Kのシステムとディスク、FUZIXのディスクとカーネルのシンボル） |
 | Alcyon C | CP/M-68K 1.3の元の配布物（cpm.z80.de）から取得してディスクに書き込み、`AS68 -I AS68INIT` まで済ませる（ライセンスの扱いが明記されていないため再配布しない。取れなければCなしで動く） |
@@ -471,8 +471,10 @@ CPUを使い切る処理で、1秒あたりに進むゲストのサイクル数�
 
 ```sh
 sh scripts/build-m68k-elf.sh && sh scripts/build-fuzix-tiny68k.sh && python3 scripts/fetch-cpm68k.py
-sh scripts/make-release.sh   # artifacts/release と release/images.sha256 を作る（images.sha256 はコミットする）
+sh scripts/make-release.sh   # artifacts/release と release/images.sha256 のイメージの行を作る
 gh release create images-v1 artifacts/release/* --title "rs6809 images v1" --notes-file release/NOTICE.md
+gh workflow run release-binaries -f tag=images-v1   # 実行ファイル（Linux x86-64・macOS arm64）をビルドしてReleaseに上げる
+# 終わったら release/images.sha256 の rs6809-* の行を更新してコミットする
 ```
 
 ### 第0版と性能計測

@@ -1,6 +1,8 @@
 #!/bin/sh
-# Collect the files of an rs6809 image release into artifacts/release and
-# write release/images.sha256 (commit it: setup.sh checks downloads with it).
+# Collect the image files of an rs6809 release into artifacts/release and
+# write their lines of release/images.sha256 (commit it: setup.sh checks
+# downloads with it). The prebuilt emulators (rs6809-*) are built and
+# uploaded by the release-binaries GitHub workflow; their lines are kept.
 # Needs the builds: cargo build --release, scripts/fetch-cpm68k.py,
 # scripts/build-fuzix-tiny68k.sh. Publishing (gh release create) is separate:
 #   gh release create images-v1 artifacts/release/* --title ... --notes-file release/NOTICE.md
@@ -14,15 +16,16 @@ for f in $D/CPM15000.SR $D/CPM15000.MAP $F/disk.img $F/fuzix.sym; do
 done
 rm -rf "$OUT"
 mkdir -p "$OUT"
-cargo build --release --quiet
-cp target/release/rs6809 "$OUT/rs6809-linux-x86_64"
-strip "$OUT/rs6809-linux-x86_64"
 cp $D/CPM15000.SR $D/CPM15000.MAP "$OUT/"
 python3 -I scripts/cpm68k-disk.py dist --no-alcyon "$OUT/cpm68k-a.img" examples/cpm68k/hello.c
 gzip -n -9 "$OUT/cpm68k-a.img"
 gzip -n -9 -c $F/disk.img > "$OUT/fuzix68k-disk.img.gz"
 cp $F/fuzix.sym "$OUT/"
 cp release/NOTICE.md "$OUT/NOTICE.md"
-(cd "$OUT" && sha256sum -- * | sort -k2) > release/images.sha256
+{
+	grep ' rs6809-' release/images.sha256 || true
+	(cd "$OUT" && sha256sum -- *)
+} | sort -k2 > release/images.sha256.new
+mv release/images.sha256.new release/images.sha256
 cat release/images.sha256
 du -sh "$OUT"

@@ -2,8 +2,10 @@
 # One-shot setup: everything needed to run NitrOS-9 (6809), CP/M-68K and
 # FUZIX (68000) in rs6809. Then: ./run.sh nitros9 | cpm68k | fuzix [--ice]
 #
-#   1. the emulator: cargo build when Rust is installed, otherwise the
-#      prebuilt Linux x86-64 binary from the GitHub release
+#   1. the emulator: cargo build when Rust 1.89 or newer is installed,
+#      otherwise the prebuilt binary from the GitHub release (Linux x86-64,
+#      statically linked; macOS on Apple Silicon). Nothing is installed on
+#      the system: everything stays in this directory.
 #   2. NitrOS-9 Level 1 (Multicomp boot ROM and SD image) from the
 #      nitros9-basic09-starter-kit at a fixed commit (not redistributed)
 #   3. CP/M-68K and FUZIX images from the GitHub release
@@ -54,13 +56,35 @@ rsha() { awk -v f="$1" '$2 == f { print $1 }' release/images.sha256; }
 release() { fetch "$RELEASE_URL/$1" "$2" "$(rsha "$1")"; }
 
 say "1/4 emulator"
-if command -v cargo >/dev/null 2>&1; then
-	cargo build --release
-else
+MSRV=1.89
+# rustc_ok: rustc is at least MSRV (the 2024 edition).
+rustc_ok() {
+	v=$(rustc --version 2>/dev/null | cut -d' ' -f2) || return 1
+	[ -n "$v" ] || return 1
+	[ "$(printf '%s\n%s\n' "$MSRV" "$v" | sort -t. -k1,1n -k2,2n -k3,3n | head -1)" = "$MSRV" ]
+}
+prebuilt() {
 	case "$(uname -s)-$(uname -m)" in
-	Linux-x86_64) release rs6809-linux-x86_64 bin/rs6809 && chmod +x bin/rs6809 ;;
-	*) die "no prebuilt emulator for $(uname -s)-$(uname -m): install Rust (https://rustup.rs) and run again" ;;
+	Linux-x86_64) asset=rs6809-linux-x86_64 ;;
+	Darwin-arm64) asset=rs6809-macos-arm64 ;;
+	*) die "no prebuilt emulator for $(uname -s)-$(uname -m): install Rust $MSRV or newer (https://rustup.rs) and run again" ;;
 	esac
+	release "$asset" bin/rs6809
+	chmod +x bin/rs6809
+	echo "  using the prebuilt $asset (bin/rs6809)"
+}
+if command -v cargo >/dev/null 2>&1 && rustc_ok; then
+	if cargo build --release; then
+		rm -f bin/rs6809
+	else
+		echo "  cargo build failed: falling back to the prebuilt emulator"
+		prebuilt
+	fi
+else
+	if command -v cargo >/dev/null 2>&1; then
+		echo "  Rust $(rustc --version 2>/dev/null | cut -d' ' -f2) is older than $MSRV (rustup update upgrades it)"
+	fi
+	prebuilt
 fi
 
 say "2/4 NitrOS-9 (from the nitros9-basic09-starter-kit)"

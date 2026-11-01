@@ -1,0 +1,62 @@
+# Build the prebuilt emulators that setup.sh downloads when Rust is missing
+# or too old, and put them on an image release (run by hand: Actions >
+# release-binaries > Run workflow). After a run, update release/images.sha256
+# from the SHA256 lines in the job summary and commit it.
+name: release-binaries
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release to upload to
+        default: images-v1
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          # Statically linked: runs on any x86-64 Linux, whatever its glibc.
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            asset: rs6809-linux-x86_64
+          # Apple Silicon only.
+          - os: macos-14
+            target: aarch64-apple-darwin
+            asset: rs6809-macos-arm64
+    runs-on: ${{ matrix.os }}
+    env:
+      # Strip at link time: on macOS the linker then signs (ad hoc) the
+      # final binary, which a later strip would invalidate.
+      CARGO_PROFILE_RELEASE_STRIP: "true"
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup target add ${{ matrix.target }}
+      - run: cargo test --release --target ${{ matrix.target }}
+      - run: cargo build --release --target ${{ matrix.target }}
+      - run: |
+          cp target/${{ matrix.target }}/release/rs6809 ${{ matrix.asset }}
+          ./${{ matrix.asset }} --help | head -1
+          shasum -a 256 ${{ matrix.asset }} | tee -a "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: ${{ matrix.asset }}
+
+  upload:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          chmod +x rs6809-*
+          sha256sum rs6809-* | tee -a "$GITHUB_STEP_SUMMARY"
+          gh release upload "${{ inputs.tag }}" rs6809-* --clobber --repo "${{ github.repository }}"
