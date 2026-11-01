@@ -14,6 +14,6 @@ SYMS=
 case " $* " in
 *" --ice"* | *" --dap"*) SYMS="--symbols examples/cpm68k/bios.lst --symbols $D/CPM15000.MAP" ;;
 esac
-exec cargo run --release -- --cpu 68000 --machine tiny68k \
+exec sh scripts/rs6809 --cpu 68000 --machine tiny68k \
   --bin $D/CPM15000.SR --bin examples/cpm68k/bios.sr --pc 0x15000 \
   --disk artifacts/cpm68k/a.img --persist-disk $SYMS "$@"

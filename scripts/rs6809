@@ -1,0 +1,12 @@
+#!/bin/sh
+# Run the emulator: the cargo build when cargo is installed, otherwise the
+# prebuilt bin/rs6809 that setup.sh downloaded.
+here=$(dirname "$0")/..
+if command -v cargo >/dev/null 2>&1; then
+	exec cargo run --release --quiet --manifest-path "$here/Cargo.toml" -- "$@"
+fi
+if [ -x "$here/bin/rs6809" ]; then
+	exec "$here/bin/rs6809" "$@"
+fi
+echo "rs6809: run ./setup.sh first (or install Rust: https://rustup.rs)" >&2
+exit 1

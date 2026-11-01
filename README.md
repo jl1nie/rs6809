@@ -4,6 +4,40 @@ Pure RustのMotorola 6809エミュレータです。外部crate・Cコード・F
 標準構成は64KB RAMとACIA相当のシリアルコンソールです。Multicomp互換モードは既定512KB・最大1MBのRAMを備え、NitrOS-9 Level 1 / BASIC09とLevel 2を起動できます。
 Level 2では1つのOSを共有してTelnetから複数ユーザー・複数プロセスを同時に動かせます。
 
+## 簡単セットアップ
+
+NitrOS-9（6809）、CP/M-68K、FUZIX（68000）を、シェル一発でそろえて動かせます。
+
+```sh
+git clone https://github.com/jl1nie/rs6809.git && cd rs6809
+./setup.sh                 # 必要なものをすべて取得（2回目以降は足りないものだけ）
+./run.sh nitros9           # NitrOS-9 Level 1 / BASIC09（6809、Multicomp）
+./run.sh cpm68k            # CP/M-68K 1.3（68000、Tiny68K）。Alcyon Cでhello.cをコンパイルできる
+./run.sh fuzix             # FUZIX 0.5（68000、Tiny68K）。rootでログイン済みのシェル
+./run.sh fuzix --ice       # どれも --ice でデバッガ（http://127.0.0.1:6809/）、--dap でVS Code
+```
+
+`setup.sh` は次を行い、ダウンロードはすべてリポジトリ内のSHA-256（`release/images.sha256` など）で確かめます。
+
+| 段階 | 内容 |
+|---|---|
+| エミュレータ | Rustがあれば `cargo build --release`。なければLinux x86-64用の実行ファイルを [Releases](https://github.com/jl1nie/rs6809/releases) から取得 |
+| NitrOS-9 | ブートROMとSDイメージを [nitros9-basic09-starter-kit](https://github.com/kyo-ta04/nitros9-basic09-starter-kit) のコミット `bf60370` から取得（明示的なライセンスがないため再配布しない） |
+| CP/M-68K・FUZIX | コンパイル済みのイメージをReleasesから取得（CP/M-68Kのシステムとディスク、FUZIXのディスクとカーネルのシンボル） |
+| Alcyon C | CP/M-68K 1.3の元の配布物（cpm.z80.de）から取得してディスクに書き込み、`AS68 -I AS68INIT` まで済ませる（ライセンスの扱いが明記されていないため再配布しない。取れなければCなしで動く） |
+
+必要なものは `curl`・`gzip`・`sha256sum`（または `shasum`）で、Alcyon Cには `python3` と `unzip` も使います。
+各イメージの中身・ライセンス・ソースの入手先はReleaseの `NOTICE.md`（`release/NOTICE.md`）にあります。
+FUZIXの書き込みを残す `./run.sh fuzix --persist`（終わる前に `telinit 6`）、2つ目の端末の `./run.sh fuzix --tty2`（`telnet 127.0.0.1 6812`）も使えます。
+
+Releaseのイメージを作り直すとき（開発者向け）：
+
+```sh
+sh scripts/build-m68k-elf.sh && sh scripts/build-fuzix-tiny68k.sh && python3 scripts/fetch-cpm68k.py
+sh scripts/make-release.sh   # artifacts/release と release/images.sha256 を作る（images.sha256 はコミットする）
+gh release create images-v1 artifacts/release/* --title "rs6809 images v1" --notes-file release/NOTICE.md
+```
+
 ## ビルドと最小サンプル
 
 Rust 1.89以降（edition 2024対応）のツールチェーンを使用します。

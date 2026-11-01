@@ -24,6 +24,6 @@ SYMS=
 case " $* " in
 *" --ice"* | *" --dap"*) SYMS="--symbols $F/fuzix.sym" ;;
 esac
-exec cargo run --release -- --cpu 68000 --machine tiny68k --os fuzix \
+exec sh scripts/rs6809 --cpu 68000 --machine tiny68k --os fuzix \
   $DISK --boot-sector \
   --script examples/fuzix68k/boot.script $SYMS "$@"

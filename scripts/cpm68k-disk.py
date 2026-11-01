@@ -11,12 +11,19 @@ big-endian CPU).
     cpm68k-disk.py add IMAGE FILE[=NAME]...        add (or replace) files
     cpm68k-disk.py ls IMAGE                        list the directory
     cpm68k-disk.py get IMAGE NAME [OUT]            extract a file (- = stdout)
-    cpm68k-disk.py dist IMAGE                      the CP/M-68K 1.3 tools and examples
+    cpm68k-disk.py dist IMAGE [FILE...]            the CP/M-68K 1.3 tools and examples
+    cpm68k-disk.py dist --no-alcyon IMAGE [FILE...]  without the C compiler suite
+    cpm68k-disk.py alcyon IMAGE                    add the C compiler suite to a disk
 
 NAME is 8.3 (upper-cased), optionally with a user number: `3:FOO.C`.
 Text files get the ^Z padding CP/M expects when their extension is in TEXT.
 `dist` stores the distribution's .REL commands as .68K: BDOS Program Load
 relocates them, so RELOC is not needed.
+
+The C compiler suite (Alcyon C and its assembler, linker, libraries and
+headers) came to DRI from Alcyon Corp., and whether the 2022 CP/M licence
+covers it is not stated. Released disk images are made `--no-alcyon`;
+setup.sh adds the suite from the original distribution (`alcyon`).
 """
 import sys
 from pathlib import Path
@@ -159,6 +166,19 @@ def add_files(disk, specs):
         disk.write(user, stem, ext, data)
 
 
+# The C compiler suite (Alcyon C): compiler passes, assembler and linker,
+# libraries, start-up object, headers and the submit files that drive them.
+ALCYON = {
+    "CP68.68K", "C068.68K", "C168.68K", "AS68.68K", "AS68INIT", "LO68.68K", "AR68.68K", "NM68.68K",
+    "SIZE68.68K", "LINK68.68K", "CLIB", "LIBE.A", "LIBF.A", "S.O", "LOADR.O", "OVHDLR.O",
+    "C.SUB", "CE.SUB", "CLINK.SUB", "CLINKE.SUB", "CLINKF.SUB",
+}
+
+
+def is_alcyon(name):
+    return name in ALCYON or name.endswith(".H")
+
+
 def dist_files():
     """(path, name) of the 1.3 distribution's tools and headers."""
     if not DIST.exists():
@@ -189,12 +209,24 @@ def main():
         add_files(disk, rest)
         image.write_bytes(disk.data)
     elif cmd == "dist":
+        no_alcyon = image.name == "--no-alcyon"
+        if no_alcyon:
+            image, rest = Path(rest[0]), rest[1:]
         disk = Disk.blank()
         for f, name in dist_files():
+            if no_alcyon and is_alcyon(name):
+                continue
             # As is: the distribution's text files already have CR LF and ^Z.
             stem, _, ext = name.partition(".")
             disk.write(0, stem, ext, f.read_bytes())
         add_files(disk, rest)
+        image.write_bytes(disk.data)
+    elif cmd == "alcyon":
+        disk = Disk(image.read_bytes())
+        for f, name in dist_files():
+            if is_alcyon(name):
+                stem, _, ext = name.partition(".")
+                disk.write(0, stem, ext, f.read_bytes())
         image.write_bytes(disk.data)
     elif cmd == "add":
         disk = Disk(image.read_bytes())
