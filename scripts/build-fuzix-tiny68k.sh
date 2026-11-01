@@ -7,6 +7,8 @@
 #   fuzix.elf    kernel with symbols
 #   fuzix.sym    its symbols as nm output (for the ICE: --symbols)
 #   offsets.txt  structure offsets for the FUZIX monitor (scripts/fuzix-offsets.c)
+#   usersyms/    each program's symbols (NAME.sym, nm output), placed by the
+#                ICE on the process running it (--symbols usersyms)
 set -eu
 cd "$(dirname "$0")/.."
 ROOT=$PWD
@@ -21,17 +23,27 @@ mkdir -p "$OUT"
 # range", the problem FUZIX's README.68000.md reports for gcc 11): build it
 # without jump tables once the C library is there.
 (cd "$FUZIX" && make TARGET=tiny68k -j"$(nproc)" libs)
+# Programs link through scripts/fuzix-ld68k-syms, which keeps their symbols.
+# Without them yet, the programs already built are linked again (only
+# linked: the objects stay).
+export FUZIX_SYMS=$OUT/usersyms
+LINK="LINKER=$ROOT/scripts/fuzix-ld68k-syms"
+if [ ! -d "$FUZIX_SYMS" ]; then
+	find "$FUZIX/Applications" -type f -size +32c | while read -r f; do
+		if [ "$(head -c2 "$f" | od -An -tx1 | tr -d ' ')" = "03d0" ]; then rm -f "$f"; fi
+	done
+fi
 app() { # dir [make args]
 	d=$1
 	shift
 	(cd "$FUZIX/Applications/$d" &&
-		FUZIX_ROOT=$FUZIX TARGET=tiny68k CPU=68000 USERCPU=68000 make -f Makefile.68000 "$@")
+		FUZIX_ROOT=$FUZIX TARGET=tiny68k CPU=68000 USERCPU=68000 make -f Makefile.68000 "$LINK" "$@")
 }
 app as09 COPT=-fno-jump-tables
 # MWC/cmd runs byacc for two grammars into the same y.tab.c, which a
 # parallel make races on (one grammar's output ends up as the other's .c).
 app MWC/cmd
-(cd "$FUZIX" && make TARGET=tiny68k -j"$(nproc)" diskimage)
+(cd "$FUZIX" && make TARGET=tiny68k -j"$(nproc)" "$LINK" diskimage)
 # A login on the second serial port too (DUART channel B, /dev/tty2; the
 # emulator's --tty2): its getty is "off" in the stock inittab. ucp's "put"
 # copies out of the image and "get" copies in.

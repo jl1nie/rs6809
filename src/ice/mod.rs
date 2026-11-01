@@ -194,6 +194,8 @@ pub enum Stop {
     Pause,
     Step,
     Breakpoint(u32),
+    /// Stepping back reached the oldest recorded instruction.
+    HistoryStart,
     Watch { addr: u32, write: bool, value: u8 },
     SysCall { code: u8, pid: u8 },
     SysReturn(u64),
@@ -249,6 +251,7 @@ impl Stop {
             }
             Stop::Switch { from, to } => tr!(format!("プロセス切り替え {from} → {to}"), format!("process switch {from} → {to}")),
             Stop::Error(e) => tr!(format!("エラー: {e}"), format!("error: {e}")),
+            Stop::HistoryStart => tr!("記録の先頭（これより前には戻れない）", "start of the recording (cannot go back further)").into(),
         }
     }
 }
@@ -305,6 +308,15 @@ pub struct Ice<T: Target = Mc6809> {
     /// Recent idle samples (one bit each) and the start of idle pacing.
     idle_bits: u16,
     idle_mark: Option<(Instant, u64)>,
+    /// Recording for stepping back: the CPU before each instruction and the
+    /// number of RAM bytes it wrote (their old values are in `rec_writes`).
+    pub recording: bool,
+    rec: VecDeque<(T::CpuCopy, u32)>,
+    rec_writes: VecDeque<(usize, u8)>,
+    rec_buf: Vec<(usize, u8)>,
+    /// Refresh the symbol placements once back in this context (after
+    /// having left it).
+    refresh_after: Option<(u32, bool)>,
     /// `os.sleep_code()`, and the cycle of the last such call.
     sleep_code: Option<u8>,
     last_sleep: u64,
@@ -394,6 +406,11 @@ impl<T: Target> Ice<T> {
             breakpoints: BTreeSet::new(),
             idle_bits: 0,
             idle_mark: None,
+            refresh_after: None,
+            recording: false,
+            rec: VecDeque::new(),
+            rec_writes: VecDeque::new(),
+            rec_buf: Vec::new(),
             last_sleep: 0,
             bp_conds: Default::default(),
             bp_log: VecDeque::new(),
@@ -533,6 +550,71 @@ impl<T: Target> Ice<T> {
         if let Some(b) = self.sym_bps.iter_mut().find(|b| b.id == id) {
             b.cond = cond;
         }
+    }
+    /// One instruction, remembering how to undo it: the CPU and the RAM it
+    /// wrote. Devices are not undone (a write to one, such as a console
+    /// byte or a timer acknowledge, happens again when run forward).
+    fn step_recorded(&mut self) -> Result<Option<target::WatchHit>, String> {
+        const DEPTH: usize = 200_000;
+        let cpu = self.t.cpu_copy();
+        let mut log = std::mem::take(&mut self.rec_buf);
+        log.clear();
+        let r = self.t.step_logged(&self.watches, &mut log);
+        let out = match r {
+            Ok((hit, _io)) => {
+                self.rec.push_back((cpu, log.len() as u32));
+                self.rec_writes.extend(log.iter().copied());
+                while self.rec.len() > DEPTH {
+                    let (_, n) = self.rec.pop_front().unwrap();
+                    self.rec_writes.drain(..n as usize);
+                }
+                Ok(hit)
+            }
+            Err(e) => Err(e),
+        };
+        self.rec_buf = log;
+        out
+    }
+    /// Undo the last recorded instruction. False when there is none.
+    fn back_one(&mut self) -> bool {
+        let Some((cpu, n)) = self.rec.pop_back() else { return false };
+        for _ in 0..n {
+            let (p, v) = self.rec_writes.pop_back().unwrap();
+            self.t.restore_ram(p, v);
+        }
+        self.t.set_cpu(cpu);
+        let c = self.t.cycles();
+        while self.trace.back().is_some_and(|e| e.cycle >= c) {
+            self.trace.pop_back();
+        }
+        true
+    }
+    /// Step back `n` instructions, or (reverse continue) until a breakpoint.
+    fn step_back(&mut self, n: usize, to_breakpoint: bool) -> Stop {
+        self.running = false;
+        self.goal = Goal::None;
+        for i in 0.. {
+            if !to_breakpoint && i >= n {
+                return Stop::Step;
+            }
+            if !self.back_one() {
+                return Stop::HistoryStart;
+            }
+            let pc = self.t.pc();
+            if to_breakpoint && (self.bp_at(pc) || self.phys_bp_at(pc)) && self.bp_check(pc) {
+                return Stop::Breakpoint(pc);
+            }
+        }
+        Stop::Step
+    }
+    /// Changes made outside the instructions (editing, reset, loading) end
+    /// the way back.
+    fn forget_history(&mut self) {
+        self.rec.clear();
+        self.rec_writes.clear();
+    }
+    pub fn rec_json(&self) -> String {
+        format!("{{\"on\":{},\"depth\":{}}}", self.recording, self.rec.len())
     }
     /// A breakpoint was reached at `pc`: evaluate the conditions of every
     /// breakpoint there. It stops if any of them says so.
@@ -780,6 +862,11 @@ impl<T: Target> Ice<T> {
             if svc.is_some_and(|s| Some(s.code) == self.sleep_code) {
                 self.last_sleep = self.t.cycles();
             }
+            // A new program (FUZIX execve) never returns from its call: place
+            // its symbols when the CPU is back in the calling context.
+            if svc.is_some_and(|s| self.os.image_calls().contains(&s.code)) {
+                self.refresh_after = Some((self.t.context(), false));
+            }
             if let Some(svc) = svc
                 && !skip
                 && self.break_calls.contains(&svc.code)
@@ -801,10 +888,24 @@ impl<T: Target> Ice<T> {
                 self.tracer.before(self.t.mem(), &*self.os, &state);
             }
         }
-        match self.t.step(&self.watches) {
+        let stepped = if self.recording {
+            self.step_recorded()
+        } else {
+            self.t.step(&self.watches)
+        };
+        match stepped {
             Err(e) => return Some(Stop::Error(e)),
             Ok(Some((addr, write, value))) => stop = Some(Stop::Watch { addr, write, value }),
             Ok(None) => {}
+        }
+        if let Some((ctx, left)) = self.refresh_after {
+            let now = self.t.context();
+            if now != ctx {
+                self.refresh_after = Some((ctx, true));
+            } else if left {
+                self.refresh_after = None;
+                self.refresh_symbols();
+            }
         }
         if let Some(e) = self.t.disk_error() {
             return Some(Stop::Error(e.to_string()));
@@ -1127,6 +1228,27 @@ impl<T: Target> Ice<T> {
                 }
                 ok()
             }
+            // Recording for stepping back (on=1|0), and stepping back.
+            "/api/record" => {
+                if let Some(on) = p("on") {
+                    self.recording = on == "1" || on == "true";
+                    if !self.recording {
+                        self.forget_history();
+                    }
+                }
+                http::Response::json(self.rec_json())
+            }
+            "/api/stepback" => {
+                let n = p("n").and_then(parse_num).unwrap_or(1).clamp(1, 1_000_000) as usize;
+                let s = self.step_back(n, false);
+                self.halt(s);
+                ok()
+            }
+            "/api/reverse" => {
+                let s = self.step_back(0, true);
+                self.halt(s);
+                ok()
+            }
             "/api/step" => {
                 let n = p("n").and_then(parse_num).unwrap_or(1).clamp(1, 1_000_000);
                 self.running = false;
@@ -1175,6 +1297,7 @@ impl<T: Target> Ice<T> {
                 if !self.t.set_reg(name, v) {
                     return bad("register");
                 }
+                self.forget_history();
                 ok()
             }
             "/api/bp" => {
@@ -1313,6 +1436,7 @@ impl<T: Target> Ice<T> {
                     for (i, b) in bytes.into_iter().enumerate() {
                         self.t.poke(addr.wrapping_add(i as u32), b);
                     }
+                    self.forget_history();
                     return ok();
                 }
                 http::Response::json(self.mem_json(addr, len, p("space").unwrap_or("cpu")))
@@ -1572,7 +1696,7 @@ impl<T: Target> Ice<T> {
             .take(50)
             .map(|(n, t)| format!("{{\"n\":{n},\"text\":{}}}", json_str(t)))
             .collect();
-        let _ = write!(o, "\"bpConds\":[{}],\"bpLog\":[{}],", conds.join(","), log.join(","));
+        let _ = write!(o, "\"bpConds\":[{}],\"bpLog\":[{}],\"record\":{},", conds.join(","), log.join(","), self.rec_json());
         let ws: Vec<String> = self
             .watches
             .iter()
@@ -1975,6 +2099,7 @@ impl<T: Target> Ice<T> {
     fn forget_run(&mut self, why: &str) {
         self.tracer = Tracer::default();
         self.trace.clear();
+        self.forget_history();
         self.goal = Goal::None;
         self.os_ready = false;
         self.os_slot = None;

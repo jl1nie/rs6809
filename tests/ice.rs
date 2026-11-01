@@ -706,3 +706,30 @@ fn watch_expressions_and_memory_search() {
     assert_eq!(get(&mut d, "/api/mem/find?addr=4003&pat=68656C6C6F"), r#"{"addr":16393}"#);
     assert_eq!(get(&mut d, "/api/mem/find?addr=4010&pat=68656C6C6F7A"), r#"{"addr":null}"#);
 }
+
+#[test]
+fn steps_back_and_runs_backwards_to_a_breakpoint() {
+    let mut d = ice(PROGRAM, 0x1000, |_| ());
+    let state = |d: &mut Ice| d.command("GET", "/api/state", b"").1;
+    ok(&mut d, "/api/record?on=1");
+    // LDX, JSR, LDA, RTS, STA $3000.
+    ok(&mut d, "/api/step?n=5");
+    assert_eq!((d.t.cpu.pc, d.t.cpu.a, d.t.machine.ram[0x3000]), (0x1009, 0x42, 0x42));
+    assert!(state(&mut d).contains(r#""record":{"on":true,"depth":5}"#));
+    // Back over STA: the byte written is undone too.
+    ok(&mut d, "/api/stepback");
+    assert_eq!((d.t.cpu.pc, d.t.machine.ram[0x3000]), (0x1006, 0));
+    // Back over RTS and LDA: inside the subroutine, A as it was.
+    ok(&mut d, "/api/stepback?n=2");
+    assert_eq!((d.t.cpu.pc, d.t.cpu.a, d.t.cpu.s), (0x1010, 0, 0x6ffe));
+    // Forward again matches.
+    ok(&mut d, "/api/step?n=3");
+    assert_eq!((d.t.cpu.pc, d.t.machine.ram[0x3000]), (0x1009, 0x42));
+    // Reverse continue stops at a breakpoint behind, then at the start.
+    ok(&mut d, "/api/bp?addr=1003");
+    ok(&mut d, "/api/reverse");
+    assert_eq!(d.t.cpu.pc, 0x1003);
+    ok(&mut d, "/api/reverse");
+    assert_eq!(d.t.cpu.pc, 0x1000);
+    assert!(state(&mut d).contains(r#""depth":0"#));
+}

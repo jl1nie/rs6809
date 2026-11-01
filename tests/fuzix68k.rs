@@ -323,6 +323,26 @@ fn breaks_inside_the_kernel_by_symbol() {
 
 #[test]
 #[ignore = "requires scripts/build-fuzix-tiny68k.sh"]
+fn breaks_in_a_user_program_by_its_symbols() {
+    // Each program's symbols (usersyms/NAME.sym) are placed on the process
+    // running it, once execve has loaded it.
+    let mut d = ice(&["ls /"]);
+    d.load_symbols(&format!("{DIR}/usersyms")).unwrap();
+    ok(&mut d, "/api/run");
+    run_until(&mut d, "login:", 1);
+    ok(&mut d, "/api/bp?sym=listfiles");
+    run_until(&mut d, "never", 1);
+    let dis = get(&mut d, "/api/disasm?n=1");
+    assert_eq!(dis.get("lines").arr()[0].get("label").str(), Some("listfiles"), "{dis}");
+    let st = get(&mut d, "/api/state");
+    let base = st.get("regs").get("pc").int().unwrap() - get(&mut d, "/api/resolve?expr=listfiles").get("addr").int().unwrap();
+    assert_eq!(base, 0);
+    let stack = get(&mut d, "/api/stack?n=40");
+    assert!(stack.get("chain").arr().iter().any(|c| c.get("label").str().is_some_and(|l| l.starts_with("main+"))), "{stack}");
+}
+
+#[test]
+#[ignore = "requires scripts/build-fuzix-tiny68k.sh"]
 fn saved_state_resumes_at_the_shell() {
     let mut d = ice(&[]);
     ok(&mut d, "/api/run");

@@ -64,6 +64,7 @@ sh examples/nitros9-ice.sh 127.0.0.1:8080  # 待ち受けアドレスを変更
 | ステップ | F11で1命令。割り込みが受け付けられる場合はベクタへの分岐が1ステップです |
 | ステップオーバー | F10。`JSR`・`BSR`・`LBSR`・`SWI`・`OS9` を1命令として実行し、同じプロセスでSが戻った時点で停止 |
 | ステップアウト | Shift+F11。`RTS`・`RTI`・`PULS PC` でSが現在より上に戻った時点で停止 |
+| 戻る・逆実行 | 「記録」を入れると、命令ごとに実行前のCPUと書き換えたRAMの元の値を残します（直近20万命令）。「◀ 戻る」（Shift+F10）で1命令戻し、「◀◀ 逆実行」（Shift+F5）でブレークポイントか記録の先頭まで逆に進みます。装置（コンソール・タイマー・ディスク）は戻らず、進め直すと装置への書き込みはもう一度起き、割り込みが別の場所に入ることがあります。レジスタやメモリの書き換え、リセット、状態の読み込みで記録は終わります。記録中は実行が遅くなります |
 | その行まで実行 | 逆アセンブルの行をダブルクリック |
 | ブレークポイント | PC一致。64KBのビット表で判定し、再開時は現在PCを1回だけ飛ばします |
 | 条件・回数・ログポイント | どのブレークポイントにも、条件（`A==5 && [X].w!=0`）、回数（`N` はN回目以降、`=N` はN回目だけ、`%N` はN回ごと。条件が成り立った回数で数える）、ログ（`A={A} X={X}`。書くと止まらずにログを出す）を付けられます。ブレークポイントの入力欄の下の欄か、一覧の ✎ で設定します。DAPの `condition`・`hitCondition`・`logMessage` も同じです。条件はPCがその番地に来たときだけ評価します。評価できない条件は止まり、ログに理由を出します |
@@ -238,6 +239,7 @@ ln -s "$PWD/editors/vscode" ~/.vscode/extensions/rs6809.rs6809-debug-0.2.0   # V
 | `stackTrace` | フレームの規則があればそれでたどり、なければスタック上の戻り番地（呼び出し命令の直後を指し、シンボルのある値）を探します。戻り番地は呼び出し命令の行を示します |
 | `scopes`/`variables`/`setVariable` | Cのローカル変数・大域変数（展開・変更可）、レジスタ（変更可）、スタック32語、OS-9（プロセスID・モジュール・状態・直近のシステムコール） |
 | `next`/`stepIn`/`stepOut` | 行単位。`granularity: "instruction"` で命令単位。行情報のない場所では命令単位 |
+| `stepBack`/`reverseContinue` | 前の行（または命令）へ戻る、ブレークポイントまで逆に進む。記録が必要です（launch/attach の `"record": true` か、ブラウザの「記録」） |
 | `disassemble`/`readMemory`/`writeMemory` | CPU論理空間。逆アセンブルにはシンボルとソース位置を付けます |
 | `evaluate` | Cの式（`s.x`、`p->next`、`arr[1]`、`*p`）、レジスタ名、シンボル、`$1234`、`[式]`（その番地の語）。デバッグコンソールで `>文字列` と入力するとゲストのコンソールへ1行送ります |
 | `source`/`loadedSources` | ホストにないソースはリスト内の本文を返します |
@@ -382,6 +384,7 @@ P2 F$Wait     → 子3が終了 ステータス0
 | `POST /api/bp?addr=&op=add\|del\|toggle\|clear` | ブレークポイント |
 | `POST /api/bp?addr=\|sym=\|id=&cond=&hits=&log=` | 新しいブレークポイントか、既存のもの（`addr`、シンボルは `id`）の条件・回数・ログ。空なら消します。誤った条件は400で断ります。`state` に `bpConds`、`symBreakpoints` の同じ項目（`count` 付き）、`bpLog`（最近のログ）があります |
 | `POST /api/watch?addr=&len=&kind=r\|w\|rw`、`op=del&index=`、`op=clear` | ウォッチポイント |
+| `POST /api/record?on=1\|0`、`stepback?n=`、`reverse` | 戻るための記録、戻る、逆実行（`state` の `record`：`on`・`depth`） |
 | `GET /api/disasm?addr=&n=&back=` | 逆アセンブル（`back` で手前の命令境界から）。分岐と呼び出しには `target` |
 | `GET /api/mem?addr=&len=&space=cpu\|sys\|phys\|pidN`、`POST ...&val=16進` | メモリ |
 | `GET /api/mem/find?addr=&pat=16進` | `addr` 以降でそのバイト列がある最初の番地（なければ `{"addr":null}`） |

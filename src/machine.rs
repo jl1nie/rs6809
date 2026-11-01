@@ -465,7 +465,7 @@ impl Machine {
 
 impl Machine {
     #[inline]
-    fn is_io(&self, addr: u16) -> bool {
+    pub(crate) fn is_io(&self, addr: u16) -> bool {
         addr == self.acia_base
             || addr == self.acia_base.wrapping_add(1)
             || addr == self.timer_base

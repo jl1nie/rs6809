@@ -65,6 +65,7 @@ The input field below sends one line with a CR. Combined with Telnet mode (`--te
 | Step | F11 steps one instruction. When an interrupt is accepted, the branch to the vector is one step |
 | Step over | F10. Executes `JSR`, `BSR`, `LBSR`, `SWI` and `OS9` as one instruction, stopping when S returns in the same process |
 | Step out | Shift+F11. Stops when S returns above the current value by `RTS`, `RTI` or `PULS PC` |
+| Step back, reverse | With "Record" on, each instruction keeps the CPU before it and the old values of the RAM it wrote (the last 200,000 instructions). "◀ Back" (Shift+F10) undoes one instruction and "◀◀ Reverse" (Shift+F5) runs backwards to a breakpoint or the start of the recording. Devices (console, timers, disk) are not undone: running forward again writes to them again, and interrupts may then come at other places. Editing registers or memory, reset and loading a state end the recording. Running is slower while recording |
 | Run to line | Double-click a disassembly line |
 | Breakpoints | PC match. Checked with a 64 KB bit table; on resume the current PC is skipped once |
 | Conditions, hit counts, logpoints | Any breakpoint can carry a condition (`A==5 && [X].w!=0`), a hit count (`N` from the Nth time on, `=N` only the Nth, `%N` every Nth, counting the times the condition held) and a log message (`A={A} X={X}`: it logs and goes on). Set them in the fields under the breakpoint input or with ✎ on a listed breakpoint; DAP's `condition`, `hitCondition` and `logMessage` do the same. Conditions are evaluated only when the PC reaches the breakpoint. A condition that fails to evaluate stops and says why in the log |
@@ -239,6 +240,7 @@ For the 68000, these can be created from the extension's configuration snippets 
 | `stackTrace` | Walks with the frame rules if there are any; otherwise looks for return addresses on the stack (values pointing just after a call instruction that have a symbol). A return address shows the line of the call instruction |
 | `scopes`/`variables`/`setVariable` | C locals and globals (expandable, editable), registers (editable), 32 stack words, OS-9 (process ID, module, state, latest system call) |
 | `next`/`stepIn`/`stepOut` | By line. By instruction with `granularity: "instruction"`. By instruction where there is no line info |
+| `stepBack`/`reverseContinue` | Back to the previous line (or instruction), or backwards to a breakpoint. Needs the recording: `"record": true` in launch/attach, or "Record" in the browser |
 | `disassemble`/`readMemory`/`writeMemory` | CPU logical space. The disassembly carries symbols and source locations |
 | `evaluate` | C expressions (`s.x`, `p->next`, `arr[1]`, `*p`), register names, symbols, `$1234`, `[expr]` (the word at that address). Typing `>text` in the debug console sends one line to the guest console |
 | `source`/`loadedSources` | For sources not on the host, returns the text in the listing |
@@ -383,6 +385,7 @@ Everything is JSON on `127.0.0.1`. Numbers default to decimal, addresses to hex 
 | `POST /api/bp?addr=&op=add\|del\|toggle\|clear` | Breakpoints |
 | `POST /api/bp?addr=\|sym=\|id=&cond=&hits=&log=` | Condition, hit count and log message of a new breakpoint, or of an existing one (`addr`, or `id` for symbolic ones). Empty fields clear them; a wrong condition is refused with 400. `state` has `bpConds`, the same fields in `symBreakpoints` (with `count`) and `bpLog` (the latest log lines) |
 | `POST /api/watch?addr=&len=&kind=r\|w\|rw`, `op=del&index=`, `op=clear` | Watchpoints |
+| `POST /api/record?on=1\|0`, `stepback?n=`, `reverse` | Recording for stepping back, stepping back, running backwards (`record` in `state`: `on`, `depth`) |
 | `GET /api/disasm?addr=&n=&back=` | Disassembly (`back` starts from an earlier instruction boundary). Branches and calls have `target` |
 | `GET /api/mem?addr=&len=&space=cpu\|sys\|phys\|pidN`, `POST ...&val=hex` | Memory |
 | `GET /api/mem/find?addr=&pat=hex` | The first address from `addr` holding the bytes (`{"addr":null}` if none) |

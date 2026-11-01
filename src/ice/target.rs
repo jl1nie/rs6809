@@ -47,6 +47,8 @@ pub type WatchHit = (u32, bool, u8);
 pub trait Target: Send {
     /// Register snapshot kept in the instruction trace.
     type Snap: Copy;
+    /// The whole CPU, for stepping back.
+    type CpuCopy: Clone + Send;
     /// The CPU's name for the UI and DAP ("6809", "68000").
     const CPU: &'static str;
     /// Bytes read for a trace entry (the longest instruction).
@@ -91,6 +93,15 @@ pub trait Target: Send {
     /// Execute one instruction (or interrupt entry); with watchpoints, the
     /// first access in range is reported.
     fn step(&mut self, watches: &[Watch]) -> Result<Option<WatchHit>, String>;
+    /// Like `step`, also logging each RAM byte written as (physical index,
+    /// old value), for stepping back. The flag tells that a device was
+    /// written (that cannot be undone).
+    fn step_logged(&mut self, watches: &[Watch], log: &mut Vec<(usize, u8)>) -> Result<(Option<WatchHit>, bool), String>;
+    /// A copy of the CPU (all its registers and state), to step back to.
+    fn cpu_copy(&self) -> Self::CpuCopy;
+    fn set_cpu(&mut self, c: Self::CpuCopy);
+    /// Put a RAM byte back (physical index, as logged).
+    fn restore_ram(&mut self, p: usize, v: u8);
     fn disk_error(&mut self) -> Option<io::Error>;
 
     /// Bytes the console (first serial port) sent.
@@ -153,6 +164,8 @@ struct Probe<'a> {
     m: &'a mut Machine,
     watches: &'a [Watch],
     hit: Option<WatchHit>,
+    log: Option<&'a mut Vec<(usize, u8)>>,
+    io: bool,
 }
 impl Probe<'_> {
     fn check(&mut self, addr: u16, write: bool, value: u8) {
@@ -169,6 +182,12 @@ impl Bus for Probe<'_> {
     }
     fn write(&mut self, addr: u16, v: u8) {
         self.check(addr, true, v);
+        if let Some(log) = &mut self.log {
+            match self.m.translate(addr) {
+                Some(p) => log.push((p, self.m.ram[p])),
+                None => self.io |= self.m.is_io(addr),
+            }
+        }
         self.m.write(addr, v)
     }
 }
@@ -205,6 +224,7 @@ fn line6809(l: super::disasm::Line) -> Line {
 
 impl Target for Mc6809 {
     type Snap = Regs;
+    type CpuCopy = Cpu;
     const CPU: &'static str = "6809";
     const MAX_INSN: usize = 5;
     const CALL_LENS: &'static [u32] = &[2, 3, 4];
@@ -321,6 +341,8 @@ impl Target for Mc6809 {
             m: &mut self.machine,
             watches,
             hit: None,
+            log: None,
+            io: false,
         };
         let r = if !self.cpu.interrupt(&mut probe, irq, false, false) {
             self.cpu.step(&mut probe).map(|_| ())
@@ -330,6 +352,36 @@ impl Target for Mc6809 {
         let hit = probe.hit;
         self.machine.tick(self.cpu.cycles - old);
         r.map(|_| hit).map_err(|e| e.to_string())
+    }
+    fn step_logged(&mut self, watches: &[Watch], log: &mut Vec<(usize, u8)>) -> Result<(Option<WatchHit>, bool), String> {
+        let irq = self.machine.irq();
+        let old = self.cpu.cycles;
+        let mut probe = Probe {
+            m: &mut self.machine,
+            watches,
+            hit: None,
+            log: Some(log),
+            io: false,
+        };
+        let r = if !self.cpu.interrupt(&mut probe, irq, false, false) {
+            self.cpu.step(&mut probe).map(|_| ())
+        } else {
+            Ok(())
+        };
+        let (hit, io) = (probe.hit, probe.io);
+        self.machine.tick(self.cpu.cycles - old);
+        r.map(|_| (hit, io)).map_err(|e| e.to_string())
+    }
+    fn cpu_copy(&self) -> Cpu {
+        self.cpu.clone()
+    }
+    fn set_cpu(&mut self, c: Cpu) {
+        self.cpu = c;
+    }
+    fn restore_ram(&mut self, p: usize, v: u8) {
+        if let Some(b) = self.machine.ram.get_mut(p) {
+            *b = v;
+        }
     }
     fn disk_error(&mut self) -> Option<io::Error> {
         self.machine.disk_error()
@@ -606,6 +658,21 @@ struct Probe68<'a, B: Board68k> {
     m: &'a mut B,
     watches: &'a [Watch],
     hit: Option<WatchHit>,
+    log: Option<&'a mut Vec<(usize, u8)>>,
+    io: bool,
+}
+impl<B: Board68k> Probe68<'_, B> {
+    fn log(&mut self, a: u32, n: u32) {
+        if let Some(log) = &mut self.log {
+            for i in 0..n {
+                let a = a.wrapping_add(i) & 0xff_ffff;
+                match self.m.translate(a) {
+                    Some(p) => log.push((p, self.m.peek(a))),
+                    None => self.io = true,
+                }
+            }
+        }
+    }
 }
 impl<B: Board68k> Bus68k for Probe68<'_, B> {
     fn read8(&mut self, a: u32) -> u8 {
@@ -619,6 +686,7 @@ impl<B: Board68k> Bus68k for Probe68<'_, B> {
         if self.hit.is_none() {
             self.hit = watch_hit(self.watches, a & 0xff_ffff, true, v);
         }
+        self.log(a, 1);
         self.m.write8(a, v)
     }
     fn read16(&mut self, a: u32) -> u16 {
@@ -636,6 +704,7 @@ impl<B: Board68k> Bus68k for Probe68<'_, B> {
             self.hit = watch_hit(self.watches, a & 0xff_ffff, true, h)
                 .or_else(|| watch_hit(self.watches, (a + 1) & 0xff_ffff, true, l));
         }
+        self.log(a, 2);
         self.m.write16(a, v)
     }
 }
@@ -645,6 +714,7 @@ const A_NAMES: [&str; 8] = ["A0", "A1", "A2", "A3", "A4", "A5", "A6", "A7"];
 
 impl<B: Board68k> Target for Mc68000<B> {
     type Snap = Regs68k;
+    type CpuCopy = M68k;
     const CPU: &'static str = "68000";
     const MAX_INSN: usize = 10;
     const CALL_LENS: &'static [u32] = &[2, 4, 6];
@@ -805,6 +875,8 @@ impl<B: Board68k> Target for Mc68000<B> {
                 m: &mut self.machine,
                 watches,
                 hit: None,
+                log: None,
+                io: false,
             };
             self.cpu.step(&mut probe);
             let hit = probe.hit;
@@ -815,6 +887,40 @@ impl<B: Board68k> Target for Mc68000<B> {
             return Err(tr!("二重フォールトでCPUが停止した", "the CPU halted on a double fault").into());
         }
         Ok(hit)
+    }
+    fn step_logged(&mut self, watches: &[Watch], log: &mut Vec<(usize, u8)>) -> Result<(Option<WatchHit>, bool), String> {
+        if self.cpu.halted {
+            return Err(tr!("二重フォールトでCPUが停止した", "the CPU halted on a double fault").into());
+        }
+        let (level, vector) = self.machine.irq();
+        self.cpu.irq = level;
+        self.cpu.irq_vector = vector;
+        let old = self.cpu.cycles;
+        let mut probe = Probe68 {
+            m: &mut self.machine,
+            watches,
+            hit: None,
+            log: Some(log),
+            io: false,
+        };
+        self.cpu.step(&mut probe);
+        let (hit, io) = (probe.hit, probe.io);
+        self.machine.tick(self.cpu.cycles - old);
+        if self.cpu.halted {
+            return Err(tr!("二重フォールトでCPUが停止した", "the CPU halted on a double fault").into());
+        }
+        Ok((hit, io))
+    }
+    fn cpu_copy(&self) -> M68k {
+        self.cpu.clone()
+    }
+    fn set_cpu(&mut self, c: M68k) {
+        self.cpu = c;
+    }
+    fn restore_ram(&mut self, p: usize, v: u8) {
+        if let Some(a) = self.machine.logical(p) {
+            Board68k::poke(&mut self.machine, a, v);
+        }
     }
     fn disk_error(&mut self) -> Option<io::Error> {
         self.machine.disk_error()

@@ -772,6 +772,15 @@ impl Symbols {
             for p in &entries {
                 let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("");
                 let has_lst = p.with_extension("lst").is_file();
+                // A directory of nm outputs (NAME.sym): each program's symbols,
+                // placed on the processes running it (FUZIX).
+                if ext == "sym" {
+                    let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
+                    if let Ok(i) = self.load_file(p, Some(&stem)) {
+                        loaded.push(i);
+                    }
+                    continue;
+                }
                 if ext == "lst" || (ext == "map" && !has_lst) {
                     match self.load_file(p, None) {
                         Ok(i) => loaded.push(i),
@@ -781,7 +790,7 @@ impl Symbols {
                 }
             }
             if loaded.is_empty() {
-                return Err(format!("{}: no .lst or .map files", path.display()));
+                return Err(format!("{}: no .lst, .map or .sym files", path.display()));
             }
             if !self.source_dirs.contains(&path) {
                 self.source_dirs.push(path);
@@ -889,7 +898,7 @@ impl Symbols {
         self.placements.clear();
         for (ti, t) in self.tables.iter().enumerate() {
             let Some(name) = &t.module else { continue };
-            for im in images.iter().filter(|im| im.name.eq_ignore_ascii_case(name)) {
+            for im in images.iter().filter(|im| image_is(&im.name, name)) {
                 self.placements.push(Placement { table: ti, chunks: im.chunks.clone() });
             }
         }
@@ -1031,6 +1040,18 @@ impl Symbols {
         }
         u32::from_str_radix(e, 16).ok()
     }
+}
+
+/// An OS image is the module or program `name`: OS-9 module names as they
+/// are, FUZIX processes as "-sh[9]" or "/bin/ls[12]" (login shell dash, path,
+/// process ID).
+fn image_is(image: &str, name: &str) -> bool {
+    if image.eq_ignore_ascii_case(name) {
+        return true;
+    }
+    let base = image.rsplit_once('[').map_or(image, |(b, _)| b);
+    let base = base.rsplit('/').next().unwrap_or(base).trim_start_matches('-');
+    !base.is_empty() && base.eq_ignore_ascii_case(name)
 }
 
 fn source_matches(s: &Source, file: &str) -> bool {

@@ -1,0 +1,21 @@
+#!/bin/bash
+# FUZIX's Library/link/ld68k, keeping each program's symbols: the same link
+# and elf2aout conversion, plus the ELF's nm output in $FUZIX_SYMS/NAME.sym
+# for the ICE (--symbols DIR places them on each process's memory).
+TARGET=a.out
+STACK=8192
+ARGS=()
+while [[ $# -gt 0 ]]; do
+	case "$1" in
+	-o) TARGET="$2"; shift 2 ;;
+	-s) STACK="$2"; shift 2 ;;
+	*) ARGS+=("$1"); shift ;;
+	esac
+done
+"$CROSS_COMPILE"ld "${ARGS[@]}" -o "$TARGET.bin" || exit 1
+if [ -n "${FUZIX_SYMS:-}" ]; then
+	mkdir -p "$FUZIX_SYMS"
+	"$CROSS_COMPILE"nm -n "$TARGET.bin" > "$FUZIX_SYMS/$(basename "$TARGET").sym"
+fi
+"$FUZIX_ROOT"/Standalone/elf2aout -s "$STACK" -o "$TARGET" "$TARGET.bin" || exit 1
+rm -f "$TARGET.bin"

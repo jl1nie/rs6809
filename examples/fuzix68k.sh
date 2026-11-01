@@ -22,7 +22,11 @@ if [ "${1:-}" = "--persist" ]; then
 fi
 SYMS=
 case " $* " in
-*" --ice"* | *" --dap"*) SYMS="--symbols $F/fuzix.sym" ;;
+*" --ice"* | *" --dap"*)
+	SYMS="--symbols $F/fuzix.sym"
+	# Each program's symbols, placed on the processes running it.
+	[ -d $F/usersyms ] && SYMS="$SYMS --symbols $F/usersyms"
+	;;
 esac
 exec sh scripts/rs6809 --cpu 68000 --machine tiny68k --os fuzix \
   $DISK --boot-sector \

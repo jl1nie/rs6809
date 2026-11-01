@@ -197,6 +197,9 @@ canvas { width: 100%; display: block; }
   <button id="bStep" title="ステップイン (F11)">ステップ</button>
   <button id="bOver" title="ステップオーバー (F10) — JSR/BSR/OS9呼び出しを1命令として実行">ステップオーバー</button>
   <button id="bOut" title="ステップアウト (Shift+F11) — 現在のサブルーチンから戻るまで実行">ステップアウト</button>
+  <label class="row" title="命令ごとにCPUとRAMの書き込みを記録し、逆に戻れるようにします（直近20万命令）。装置（コンソール・タイマー・ディスク）は戻らず、進め直すと装置への書き込みはもう一度起きます。記録中は実行が遅くなります"><input type="checkbox" id="recOn">記録</label>
+  <button id="bBack" title="1命令戻る (Shift+F10)" disabled>◀ 戻る</button>
+  <button id="bReverse" title="逆に実行 — ブレークポイントか記録の先頭まで戻る (Shift+F5)" disabled>◀◀ 逆実行</button>
   <button id="bReset" title="リセット — 起動したときの状態に戻す（ディスクの中身はそのまま。起動の自動入力も最初から）">↺ リセット</button>
   <button id="bSave" title="機械の状態をファイルに保存（--load-state や「読込」で、そこから再開できます）">保存</button>
   <button id="bLoad" title="保存した状態から再開">読込</button>
@@ -417,6 +420,12 @@ canvas { width: 100%; display: block; }
 // Japanese is written in place; EN maps it to English. The ICE's language
 // (state.lang, /api/lang) is the UI's: one switch for both.
 const EN = {
+"命令ごとにCPUとRAMの書き込みを記録し、逆に戻れるようにします（直近20万命令）。装置（コンソール・タイマー・ディスク）は戻らず、進め直すと装置への書き込みはもう一度起きます。記録中は実行が遅くなります": "Records the CPU and RAM writes of each instruction so you can go back (the last 200,000 instructions). Devices (console, timer, disk) are not undone: running forward again writes to them again. Running is slower while recording",
+"記録": "Record",
+"1命令戻る (Shift+F10)": "Back one instruction (Shift+F10)",
+"◀ 戻る": "◀ Back",
+"逆に実行 — ブレークポイントか記録の先頭まで戻る (Shift+F5)": "Run backwards to a breakpoint or the start of the recording (Shift+F5)",
+"◀◀ 逆実行": "◀◀ Reverse",
 "ウォッチ式": "Watch expressions",
 "例: X+2, [A0].l, count": "e.g. X+2, [A0].l, count",
 "止まるたびに評価します。Cの変数（止まっている関数から）、レジスタ、[番地]（.b .w .l）、シンボル、演算子": "Evaluated at every stop: C variables (from the stopped function), registers, [address] (.b .w .l), symbols, operators",
@@ -725,6 +734,9 @@ $("bLoad").onclick = () => stateFile("load");
 $("bStep").onclick = () => act("step");
 $("bOver").onclick = () => act("over");
 $("bOut").onclick = () => act("out");
+$("recOn").onchange = async (e) => { await api(`record?on=${e.target.checked ? 1 : 0}`, ""); poll(true); };
+$("bBack").onclick = () => act("stepback");
+$("bReverse").onclick = () => act("reverse");
 $("consoleToggle").onchange = (e) => { $("console").classList.toggle("hide", !e.target.checked); drawTimeline(); };
 $("cog").onclick = (e) => { e.stopPropagation(); $("cogMenu").classList.toggle("hide"); };
 $("cogMenu").onclick = (e) => e.stopPropagation();
@@ -746,7 +758,7 @@ document.querySelectorAll(".tabs button").forEach((b) => b.onclick = () => {
 });
 addEventListener("keydown", (e) => {
   if (document.activeElement === $("term") || e.target.tagName === "INPUT") return;
-  const k = { F5: "run", F6: "pause", F10: "over", F11: e.shiftKey ? "out" : "step" }[e.key];
+  const k = { F5: e.shiftKey ? "reverse" : "run", F6: "pause", F10: e.shiftKey ? "stepback" : "over", F11: e.shiftKey ? "out" : "step" }[e.key];
   if (k) { e.preventDefault(); act(k); }
 });
 async function act(cmd) {
@@ -1892,6 +1904,13 @@ function renderHeader() {
   $("bRun").disabled = st.running;
   $("bPause").disabled = !st.running;
   for (const b of ["bStep", "bOver", "bOut"]) $(b).disabled = st.running;
+  const rec = st.record || { on: false, depth: 0 };
+  if (document.activeElement !== $("recOn")) $("recOn").checked = rec.on;
+  for (const b of ["bBack", "bReverse"]) {
+    $(b).disabled = st.running || !rec.on || !rec.depth;
+    $(b).classList.toggle("hide", !rec.on);
+  }
+  $("bBack").dataset.depth = rec.depth;
   $("sysName").textContent = [st.cpu, st.machine, st.osName].filter((x) => x).join(" · ");
   renderSpeeds();
   if (document.activeElement !== $("speed")) $("speed").value = String(st.speed);

@@ -75,6 +75,13 @@ FUZIXの `README.68000.md` は、m68k-linux-gnuのgccを使わないよう警告
 - ICEの「保存」で、ログインした後などの状態（メモリ上のディスクも含む）をファイルにし、`--load-state` か「読込」でそこから再開できます。
   「↺ リセット」は起動したときの状態（ブートセクタから）に戻します。
 
+## プログラムのシンボル
+
+ビルドは各プログラムを `scripts/fuzix-ld68k-syms`（FUZIXの `ld68k` に、ELFのシンボルを `artifacts/fuzix68k/usersyms/NAME.sym` に残す処理を加えたもの）でリンクします（プログラム自体は1バイトも変わりません）。
+`examples/fuzix68k.sh` は `--ice`・`--dap` のときにこれを読み込み（`--symbols artifacts/fuzix68k/usersyms`）、そのプログラムを動かしているプロセスの
+`u_codebase` に置きます（シンボルはイメージ内のオフセット）。`execve` の後は、新しいプログラムが初めてユーザー状態で動いた時点で置くので、
+`listfiles`（`ls` の中）や `main` のブレークポイントはプログラムを待ってその中で止まり、スタックに `main+$182` などが出ます。
+
 ## FUZIXモニタ（`src/ice/fuzix.rs`）
 
 `--os fuzix` で使うOSの層です。カーネルのシンボル（`--symbols artifacts/fuzix68k/fuzix.sym`）から `udata_shadow`・`ptab`・`ptab_end`・`e_trap12` を受け取り
@@ -113,5 +120,5 @@ cargo test --release --test fuzix68k -- --ignored
 
 - 構造体の位置は、このFUZIXの版（`776bfc9`）とTiny68Kの設定のものです。版を変えたら `offsets.txt` とテストで確かめてください。
 - プロセスIDは8ビットで扱います（256以上は下位8ビット）。
-- ユーザープログラムのシンボルは読み込みません（カーネルのみ）。
+- プログラムのシンボルはリンク時のもの（`usersyms/NAME.sym`）で、名前がNAMEのプロセス（`-sh`、`/bin/ls`）に置きます。ディスク上で名前を変えたプログラムや、別の名前で動かしたものには付きません。
 - シグナルで中断されたシステムコールは、同じプロセスが次のシステムコールを出した時点で「戻らない」とします。

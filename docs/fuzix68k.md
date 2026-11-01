@@ -75,6 +75,13 @@ The disk has its bytes swapped, as on the board, so the boot sector is also plac
 - The ICE's "Save" writes the current state (after logging in, for example, including the disk in memory) to a file, and `--load-state` or "Load" resumes from it.
   "↺ Reset" goes back to the state at start-up (from the boot sector).
 
+## Program symbols
+
+The build links every program through `scripts/fuzix-ld68k-syms`, FUZIX's `ld68k` that also keeps the ELF's symbols as `artifacts/fuzix68k/usersyms/NAME.sym` (the programs themselves come out the same, byte for byte).
+With `--ice` or `--dap`, `examples/fuzix68k.sh` loads them (`--symbols artifacts/fuzix68k/usersyms`): each file is placed on the processes running that program,
+at the process's `u_codebase` (the symbols are offsets in the image). After `execve` they are placed when the new program first runs in user state,
+so a breakpoint on `listfiles` (in `ls`) or `main` waits for the program and stops in it, and the stack shows `main+$182` and so on.
+
 ## FUZIX monitor (`src/ice/fuzix.rs`)
 
 The OS layer used with `--os fuzix`. It takes `udata_shadow`, `ptab`, `ptab_end` and `e_trap12` from the kernel's symbols (`--symbols artifacts/fuzix68k/fuzix.sym`)
@@ -113,5 +120,5 @@ cargo test --release --test fuzix68k -- --ignored
 
 - The structure offsets are for this FUZIX version (`776bfc9`) and the Tiny68K configuration. After changing versions, check them with `offsets.txt` and the tests.
 - Process IDs are handled as 8 bits (256 and above use the low 8 bits).
-- User program symbols are not loaded (the kernel's only).
+- Program symbols come from the link (`usersyms/NAME.sym`), placed on every process whose name is NAME (`-sh`, `/bin/ls`). A program renamed on the disk, or run under another name, gets none.
 - A system call interrupted by a signal is marked "no return" when the same process makes its next system call.

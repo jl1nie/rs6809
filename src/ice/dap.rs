@@ -61,6 +61,7 @@ impl Hub {
                 "function breakpoint"
             }
             Stop::Error(_) => "exception",
+            Stop::HistoryStart => "step",
         };
         self.flush_output_into_pending();
         self.event(
@@ -318,6 +319,7 @@ impl<T: Target> Ice<T> {
                 ("supportsLoadedSourcesRequest", true.into()),
                 ("supportsExceptionFilterOptions", true.into()),
                 ("supportsRestartRequest", true.into()),
+                ("supportsStepBack", true.into()),
                 (
                     "exceptionBreakpointFilters",
                     {
@@ -355,6 +357,13 @@ impl<T: Target> Ice<T> {
                 ),
             ])),
             "attach" | "launch" => {
+                // "record": true keeps the history for stepping back.
+                if let Some(on) = args.get("record").bool() {
+                    self.recording = on;
+                    if !on {
+                        self.forget_history();
+                    }
+                }
                 let symbols: Vec<String> = match args.get("symbols") {
                     Json::Str(s) => vec![s.clone()],
                     v => v
@@ -645,6 +654,32 @@ impl<T: Target> Ice<T> {
                     self.resume(Goal::None);
                 }
                 Ok(obj([("allThreadsContinued", true.into())]))
+            }
+            "stepBack" | "reverseContinue" => {
+                if !self.recording {
+                    return Err(tr!(
+                        "記録が無効です（launch/attach の \"record\": true か、ICEの「記録」で有効にします）",
+                        "recording is off (enable it with \"record\": true in launch/attach, or the ICE's Record)"
+                    )
+                    .into());
+                }
+                let s = if command == "reverseContinue" {
+                    self.step_back(0, true)
+                } else if args.get("granularity").str() == Some("instruction") {
+                    self.step_back(1, false)
+                } else {
+                    // Back to the previous source line (its last instruction).
+                    let line = |d: &Self| d.symbols.line(d.t.mem(), d.t.pc()).map(|(t, l)| (t, l.src, l.line));
+                    let here = line(self);
+                    loop {
+                        let s = self.step_back(1, false);
+                        if s != Stop::Step || here.is_none() || line(self) != here {
+                            break s;
+                        }
+                    }
+                };
+                self.halt(s);
+                Ok(Json::Null)
             }
             "next" | "stepIn" => {
                 let instruction = args.get("granularity").str() == Some("instruction");
