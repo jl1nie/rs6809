@@ -18,6 +18,10 @@ sh examples/nitros9-ice.sh 127.0.0.1:8080  # 待ち受けアドレスを変更
 `--until`・`--max-cycles`・`--measure-from` とは同時に使えません。
 
 コンソール（ACIA 1、`/term`）はブラウザ右側の端末に出ます。端末をクリックするとキー入力がそのままゲストへ送られます。
+端末は80桁×24行の画面と2000行のスクロールバックを持ち、VT52（FUZIXの `TERM`）と、ANSI/xtermの主な制御
+（カーソル移動・位置指定、画面と行の消去、色・太字・下線・反転、スクロール範囲、行と文字の挿入・削除、カーソルの保存と復帰、位置の問い合わせ）を解釈します。
+種類はコンソールの見出しで選べ、OSごとに覚えます（既定はFUZIXがVT52、ほかはANSI）。矢印キー・Home・End・PageUp・PageDown・Insert・Deleteも、選んだ種類の形で送ります。
+解釈の部分は `node scripts/test-ui-term.js` で試験します。
 下の入力欄は1行をCR付きで送ります。Telnetモード（`--telnet`）と併用すると、追加ACIAはTelnet側で、ACIA 1はブラウザでも見えます。
 
 ## 構成

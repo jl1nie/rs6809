@@ -44,6 +44,14 @@ if grep -q '^02:3:off:getty /dev/tty2' "$TMP/inittab"; then
 	(cd "$TMP" && printf 'cd /etc\nrm inittab\nget inittab\nchmod 0644 inittab\n' | $UCP >/dev/null)
 	dd if="$IMG/filesys.img" of="$IMG/disk.img" bs=512 seek=2048 conv=notrunc,swab status=none
 fi
+# The terminal size for full-screen programs (less, vile): the tty has no
+# size of its own. root's login shell runs ~/.profile.
+(cd "$TMP" && printf 'cd /root\nput .profile\n' | $UCP >/dev/null 2>&1) || true
+if ! grep -q 'stty rows 24 cols 80' "$TMP/.profile" 2>/dev/null; then
+	echo 'stty rows 24 cols 80' >> "$TMP/.profile"
+	(cd "$TMP" && printf 'cd /root\nrm .profile\nget .profile\nchmod 0644 .profile\n' | $UCP >/dev/null 2>&1)
+	dd if="$IMG/filesys.img" of="$IMG/disk.img" bs=512 seek=2048 conv=notrunc,swab status=none
+fi
 rm -rf "$TMP"
 cp "$IMG/disk.img" "$OUT/disk.img"
 cp "$FUZIX/Kernel/fuzix.map" "$OUT/fuzix.map"

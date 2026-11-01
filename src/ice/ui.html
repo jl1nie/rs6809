@@ -102,9 +102,20 @@ th { color: var(--mute); font-weight: 500; font-size: 12px; border-bottom: 1px s
 .mmu .hd { color: var(--mute); }
 .mmu .cur { background: var(--accent-soft); }
 .mmu .wp { text-decoration: underline; }
-#console { width: 34%; min-width: 320px; max-width: 640px; display: flex; flex-direction: column; border-left: 1px solid var(--line); background: var(--term-bg); }
+#console { width: 34%; min-width: 320px; max-width: 720px; display: flex; flex-direction: column; border-left: 1px solid var(--line); background: var(--term-bg); }
 #console .bar { display: flex; gap: 6px; align-items: center; padding: 6px 8px; color: var(--term-ink); font-size: 12px; border-bottom: 1px solid #ffffff1a; }
-#term { flex: 1; margin: 0; padding: 8px 10px; overflow: auto; color: var(--term-ink); font: 13px/1.35 var(--mono); white-space: pre-wrap; word-break: break-all; outline: none; }
+#term { flex: 1; margin: 0; padding: 8px 10px; overflow: auto; color: var(--term-ink); font: 13px/1.35 var(--mono); white-space: pre; outline: none; }
+/* Terminal colours: 0-7 normal, 8-15 bright; 17/18 are the default background/ink (reverse video). */
+#term .f0 { color: #3b4252; } #term .f1 { color: #e06c75; } #term .f2 { color: #98c379; } #term .f3 { color: #e5c07b; }
+#term .f4 { color: #61afef; } #term .f5 { color: #c678dd; } #term .f6 { color: #56b6c2; } #term .f7 { color: #d7e0ea; }
+#term .f8 { color: #7f848e; } #term .f9 { color: #ff7b86; } #term .f10 { color: #b5e890; } #term .f11 { color: #ffd88a; }
+#term .f12 { color: #7cc4ff; } #term .f13 { color: #de9bf5; } #term .f14 { color: #7fe0eb; } #term .f15 { color: #ffffff; }
+#term .b0 { background: #3b4252; } #term .b1 { background: #e06c75; } #term .b2 { background: #98c379; } #term .b3 { background: #e5c07b; }
+#term .b4 { background: #61afef; } #term .b5 { background: #c678dd; } #term .b6 { background: #56b6c2; } #term .b7 { background: #d7e0ea; }
+#term .b8 { background: #7f848e; } #term .b9 { background: #ff7b86; } #term .b10 { background: #b5e890; } #term .b11 { background: #ffd88a; }
+#term .b12 { background: #7cc4ff; } #term .b13 { background: #de9bf5; } #term .b14 { background: #7fe0eb; } #term .b15 { background: #ffffff; }
+#term .f17 { color: var(--term-bg); } #term .b18 { background: var(--term-ink); }
+#term .tb { font-weight: 700; } #term .tu { text-decoration: underline; }
 #term:focus { box-shadow: inset 0 0 0 2px #6d9bff66; }
 #term .cursor { background: var(--term-ink); color: var(--term-bg); animation: blink 1s steps(1) infinite; }
 @keyframes blink { 50% { background: transparent; color: var(--term-ink); } }
@@ -332,6 +343,10 @@ canvas { width: 100%; display: block; }
     <div class="bar">
       <strong>コンソール /term</strong><span style="opacity:.6">（クリックしてキー入力）</span>
       <span style="flex:1"></span>
+      <select id="termMode" title="端末の種類（ゲストのTERMに合わせる。FUZIXはvt52）" style="background:#ffffff12;color:inherit;border-color:#ffffff22">
+        <option value="ansi">ANSI/xterm</option>
+        <option value="vt52">VT52</option>
+      </select>
       <button id="termClear" style="background:#ffffff12;color:inherit;border-color:#ffffff22">消去</button>
     </div>
     <pre id="term" tabindex="0"></pre>
@@ -361,7 +376,7 @@ const CAT = {
 const cat = (n) => n.startsWith("I$") || /^(F|C|L|A)_/.test(n) ? "io" : CAT.proc.includes(n) || n.startsWith("P_") ? "proc" : CAT.mem.includes(n) || n === "S_TPA" ? "mem" : "sys";
 
 let st = null, prevRegs = null, services = {}, tab = "dbg";
-let consoleNext = 0, termText = "", memPrev = {}, viewAddr = null;
+let consoleNext = 0, memPrev = {}, viewAddr = null;
 
 // ---------- toolbar ----------
 $("bRun").onclick = () => act("run");
@@ -585,24 +600,353 @@ $("traceN").onchange = renderTrace;
 
 // ---------- console ----------
 const term = $("term");
-function termWrite(text) {
-  text = text.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "").replace(/\r\n/g, "\n").replace(/\n\r/g, "\n");
-  for (const ch of text) {
-    if (ch === "\b") termText = termText.slice(0, -1);
-    else if (ch === "\r") termText += "\n";
-    else if (ch === "\x07" || ch === "\0") continue;
-    else termText += ch;
+// ---- Term begin (scripts/test-ui-term.js runs this part under Node.js)
+// A character-cell terminal for the guest console: VT52 (FUZIX's TERM) and
+// the common ANSI/xterm controls (cursor, erase, SGR colours, scroll region,
+// insert/delete), with scrollback above the screen.
+class Term {
+  constructor(cols = 80, rows = 24, history = 2000) {
+    this.cols = cols;
+    this.rows = rows;
+    this.maxHistory = history;
+    this.mode = "ansi"; // or "vt52": ESC D/H/I are VT52 cursor moves
+    this.reply = () => {}; // answers to queries (cursor position report)
+    this.reset();
   }
-  if (termText.length > 200000) termText = termText.slice(-150000);
+  reset() {
+    this.history = [];
+    this.screen = [];
+    for (let i = 0; i < this.rows; i++) this.screen.push(this.blank());
+    this.x = 0;
+    this.y = 0;
+    this.attr = 0;
+    this.wrapNext = false;
+    this.top = 0;
+    this.bottom = this.rows - 1;
+    this.saved = [0, 0, 0];
+    this.cursorOn = true;
+    this.state = 0; // 0 text, 1 ESC, 2 CSI, 3 VT52 Y row, 4 VT52 Y col, 5 OSC, 6 ESC+intermediate
+    this.params = "";
+    this.dirty = true;
+  }
+  // A cell is [char, attr]; attr = fg (0-15, 16 default) | bg << 5 (0-15, 16 default) | flags << 10.
+  blank() {
+    const row = [];
+    for (let i = 0; i < this.cols; i++) row.push([" ", Term.DEF]);
+    return row;
+  }
+  write(text) {
+    for (const ch of text) this.put(ch);
+    this.dirty = true;
+  }
+  put(ch) {
+    const c = ch.codePointAt(0);
+    switch (this.state) {
+      case 1: return this.esc(ch);
+      case 2: return this.csiChar(ch);
+      case 3: this.vy = c - 32; this.state = 4; return;
+      case 4:
+        this.state = 0;
+        this.moveTo(this.vy, c - 32);
+        return;
+      case 5:
+        if (c === 7) this.state = 0;
+        else if (c === 0x1b) this.state = 1; // ESC \ ends it too
+        return;
+      case 6: this.state = 0; return; // ESC ( B and friends: character sets
+    }
+    if (c === 0x1b) { this.state = 1; return; }
+    if (c < 32 || c === 127) return this.control(c);
+    this.print(ch);
+  }
+  control(c) {
+    switch (c) {
+      case 8: if (this.x > 0) this.x--; this.wrapNext = false; break;
+      case 9: this.x = Math.min(this.cols - 1, (this.x + 8) & ~7); break;
+      case 10: case 11: case 12: this.lineFeed(); break;
+      case 13: this.x = 0; this.wrapNext = false; break;
+    }
+  }
+  print(ch) {
+    if (this.wrapNext) {
+      this.x = 0;
+      this.lineFeed();
+      this.wrapNext = false;
+    }
+    this.screen[this.y][this.x] = [ch, this.attr === 0 ? Term.DEF : this.attr];
+    if (this.x === this.cols - 1) this.wrapNext = true;
+    else this.x++;
+  }
+  lineFeed() {
+    this.wrapNext = false;
+    if (this.y === this.bottom) this.scrollUp(1);
+    else if (this.y < this.rows - 1) this.y++;
+  }
+  scrollUp(n) {
+    for (let i = 0; i < n; i++) {
+      const gone = this.screen.splice(this.top, 1)[0];
+      // Lines leaving the whole screen go to the scrollback.
+      if (this.top === 0) {
+        this.history.push(gone);
+        if (this.history.length > this.maxHistory) this.history.shift();
+      }
+      this.screen.splice(this.bottom, 0, this.blank());
+    }
+  }
+  scrollDown(n) {
+    for (let i = 0; i < n; i++) {
+      this.screen.splice(this.bottom, 1);
+      this.screen.splice(this.top, 0, this.blank());
+    }
+  }
+  moveTo(y, x) {
+    this.y = Math.max(0, Math.min(this.rows - 1, y));
+    this.x = Math.max(0, Math.min(this.cols - 1, x));
+    this.wrapNext = false;
+  }
+  esc(ch) {
+    this.state = 0;
+    const vt52 = this.mode === "vt52";
+    switch (ch) {
+      case "[": this.state = 2; this.params = ""; return;
+      case "]": this.state = 5; return;
+      case "(": case ")": case "*": case "+": case "#": this.state = 6; return;
+      case "A": return this.moveTo(this.y - 1, this.x); // VT52 up
+      case "B": return this.moveTo(this.y + 1, this.x); // VT52 down
+      case "C": return this.moveTo(this.y, this.x + 1); // VT52 right
+      case "D": // VT52 left; ANSI index
+        if (vt52) return this.moveTo(this.y, this.x - 1);
+        return this.lineFeed();
+      case "H": if (vt52) this.moveTo(0, 0); return; // VT52 home (ANSI: tab set)
+      case "I": if (vt52) this.reverseIndex(); return;
+      case "J": return this.eraseDisplay(0); // VT52
+      case "K": return this.eraseLine(0); // VT52
+      case "Y": this.state = 3; return; // VT52 direct cursor address
+      case "M": return this.reverseIndex(); // ANSI
+      case "E": this.x = 0; return this.lineFeed(); // ANSI next line
+      case "7": this.saved = [this.y, this.x, this.attr]; return;
+      case "8": [this.y, this.x, this.attr] = this.saved; this.wrapNext = false; return;
+      case "c": return this.reset();
+    }
+  }
+  reverseIndex() {
+    if (this.y === this.top) this.scrollDown(1);
+    else if (this.y > 0) this.y--;
+  }
+  csiChar(ch) {
+    const c = ch.codePointAt(0);
+    if ((c >= 0x30 && c <= 0x3f) || (c >= 0x20 && c <= 0x2f)) {
+      this.params += ch;
+      return;
+    }
+    this.state = 0;
+    this.csi(ch, this.params);
+  }
+  csi(cmd, raw) {
+    const priv = raw.startsWith("?");
+    const ps = raw.replace(/[?>=! ]/g, "").split(";").map((p) => (p === "" ? NaN : parseInt(p, 10)));
+    const n = (i, d = 1) => (Number.isNaN(ps[i]) || ps[i] === undefined || ps[i] === 0 ? d : ps[i]);
+    const z = (i) => (Number.isNaN(ps[i]) || ps[i] === undefined ? 0 : ps[i]);
+    switch (cmd) {
+      case "A": return this.moveTo(this.y - n(0), this.x);
+      case "B": case "e": return this.moveTo(this.y + n(0), this.x);
+      case "C": case "a": return this.moveTo(this.y, this.x + n(0));
+      case "D": return this.moveTo(this.y, this.x - n(0));
+      case "E": return this.moveTo(this.y + n(0), 0);
+      case "F": return this.moveTo(this.y - n(0), 0);
+      case "G": case "`": return this.moveTo(this.y, n(0) - 1);
+      case "d": return this.moveTo(n(0) - 1, this.x);
+      case "H": case "f": return this.moveTo(n(0) - 1, n(1) - 1);
+      case "J": return this.eraseDisplay(z(0));
+      case "K": return this.eraseLine(z(0));
+      case "L": return this.insertLines(n(0));
+      case "M": return this.deleteLines(n(0));
+      case "@": return this.insertChars(n(0));
+      case "P": return this.deleteChars(n(0));
+      case "X": return this.eraseChars(n(0));
+      case "S": return this.scrollUp(n(0));
+      case "T": return this.scrollDown(n(0));
+      case "m": return this.sgr(ps);
+      case "r": {
+        const t = n(0) - 1, b = n(1, this.rows) - 1;
+        if (t < b && b < this.rows) { this.top = t; this.bottom = b; }
+        return this.moveTo(0, 0);
+      }
+      case "s": this.saved = [this.y, this.x, this.attr]; return;
+      case "u": [this.y, this.x, this.attr] = this.saved; return;
+      case "n": if (z(0) === 6) this.reply(`\x1b[${this.y + 1};${this.x + 1}R`); return;
+      case "h": case "l":
+        if (priv && ps.includes(25)) this.cursorOn = cmd === "h";
+        if (priv && (ps.includes(1049) || ps.includes(47) || ps.includes(1047))) {
+          // The alternate screen: a clean screen, as most programs expect.
+          this.eraseDisplay(2);
+          this.moveTo(0, 0);
+        }
+        return;
+    }
+  }
+  eraseDisplay(m) {
+    if (m === 0) {
+      this.eraseLine(0);
+      for (let r = this.y + 1; r < this.rows; r++) this.screen[r] = this.blank();
+    } else if (m === 1) {
+      this.eraseLine(1);
+      for (let r = 0; r < this.y; r++) this.screen[r] = this.blank();
+    } else {
+      for (let r = 0; r < this.rows; r++) this.screen[r] = this.blank();
+      if (m === 3) this.history = [];
+    }
+  }
+  eraseLine(m) {
+    const row = this.screen[this.y];
+    const [a, b] = m === 0 ? [this.x, this.cols] : m === 1 ? [0, this.x + 1] : [0, this.cols];
+    for (let i = a; i < b; i++) row[i] = [" ", Term.DEF];
+  }
+  insertLines(k) {
+    if (this.y < this.top || this.y > this.bottom) return;
+    for (let i = 0; i < k; i++) {
+      this.screen.splice(this.bottom, 1);
+      this.screen.splice(this.y, 0, this.blank());
+    }
+  }
+  deleteLines(k) {
+    if (this.y < this.top || this.y > this.bottom) return;
+    for (let i = 0; i < k; i++) {
+      this.screen.splice(this.y, 1);
+      this.screen.splice(this.bottom, 0, this.blank());
+    }
+  }
+  insertChars(k) {
+    const row = this.screen[this.y];
+    for (let i = 0; i < k; i++) { row.splice(this.x, 0, [" ", Term.DEF]); row.pop(); }
+  }
+  deleteChars(k) {
+    const row = this.screen[this.y];
+    for (let i = 0; i < k; i++) { row.splice(this.x, 1); row.push([" ", Term.DEF]); }
+  }
+  eraseChars(k) {
+    const row = this.screen[this.y];
+    for (let i = this.x; i < Math.min(this.cols, this.x + k); i++) row[i] = [" ", Term.DEF];
+  }
+  sgr(ps) {
+    if (ps.length === 0 || (ps.length === 1 && Number.isNaN(ps[0]))) ps = [0];
+    let fg = this.attr === 0 ? 16 : this.attr & 31;
+    let bg = this.attr === 0 ? 16 : (this.attr >> 5) & 31;
+    let fl = this.attr === 0 ? 0 : this.attr >> 10;
+    for (let i = 0; i < ps.length; i++) {
+      const p = Number.isNaN(ps[i]) ? 0 : ps[i];
+      if (p === 0) { fg = 16; bg = 16; fl = 0; }
+      else if (p === 1) fl |= Term.BOLD;
+      else if (p === 4) fl |= Term.UNDER;
+      else if (p === 7) fl |= Term.REVERSE;
+      else if (p === 22) fl &= ~Term.BOLD;
+      else if (p === 24) fl &= ~Term.UNDER;
+      else if (p === 27) fl &= ~Term.REVERSE;
+      else if (p >= 30 && p <= 37) fg = p - 30;
+      else if (p === 39) fg = 16;
+      else if (p >= 40 && p <= 47) bg = p - 40;
+      else if (p === 49) bg = 16;
+      else if (p >= 90 && p <= 97) fg = p - 90 + 8;
+      else if (p >= 100 && p <= 107) bg = p - 100 + 8;
+      else if ((p === 38 || p === 48) && ps[i + 1] === 5) i += 2; // 256 colours: not kept
+      else if ((p === 38 || p === 48) && ps[i + 1] === 2) i += 4; // true colour: not kept
+    }
+    this.attr = fg === 16 && bg === 16 && fl === 0 ? 0 : fg | (bg << 5) | (fl << 10);
+  }
+  // Keys as the guest expects them in this mode.
+  key(e) {
+    const vt52 = this.mode === "vt52";
+    const csi = (s) => (vt52 ? "\x1b" + s : "\x1b[" + s);
+    switch (e.key) {
+      case "ArrowUp": return csi("A");
+      case "ArrowDown": return csi("B");
+      case "ArrowRight": return csi("C");
+      case "ArrowLeft": return csi("D");
+      case "Home": return vt52 ? "\x1bH" : "\x1b[H";
+      case "End": return vt52 ? null : "\x1b[F";
+      case "PageUp": return vt52 ? null : "\x1b[5~";
+      case "PageDown": return vt52 ? null : "\x1b[6~";
+      case "Insert": return vt52 ? null : "\x1b[2~";
+      case "Delete": return vt52 ? "\x7f" : "\x1b[3~";
+    }
+    return null;
+  }
+  // The scrollback and the screen as HTML (cells to spans by attribute).
+  html(escape) {
+    const line = (row, cursorAt) => {
+      let out = "", run = "", cur = -1;
+      const flush = () => {
+        if (!run) return;
+        out += cur === Term.DEF ? escape(run) : `<span class="${Term.classes(cur)}">${escape(run)}</span>`;
+        run = "";
+      };
+      for (let i = 0; i < row.length; i++) {
+        const [ch, a] = row[i];
+        if (i === cursorAt) {
+          flush();
+          out += `<span class="cursor">${escape(ch)}</span>`;
+          cur = -1;
+          continue;
+        }
+        if (a !== cur) { flush(); cur = a; }
+        run += ch;
+      }
+      flush();
+      return out.replace(/\s+$/, "");
+    };
+    const lines = this.history.map((r) => line(r, -1));
+    this.screen.forEach((r, i) => lines.push(line(r, this.cursorOn && i === this.y ? this.x : -1)));
+    return lines.join("\n");
+  }
+  // Plain text of the screen (for tests).
+  text() {
+    return this.screen.map((r) => r.map((c) => c[0]).join("").replace(/\s+$/, "")).join("\n").replace(/\n+$/, "");
+  }
+  static classes(a) {
+    let fg = a & 31, bg = (a >> 5) & 31;
+    const fl = a >> 10;
+    if (fl & Term.REVERSE) {
+      [fg, bg] = [bg === 16 ? 17 : bg, fg === 16 ? 18 : fg]; // 17: default bg colour, 18: default fg
+    }
+    const cls = [];
+    if (fg !== 16) cls.push("f" + fg);
+    if (bg !== 16) cls.push("b" + bg);
+    if (fl & Term.BOLD) cls.push("tb");
+    if (fl & Term.UNDER) cls.push("tu");
+    return cls.join(" ");
+  }
+}
+Term.DEF = 16 | (16 << 5);
+Term.BOLD = 1;
+Term.UNDER = 2;
+Term.REVERSE = 4;
+// ---- Term end
+// One terminal for the console; its keys and type follow the OS (FUZIX: VT52).
+const screen = new Term(80, 24, 2000);
+screen.reply = (s) => sendKeys(s);
+let termTimer = 0;
+function termWrite(text) {
+  screen.write(text);
+  // Draw at most every 30 ms: full-screen programs send many small pieces.
+  if (!termTimer) termTimer = setTimeout(() => { termTimer = 0; termDraw(); }, 30);
+}
+function termDraw() {
   const atBottom = term.scrollTop + term.clientHeight >= term.scrollHeight - 8;
-  term.innerHTML = esc(termText) + '<span class="cursor"> </span>';
+  term.innerHTML = screen.html(esc);
   if (atBottom) term.scrollTop = term.scrollHeight;
 }
+function termMode(m, remember) {
+  screen.mode = m;
+  $("termMode").value = m;
+  if (remember) try { localStorage.setItem("rs6809.term." + (osInfo?.os || "none"), m); } catch (e) { /* private mode */ }
+}
+$("termMode").onchange = () => termMode($("termMode").value, true);
 let keyQueue = "";
 function sendKeys(s) { keyQueue += s; }
 setInterval(() => { if (keyQueue) { const s = keyQueue; keyQueue = ""; api("console", s); } }, 40);
 term.addEventListener("keydown", (e) => {
-  let s = null;
+  let s = screen.key(e);
+  if (s !== null) { e.preventDefault(); sendKeys(s); return; }
   if (e.key === "Enter") s = "\r";
   else if (e.key === "Backspace") s = "\b";
   else if (e.key === "Escape") s = "\x1b";
@@ -613,7 +957,7 @@ term.addEventListener("keydown", (e) => {
 });
 term.addEventListener("paste", (e) => { e.preventDefault(); sendKeys(e.clipboardData.getData("text").replace(/\r?\n/g, "\r")); });
 $("line").onkeydown = (e) => { if (e.key === "Enter") { sendKeys($("line").value + "\r"); $("line").value = ""; } };
-$("termClear").onclick = () => { termText = ""; termWrite(""); };
+$("termClear").onclick = () => { screen.reset(); termDraw(); };
 async function pollConsole() {
   if (st.console === consoleNext) return;
   const d = await api(`console?since=${consoleNext}`);
@@ -627,6 +971,10 @@ let calls = new Map(), callVersion = 0, selCall = null, switches = [];
 let osInfo = null;
 async function loadOsInfo() {
   osInfo = await api("os/info");
+  // The console's terminal type: remembered per OS, else FUZIX's vt52.
+  let m = null;
+  try { m = localStorage.getItem("rs6809.term." + osInfo.os); } catch (e) { /* private mode */ }
+  termMode(m || (osInfo.os === "fuzix" ? "vt52" : "ansi"), false);
   $("osTab").textContent = `${osInfo.name} モニタ`;
   // A bare program (no OS) has no OS monitor tab.
   $("osTab").style.display = osInfo.os === "none" ? "none" : "";
