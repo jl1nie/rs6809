@@ -8,6 +8,7 @@
 //! | `$FF0001` | console data: read takes an input byte, write sends one |
 //!
 //! Other addresses read `$FF` and ignore writes.
+use crate::tr;
 use super::Bus68k;
 use std::collections::VecDeque;
 
@@ -52,7 +53,7 @@ impl Sim68k {
     pub fn load_state(&mut self, r: &mut super::state::Reader) -> Result<(), String> {
         let ram = r.bytes()?;
         if ram.len() != self.ram.len() {
-            return Err("RAMの大きさが違う".into());
+            return Err(tr!("RAMの大きさが違う", "the RAM size differs").into());
         }
         self.ram.copy_from_slice(ram);
         self.rx = r.bytes()?.iter().copied().collect();
@@ -71,7 +72,7 @@ impl Sim68k {
     pub fn load(&mut self, addr: u32, data: &[u8]) -> Result<(), String> {
         let end = addr as usize + data.len();
         if end > self.ram.len() {
-            return Err(format!("${addr:06X}+{} はRAM（{} バイト）の外", data.len(), self.ram.len()));
+            return Err(tr!(format!("${addr:06X}+{} はRAM（{} バイト）の外", data.len(), self.ram.len()), format!("${addr:06X}+{} is outside RAM ({} bytes)", data.len(), self.ram.len())));
         }
         self.ram[addr as usize..end].copy_from_slice(data);
         Ok(())
@@ -108,18 +109,18 @@ pub fn parse_srec(text: &str) -> Result<Srec, String> {
         if line.is_empty() {
             continue;
         }
-        let err = |m: &str| format!("S-record {}行目: {m}", n + 1);
-        let kind = line.strip_prefix('S').and_then(|r| r.chars().next()).ok_or_else(|| err("Sで始まらない"))?;
+        let err = |m: &str| tr!(format!("S-record {}行目: {m}", n + 1), format!("S-record line {}: {m}", n + 1));
+        let kind = line.strip_prefix('S').and_then(|r| r.chars().next()).ok_or_else(|| err(tr!("Sで始まらない", "does not start with S")))?;
         let hex = &line[2..];
         let bytes: Vec<u8> = (0..hex.len() / 2)
             .map(|i| u8::from_str_radix(&hex[2 * i..2 * i + 2], 16))
             .collect::<Result<_, _>>()
-            .map_err(|_| err("16進でない"))?;
+            .map_err(|_| err(tr!("16進でない", "not hexadecimal")))?;
         if bytes.is_empty() || bytes[0] as usize != bytes.len() - 1 {
-            return Err(err("長さが合わない"));
+            return Err(err(tr!("長さが合わない", "the length does not match")));
         }
         if bytes.iter().fold(0u8, |s, b| s.wrapping_add(*b)) != 0xff {
-            return Err(err("チェックサムが合わない"));
+            return Err(err(tr!("チェックサムが合わない", "the checksum does not match")));
         }
         let alen = match kind {
             '1' | '9' => 2,
@@ -129,7 +130,7 @@ pub fn parse_srec(text: &str) -> Result<Srec, String> {
         };
         let body = &bytes[1..bytes.len() - 1];
         if body.len() < alen {
-            return Err(err("番地がない"));
+            return Err(err(tr!("番地がない", "no address")));
         }
         let addr = body[..alen].iter().fold(0u32, |a, b| a << 8 | u32::from(*b));
         if matches!(kind, '1' | '2' | '3') {

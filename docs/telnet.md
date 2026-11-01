@@ -1,36 +1,38 @@
-# TelnetからOS-9 Level 2へ接続
+English | [日本語](ja/telnet.md)
 
-1つの6809 CPU・OS-9カーネル・ディスクを共有し、接続ごとに独立したMC6850 ACIAとOS-9ログインシェルを使います。
-認証・ユーザーID・ホームディレクトリ・プロセスのスケジューリングはOS-9が管理します。
-接続時に空きACIAを自動選択します。待ち受けはlocalhost限定で、空きTCPポートをOSに選択させます。
+# Connecting to OS-9 Level 2 over Telnet
 
-## 準備と起動
+One 6809 CPU, OS-9 kernel and disk are shared, and each connection gets its own MC6850 ACIA and OS-9 login shell.
+OS-9 manages authentication, user IDs, home directories and process scheduling.
+A free ACIA is chosen automatically on connection. Listening is limited to localhost, and the OS picks a free TCP port.
 
-Rust 1.89以降と、READMEのLevel 2ディスク構築に必要なツールを使用します。
+## Preparing and starting
+
+You need Rust 1.89 or later and the tools the README lists for building the Level 2 disk.
 
 ```sh
 python3 scripts/build-level2-disk.py --multi-user --acia-count 3
 sh examples/nitros9-telnet.sh
 ```
 
-OS-9には `/term`・`/t0`・`/t1` の3端末と、それぞれの `tsmon` を設定します。
-生成した `artifacts/level2-multiuser/accounts.txt` にユーザー名とランダムな初期パスワードを保存します。
-ユーザー名は既定で `user1`〜`user3`、ユーザーIDは1〜3です。生成物は単一ユーザー版と別のディレクトリに置きます。
+OS-9 is set up with three terminals, `/term`, `/t0` and `/t1`, each with its own `tsmon`.
+User names and random initial passwords are saved in the generated `artifacts/level2-multiuser/accounts.txt`.
+User names default to `user1`–`user3`, with user IDs 1–3. The output goes in a different directory from the single-user version.
 
-起動すると標準エラーへ実際の待ち受け先を表示します。
+On start-up the actual listening address is printed to standard error.
 
 ```text
 rs6809: Telnet listening on 127.0.0.1:49152 (4 ACIA hardware ports; OS-9 controls active sessions)
 ```
 
-別の端末から、表示されたポートへ接続してください。
+Connect to the printed port from another terminal.
 
 ```sh
 telnet 127.0.0.1 49152
 ```
 
-Enterを押すとOS-9の `User name?:` と `Password:` が表示されます。
-ログイン後は `OS9:` プロンプトで、例えば次を実行できます。
+Press Enter and OS-9 shows `User name?:` and `Password:`.
+After logging in you can run, at the `OS9:` prompt, for example:
 
 ```text
 mfree
@@ -40,79 +42,79 @@ echo hello >memo
 list memo
 ```
 
-パスワード入力はOS-9側でエコーを無効にします。Telnetのオプション交渉、CRLF/CR NUL、IACのエスケープを扱います。
-Telnetモードではホスト標準入力をUARTへ流しません。ホスト標準出力には待ち受け開始までの起動ログだけを表示し、
-以後の `/term`（ACIA 1）の出力は接続したユーザーにのみ送ります。
+OS-9 turns echo off for password input. Telnet option negotiation, CRLF/CR NUL and IAC escapes are handled.
+In Telnet mode the host's standard input is not passed to the UART. The host's standard output shows only the boot log up to the start of listening;
+after that, `/term` (ACIA 1) output goes only to the connected user.
 
-## 端末数と接続上限
+## Terminals and the connection limit
 
-エミュレータは既存のMulticomp I/O配置に4台のACIAを用意します。
-OS-9の `tsmon` がログインの準備完了を通知したACIAだけが接続先候補になります。
-起動ROMや通常のドライバ初期化だけでは接続を受け付けません。
-OS側で2端末を開いていれば同時2接続、4端末なら同時4接続です。
-上限に達した接続はbusyメッセージを返して閉じ、既存セッションは継続します。
+The emulator provides 4 ACIAs at the existing Multicomp I/O addresses.
+Only ACIAs for which OS-9's `tsmon` has signalled it is ready for a login are candidates for a connection.
+The boot ROM or ordinary driver initialisation alone does not make an ACIA accept connections.
+If the OS has opened 2 terminals, 2 connections can be open at once; with 4 terminals, 4.
+A connection beyond the limit gets a busy message and is closed; existing sessions continue.
 
-| OS-9端末 | ACIA status/control | ACIA data |
+| OS-9 terminal | ACIA status/control | ACIA data |
 |---|---|---|
 | `/term` | `$FFD0` | `$FFD1` |
 | `/t0` | `$FFD2` | `$FFD3` |
 | `/t1` | `$FFD4` | `$FFD5` |
 | `/t2` | `$FFD6` | `$FFD7` |
 
-ディスクの構築オプション `--acia-count 1|2|3|4` は、OS-9に収録する端末記述子と起動する監視プロセス数を指定します。
-ホスト側に別のセッション上限を設定する必要はありません。
-既存ディスク内のOS-9設定を変更する場合も、端末記述子と `tsmon` の起動設定を合わせてください。
+The disk build option `--acia-count 1|2|3|4` sets the terminal descriptors included in OS-9 and the number of monitor processes started.
+No separate session limit is needed on the host.
+When changing the OS-9 configuration on an existing disk, keep the terminal descriptors and the `tsmon` start-up settings in step.
 
-任意のアカウントを構築時に指定する例：
+An example giving your own accounts at build time:
 
 ```sh
 python3 scripts/build-level2-disk.py --multi-user --acia-count 2 \
   --user alice:initial-password --user bob:another-password
 ```
 
-アカウント数と同時接続数は独立です。同じアカウントで複数端末へログインすることもOS-9が扱います。
-認証データはゲストの `/dd/SYS/password` にあり、ホームは `/dd/ユーザー名` です。
-ホームには対応するOS-9ユーザーIDを設定し、他ユーザー向けの読み書き権限を外します。
+The number of accounts and the number of simultaneous connections are independent. OS-9 also handles logging into several terminals with the same account.
+The authentication data is in the guest's `/dd/SYS/password`, and homes are `/dd/username`.
+Each home gets the matching OS-9 user ID, with read and write permissions for other users removed.
 
-## 切断と再接続
+## Disconnecting and reconnecting
 
-TCP切断をMC6850のDCD消失として伝えます。エミュレータはゲストのプロセスを直接終了しません。
-ゲストのACIAドライバが読み取り待ち中にDCD消失を検出すると、OS-9の `F$Send` で `S$HUP` を通知します。
-既存のLogin/Shellのシグナルハンドラが処理し、親の `tsmon` が次のログインを準備します。
+A TCP disconnect is passed on as loss of the MC6850's DCD. The emulator does not end guest processes directly.
+When the guest's ACIA driver sees DCD loss while waiting to read, it sends `S$HUP` with OS-9's `F$Send`.
+The existing Login/Shell signal handlers deal with it, and the parent `tsmon` prepares the next login.
 
-同じACIAを次の接続へ渡す前に、`tsmon` が端末を開き直して `SS.Reset` による連続2回のマスターリセットと再設定を確認します。
-このシーケンスをログイン準備完了の通知に使い、起動途中のUARTへの入力を防ぎます。
-この確認により、次の接続が前ユーザーのシェルや入力を引き継ぐことを防ぎます。
-`/term` はカーネルも保持するため、最後のファイルクローズだけに頼らず明示的なリセットで確認します。
+Before handing the same ACIA to the next connection, it checks that `tsmon` has reopened the terminal and done two master resets in a row with `SS.Reset`, then reconfigured it.
+This sequence is used as the signal that a login is ready, which keeps input from reaching a UART that is still starting up.
+The check keeps the next connection from inheriting the previous user's shell or input.
+The kernel also holds `/term`, so instead of relying only on the last file close, the explicit reset is checked.
 
-ゲストが長い処理中、またはバックグラウンドプロセスが端末を保持している場合、後処理の時期はOS-9の動作に従います。
-ホスト側からのタイムアウトによる強制終了やプロセスツリーの削除は行いません。
+If the guest is in a long operation, or a background process holds the terminal, when the cleanup happens is up to OS-9.
+The host never forces an end by timeout or removes process trees.
 
-## ファイルの永続化
+## Keeping files
 
-TelnetモードではSDの書き込みを既定で永続化します。完了した512バイトセクタをSDイメージへ書き込み、
-`sync_data` 後に完了とします。ファイルを閉じてコマンドが完了した後、エミュレータを再起動しても内容が残ります。
-同じイメージへの二重書き込みを防ぐため、起動中は排他ロックします。読み取り専用ファイルや書き込みエラーは起動・実行エラーになります。
+In Telnet mode SD writes are kept by default. Each completed 512-byte sector is written to the SD image
+and counted as done after `sync_data`. After a file is closed and the command finishes, its contents survive restarting the emulator.
+To prevent two writers on the same image, it is exclusively locked while running. A read-only file or a write error is a start-up or run-time error.
 
 ```text
 artifacts/level2-multiuser/multicomp09-level2.img
 ```
 
-永続的に更新するのはこのSDイメージです。構築元の `nitros9-level2.dsk` は自動更新しません。
-通常のローカルコンソールモードでも `--persist-disk` で永続化できます。
-従来どおり変更を破棄したい実験では `--volatile-disk` を指定します。
+This SD image is what is updated persistently. The source `nitros9-level2.dsk` is not updated automatically.
+The ordinary local console mode can also keep writes with `--persist-disk`.
+For experiments where changes should be discarded as before, give `--volatile-disk`.
 
-既存のマルチユーザーディスクがある場合、構築スクリプトは再構築を拒否します。
-`--force` を指定した再構築は、保存ファイルとアカウントを初期化します。
-別の構成を試す場合は `--output 別ディレクトリ` を使えます。
-SDイメージ・構築元ディスク・アカウント情報はホスト上で0600の権限で作成します。
+If a multi-user disk already exists, the build script refuses to rebuild it.
+Rebuilding with `--force` resets the saved files and accounts.
+To try another configuration, use `--output other-directory`.
+The SD image, the source disk and the account information are created on the host with mode 0600.
 
-## 待ち受けポート
+## Listening port
 
-既定の `--telnet` は `127.0.0.1:0` へbindし、空きポートを自動取得します。再起動すると番号が変わることがあります。
-固定したい場合は `--telnet 127.0.0.1:6809` のように指定できます。非ループバックアドレスへのbindは拒否します。
+The default `--telnet` binds to `127.0.0.1:0` and gets a free port automatically. The number may change on restart.
+To fix it, give for example `--telnet 127.0.0.1:6809`. Binding to non-loopback addresses is refused.
 
-## 検証
+## Verification
 
 ```sh
 cargo test
@@ -120,11 +122,11 @@ python3 scripts/test-telnet.py
 python3 scripts/test-telnet.py --acia-count 4
 ```
 
-実際のROMとOS-9を使用し、同時ログイン、誤パスワードの拒否、パスワード非表示、入出力の分離、
-複数プロセス、他ユーザーのホームへのアクセス制限、接続上限、切断後の再認証、再起動後のファイル保持を確認します。
-テストは一時ディレクトリに専用ディスクを構築し、利用中のディスクやアカウントを変更しません。
+Using the real ROM and OS-9, this checks simultaneous logins, rejection of wrong passwords, hidden passwords, separated input and output,
+multiple processes, restricted access to other users' homes, the connection limit, re-authentication after disconnecting and files kept after restarting.
+The tests build their own disk in a temporary directory and do not change the disks or accounts in use.
 
-参照キットには追加修正が必要でした。`nitros9-telnet.patch` はMC6850のDCD/端末リセット、
-Tsmonの端末再オープン、SysGoのログイン監視起動、Loginの端末オプション参照位置、T2記述子を調整します。
-また、旧Multicompカーネルで6809用の `F$CpyMem` が未登録だったため、KrnP2へ互換サービスを追加し、
-`procs` でプロセス名も取得できるようにしています。エミュレータ本体はRust標準ライブラリだけで動作します。
+The reference kit needed further changes. `nitros9-telnet.patch` adjusts the MC6850 DCD and terminal reset,
+Tsmon reopening the terminal, SysGo starting the login monitors, where Login reads the terminal options, and the T2 descriptor.
+Also, the old Multicomp kernel did not register `F$CpyMem` for the 6809, so a compatible service was added to KrnP2,
+which also lets `procs` get process names. The emulator itself runs on the Rust standard library alone.

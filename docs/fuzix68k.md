@@ -1,15 +1,17 @@
-# FUZIX/68000とプロセスモニタ
+English | [日本語](ja/fuzix68k.md)
 
-FUZIX 0.5（Alan Cox氏らによる小さなUnix系OS）のTiny68K版を、Tiny68K互換の機械（[68000 CPUコア](m68k.md)）で動かし、
-ICEでシステムコール・プロセス表・プロセス切り替えを観察します。OS-9との比較は [fork・exec・waitとOS-9のF$Fork・F$Wait](fork-compare.md) にあります。
+# FUZIX/68000 and the process monitor
+
+The Tiny68K port of FUZIX 0.5 (a small Unix-like OS by Alan Cox and others) runs on the Tiny68K-compatible machine ([68000 CPU core](m68k.md)),
+and the ICE watches its system calls, process table and process switches. A comparison with OS-9 is in [fork, exec and wait versus OS-9's F$Fork and F$Wait](fork-compare.md).
 
 ```sh
-sh scripts/build-m68k-elf.sh          # 初回だけ。m68k-elfのbinutilsとgcc（数十分）
-sh scripts/build-fuzix-tiny68k.sh     # FUZIXのカーネル・コマンド・ディスク
-sh examples/fuzix68k.sh               # rootでログインしたシェル（^Cで終了。ディスクへの書き込みは残さない）
+sh scripts/build-m68k-elf.sh          # first time only: m68k-elf binutils and gcc (tens of minutes)
+sh scripts/build-fuzix-tiny68k.sh     # FUZIX kernel, commands and disk
+sh examples/fuzix68k.sh               # a shell logged in as root (^C to quit; disk writes are not kept)
 sh examples/fuzix68k.sh --ice         # ICE: http://127.0.0.1:6809/
-sh examples/fuzix68k.sh --persist     # 書き込みを artifacts/fuzix68k/hd.img に残す（終わる前に telinit 6）
-sh examples/fuzix68k.sh --tty2        # 2つ目の端末：telnet 127.0.0.1 6812 でログイン
+sh examples/fuzix68k.sh --persist     # keep writes in artifacts/fuzix68k/hd.img (run telinit 6 before quitting)
+sh examples/fuzix68k.sh --tty2        # a second terminal: log in with telnet 127.0.0.1 6812
 ```
 
 ```text
@@ -30,86 +32,86 @@ Welcome to FUZIX.
    11    tty1 00:00:00 ps
 ```
 
-## ツールチェーン
+## Toolchain
 
-FUZIXの68000版は `m68k-elf-gcc -m68000` を前提にし、ユーザープログラムを68000用のlibgcc（32ビットの乗除算の補助関数）とリンクします。
-FUZIXの `README.68000.md` は、m68k-linux-gnuのgccを使わないよう警告し、作者の環境としてgcc 10.3.0（`--with-cpu=68000`）を挙げています。
-`scripts/build-m68k-elf.sh` は、binutils 2.42とgcc 10.3.0（Cのみ、`--with-cpu=68000`）をGNUの配布元から取得し、SHA-256を確かめて
-`artifacts/tools/m68k-elf` に組み立てます。sudoは要りません。組み立てたlibgccに68020以降の命令がないことを、逆アセンブルで確かめました。
+The FUZIX 68000 port expects `m68k-elf-gcc -m68000` and links user programs with a 68000 libgcc (helper functions for 32-bit multiply and divide).
+FUZIX's `README.68000.md` warns against using m68k-linux-gnu's gcc and names gcc 10.3.0 (`--with-cpu=68000`) as the author's setup.
+`scripts/build-m68k-elf.sh` fetches binutils 2.42 and gcc 10.3.0 (C only, `--with-cpu=68000`) from GNU's sites, checks their SHA-256 and
+builds them into `artifacts/tools/m68k-elf`. No sudo is needed. Disassembly confirmed that the built libgcc has no 68020-or-later instructions.
 
-`scripts/build-fuzix-tiny68k.sh` は、`reference/FUZIX`（コミット `776bfc9`）で `make TARGET=tiny68k diskimage` を実行し、
-`artifacts/fuzix68k` に `disk.img`・`fuzix.elf`・`fuzix.sym`（nmの出力）・`offsets.txt` を置きます。手を入れたのは2か所です。
+`scripts/build-fuzix-tiny68k.sh` runs `make TARGET=tiny68k diskimage` in `reference/FUZIX` (commit `776bfc9`) and
+puts `disk.img`, `fuzix.elf`, `fuzix.sym` (nm output) and `offsets.txt` in `artifacts/fuzix68k`. Two places needed changes:
 
-- `Applications/as09` の `as.c`：gcc 10.3の `-Os` が `switch` の表を誤った大きさにする（`value -684 out of range`。README.68000.mdがgcc 11の問題として書いているもの）ため、
-  `-fno-jump-tables` で先に作ります。
-- `Applications/MWC/cmd`：2つの文法を同じ `y.tab.c` に出すため、並列のmakeでは一方の出力がもう一方の `.c` になります。ここだけ並列にせず先に作ります。
+- `as.c` in `Applications/as09`: gcc 10.3's `-Os` gives a `switch` table the wrong size (`value -684 out of range`; README.68000.md describes this as a gcc 11 problem),
+  so it is built first with `-fno-jump-tables`.
+- `Applications/MWC/cmd`: two grammars are generated into the same `y.tab.c`, so with a parallel make one's output becomes the other's `.c`. This directory alone is built first, not in parallel.
 
-## 起動
+## Booting
 
-モニタROMはありません。`--boot-sector` で、エミュレータがディスクのLBA 1（512バイト）を `$15000` に置いて始めます。
-モニタの「CP/M起動ローダー」と同じ動きで、起動ローダー（`loader.S`、`$15000` 向け）が `$1F0000` に移ってからカーネルをLBA 2以降から `$400` に読み、起動します。
-ディスクは基板と同じくバイトの並びが入れ替わっているので、ブートセクタも語ごとに入れ替えて置きます。
+There is no monitor ROM. With `--boot-sector` the emulator places LBA 1 of the disk (512 bytes) at `$15000` and starts there.
+As with the monitor's "CP/M boot loader", the boot loader (`loader.S`, built for `$15000`) moves itself to `$1F0000`, reads the kernel from LBA 2 onwards to `$400` and starts it.
+The disk has its bytes swapped, as on the board, so the boot sector is also placed with each word swapped.
 
-- 時計：カーネルがDUARTのタイマー（初期値 `$480`、ベクタ `$81`）と割り込みマスクを設定し、端末の初期化でACRにタイマーモード（`$70`／`$F0`）を書きます。
-  エミュレータのACRはリセット時の0のままで、100 Hzの時計が動きます。
-- IDEのドライブ1（スレーブ）はありません（DEVビットが立つと状態0）。カーネルは `IDE drive 1: ide error, status=0000` と表示します。
-- 起動時の質問（`bootdev:`、日付、時刻、`login:`）には `examples/fuzix68k/boot.script` が答えます。
-  スクリプトでは `#` で始まる行は注釈なので、プロンプト `# ` を待つ行は `\#` と書きます。
-  `?` で始まる行は、順番に関係なく、その文字列が出るたびに答えます（fsckの `Continue? `・`Fix? `・`Zap? `・`Rebuild free list? ` に `y`）。
+- Clock: the kernel sets the DUART timer (initial value `$480`, vector `$81`) and the interrupt mask, and the terminal setup writes the timer mode (`$70`/`$F0`) to ACR.
+  The emulator's ACR stays at its reset value 0, and the 100 Hz clock runs.
+- There is no IDE drive 1 (slave) (with the DEV bit set the status is 0). The kernel prints `IDE drive 1: ide error, status=0000`.
+- `examples/fuzix68k/boot.script` answers the boot-time questions (`bootdev:`, date, time, `login:`).
+  In the script, lines starting with `#` are comments, so a line waiting for the prompt `# ` is written `\#`.
+  Lines starting with `?` answer whenever their string appears, in any order (`y` to fsck's `Continue? `, `Fix? `, `Zap? ` and `Rebuild free list? `).
 
-## ディスクの書き込み・端末・状態
+## Disk writes, terminals and state
 
-- 端末の種類は `TERM=vt52`（`init` が設定し、`/etc/termcap` にあります）。ICEのコンソールはFUZIXでは既定でVT52として解釈するので、`less`・`vile`・`fleamacs` などの全画面のプログラムも使えます。
-  FUZIXの端末には大きさの既定がないため（全画面のプログラムが200行以上あると思ってしまう）、ビルドスクリプトが `/root/.profile` に `stty rows 24 cols 80` を書きます。
-  ICEの中では、ブラウザのコンソールの大きさを、ICEが1つ目の端末の `winsize` に書き込みます（`.profile` の後でも直します）。
+- The terminal type is `TERM=vt52` (set by `init`, and present in `/etc/termcap`). The ICE console interprets FUZIX output as VT52 by default, so full-screen programs such as `less`, `vile` and `fleamacs` work.
+  FUZIX terminals have no default size (full-screen programs think there are more than 200 lines), so the build script writes `stty rows 24 cols 80` into `/root/.profile`.
+  Inside the ICE, the ICE writes the size of the browser's console into the first terminal's `winsize` (and corrects it again after `.profile`).
 
-- 既定では毎回ビルドした `disk.img` から起動し、書き込みはメモリの中だけです（止め方にかかわらず、次の起動は同じ状態から）。
-- `--persist` は `artifacts/fuzix68k/hd.img`（初回に `disk.img` を写す）に書き込みを残します。終わる前に `telinit 6` を打ってください。
-  ランレベル6の `/etc/rc.halt` が `umount -a` とルートの読み出し専用への切り替えをしてから止めます（`halt` だけではファイルシステムが汚れたまま）。
-  汚れたまま止めた場合は、次の起動でfsckが検査・修復します（起動スクリプトが質問に答えます）。
-- `--tty2 [127.0.0.1:6812]` で、DUARTのチャネルB（`/dev/tty2`）をTCPで待ち受けます。`telnet 127.0.0.1 6812` で2つ目のログインができます。
-  ビルドスクリプトが、もとは `off` の `/etc/inittab` の `getty /dev/tty2` を `respawn` にします（FUZIXの `ucp` でファイルシステムを書き換える）。
-  接続する前の出力は最後の2 KiBを取っておき、接続したときに送ります。
-- ICEの「保存」で、ログインした後などの状態（メモリ上のディスクも含む）をファイルにし、`--load-state` か「読込」でそこから再開できます。
-  「↺ リセット」は起動したときの状態（ブートセクタから）に戻します。
+- By default each run boots from the freshly built `disk.img`, and writes stay in memory (however it is stopped, the next run starts from the same state).
+- `--persist` keeps writes in `artifacts/fuzix68k/hd.img` (copied from `disk.img` the first time). Type `telinit 6` before quitting:
+  runlevel 6's `/etc/rc.halt` runs `umount -a` and switches the root to read-only before halting (`halt` alone leaves the file system dirty).
+  If it was stopped dirty, fsck checks and repairs it on the next boot (the boot script answers its questions).
+- `--tty2 [127.0.0.1:6812]` listens for TCP on DUART channel B (`/dev/tty2`). `telnet 127.0.0.1 6812` gives a second login.
+  The build script changes `getty /dev/tty2` in `/etc/inittab` from its original `off` to `respawn` (editing the file system with FUZIX's `ucp`).
+  The last 2 KiB of output before a connection are kept and sent when one connects.
+- The ICE's "Save" writes the current state (after logging in, for example, including the disk in memory) to a file, and `--load-state` or "Load" resumes from it.
+  "↺ Reset" goes back to the state at start-up (from the boot sector).
 
-## FUZIXモニタ（`src/ice/fuzix.rs`）
+## FUZIX monitor (`src/ice/fuzix.rs`)
 
-`--os fuzix` で使うOSの層です。カーネルのシンボル（`--symbols artifacts/fuzix68k/fuzix.sym`）から `udata_shadow`・`ptab`・`ptab_end`・`e_trap12` を受け取り
-（`OsMonitor::use_symbols`）、TRAP #12のベクタが `e_trap12` を指し、プロセスが動いていれば有効になります。
+The OS layer used with `--os fuzix`. It takes `udata_shadow`, `ptab`, `ptab_end` and `e_trap12` from the kernel's symbols (`--symbols artifacts/fuzix68k/fuzix.sym`)
+(`OsMonitor::use_symbols`), and becomes active when the TRAP #12 vector points at `e_trap12` and a process is running.
 
-| 項目 | 内容 |
+| Item | Contents |
 |---|---|
-| 捕捉 | 各プログラムの先頭に写される入口の `TRAP #12`。番号はD0.W、引数はD1・A0・A1・A2（`e_trap12` が `u_argn` に写す順） |
-| 復帰 | D0が結果。エラーならD0＝-1、D1.Wがエラー番号（`ENOENT` など） |
-| 名前 | `Kernel/include/syscall_name.h` の80個（`_fork`・`execve`・`waitpid`・`_exit`・`open`・`read`・`write` など）。主なものに日本語の要約と説明 |
-| 引数・結果 | パス名、`execve` の引数の並び、ファイル記述子と開いたときのパス名（`fd 9（/dev/tty1）`）、`write` の中身、`read` で読んだ中身、`_fork` の子のpid、`waitpid` のpidと終了コード |
-| 実行中のプロセス | `udata_shadow`（実行中のプロセスの `u_data`）。その `u_ptab` から `p_pid` |
-| プロセス表 | `ptab` から `ptab_end` が指す終わりまでの使用中の項目：pid、親、名前、状態（実行中・実行待ち・睡眠・I/O待ち・停止・fork中・ゾンビ）、uid、端末、待っているもの、優先度、nice、大きさ、時間 |
-| キュー | 実行待ち（`P_READY`）、睡眠（`P_SLEEP`・`P_IOWAIT`）、ゾンビ |
-| メモリ | カーネル（`$400`〜`_end`）と、各プロセスの `u_codebase`〜`u_top`、そのプロセスが今システムコールの中か |
+| Catching | The `TRAP #12` in the entry stub copied to the start of each program. The number is in D0.W, the arguments in D1, A0, A1, A2 (the order in which `e_trap12` copies them to `u_argn`) |
+| Return | D0 is the result. On error D0 = -1 and D1.W is the error number (`ENOENT` and so on) |
+| Names | The 80 in `Kernel/include/syscall_name.h` (`_fork`, `execve`, `waitpid`, `_exit`, `open`, `read`, `write` and others), with summaries and explanations for the main ones |
+| Arguments and results | Path names, `execve`'s argument list, file descriptors with the path they were opened with (`fd 9 (/dev/tty1)`), what `write` writes, what `read` read, `_fork`'s child pid, `waitpid`'s pid and exit code |
+| Running process | `udata_shadow` (the running process's `u_data`), and `p_pid` through its `u_ptab` |
+| Process table | Used entries from `ptab` up to the end `ptab_end` points to: pid, parent, name, state (running, ready, sleeping, I/O wait, stopped, forking, zombie), uid, terminal, what it waits on, priority, nice, size, time |
+| Queues | Ready (`P_READY`), sleeping (`P_SLEEP`, `P_IOWAIT`), zombies |
+| Memory | The kernel (`$400`–`_end`) and each process's `u_codebase`–`u_top`, and whether that process is now inside a system call |
 
-構造体の位置（`struct p_tab` は94バイト、`p_pid` は4、`p_pptr` は8、`p_name` は48など）は68000の2バイト境界の詰め方に依存するため、
-実際のカーネルのヘッダを `scripts/fuzix-offsets.c` でm68k-elf-gccに読ませて求め、`offsets.txt` とモニタの定数をテストで比べます。
+The structure offsets (`struct p_tab` is 94 bytes, `p_pid` at 4, `p_pptr` at 8, `p_name` at 48 and so on) depend on the 68000's 2-byte alignment,
+so they are found by having m68k-elf-gcc read the real kernel headers with `scripts/fuzix-offsets.c`, and a test compares `offsets.txt` with the monitor's constants.
 
-## 検証
+## Verification
 
 ```sh
 cargo test --release --test fuzix68k -- --ignored
 ```
 
-- 保存した状態から別のICEで再開し、すぐにシェルでコマンドが動くこと。リセットで `bootdev:` からやり直すこと。
-- 2つ目の端末（チャネルB）に `login:` が出て、ログインすると2つ目の `-sh` がプロセス表に出ること。
-- 起動から `ls /`・`ps`・`echo` の出力。シェルの `_fork`（子のpid）、子の `execve "/bin/ps" [ps]`・`open "/dev/proc"`・`_exit`、親の `waitpid` が子のpidを受け取ること、
-  `open` で学んだパス名が後の `write` に付くこと、タイムラインが子に切り替わり、シェルに戻ること。
-- シェルの子の `execve` の呼び出し前（D0＝23、プロセス表で子は実行中、親のシェルは睡眠）、`waitpid` の復帰後（D0が子のpid）、
-  `cat /nosuch` の `open` のエラー復帰（-1 `ENOENT`）で停止。
-- DAP：例外ブレークポイントの条件 `_fork`・`waitpid` で止まり、スレッド名が `68000 (FUZIX プロセス9 -sh)` になること。
-- モニタの構造体の位置が、カーネルのヘッダから求めた値と一致すること。
+- Resuming from a saved state in another ICE, a command runs in the shell at once. Reset starts again from `bootdev:`.
+- `login:` appears on the second terminal (channel B), and after logging in a second `-sh` appears in the process table.
+- The output of `ls /`, `ps` and `echo` after booting. The shell's `_fork` (child pid), the child's `execve "/bin/ps" [ps]`, `open "/dev/proc"` and `_exit`, and the parent's `waitpid` receiving the child's pid;
+  the path learnt from `open` is attached to later `write`s; the timeline switches to the child and back to the shell.
+- Stops before the shell child's `execve` (D0 = 23; in the process table the child is running and the parent shell sleeping), after `waitpid` returns (D0 is the child's pid),
+  and at the error return of `open` for `cat /nosuch` (-1 `ENOENT`).
+- DAP: stops with the exception breakpoint conditions `_fork` and `waitpid`, and the thread name is `68000 (FUZIX process 9 -sh)`.
+- The monitor's structure offsets match those found from the kernel headers.
 
-## 制約
+## Limitations
 
-- 構造体の位置は、このFUZIXの版（`776bfc9`）とTiny68Kの設定のものです。版を変えたら `offsets.txt` とテストで確かめてください。
-- プロセスIDは8ビットで扱います（256以上は下位8ビット）。
-- ユーザープログラムのシンボルは読み込みません（カーネルのみ）。
-- シグナルで中断されたシステムコールは、同じプロセスが次のシステムコールを出した時点で「戻らない」とします。
+- The structure offsets are for this FUZIX version (`776bfc9`) and the Tiny68K configuration. After changing versions, check them with `offsets.txt` and the tests.
+- Process IDs are handled as 8 bits (256 and above use the low 8 bits).
+- User program symbols are not loaded (the kernel's only).
+- A system call interrupted by a signal is marked "no return" when the same process makes its next system call.

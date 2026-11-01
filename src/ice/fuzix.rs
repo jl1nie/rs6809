@@ -7,6 +7,7 @@
 //! give `udata_shadow` (the running process's u_data), `ptab` and
 //! `ptab_end`. Structure offsets are those of the kernel built from
 //! FUZIX 776bfc9 for Tiny68K (`scripts/fuzix-offsets.c` prints them).
+use crate::tr;
 use super::json::{Json, obj};
 use super::osmon::{Call, CpuRegs, Image, Mem, OsMonitor, PathNames, Process, Regs68k, Service, Svc};
 
@@ -78,6 +79,42 @@ const EXPLAIN: &[(&str, &str, &str)] = &[
     ("setsid", "セッションの作成", "新しいセッションとプロセスグループを作る。"),
     ("_time", "時刻", "現在時刻を読む。"),
 ];
+
+const EXPLAIN_EN: &[(&str, &str, &str)] = &[
+    ("_exit", "Exit the process", "Ends the process, leaving the exit code for the parent. It becomes a zombie until the parent's waitpid collects it. Does not return."),
+    ("open", "Open a file", "Opens the path name and returns the lowest free file descriptor."),
+    ("close", "Close a file descriptor", "Frees the file descriptor."),
+    ("read", "Read", "Reads up to n bytes from the file descriptor into the buffer. A terminal may sleep until a whole line has come."),
+    ("write", "Write", "Writes n bytes of the buffer to the file descriptor."),
+    ("execve", "Run a program", "Replaces the process's contents with the program at the path name. On success it does not return: the new program starts from its beginning."),
+    ("_fork", "Duplicate the process", "Duplicates the process. The parent gets the child's pid, the child 0. With FUZIX's flat memory the child's memory is a full copy."),
+    ("waitpid", "Wait for a child", "Waits for a child to end and returns its ID and status; sleeps while the child still runs."),
+    ("kill", "Send a signal", "Sends a signal to a process."),
+    ("signal", "Set a signal's handling", "Sets what happens on a signal (ignore, default or a function)."),
+    ("pipe", "Make a pipe", "Makes a pipe: two connected file descriptors, for reading and for writing."),
+    ("dup", "Duplicate a descriptor", "Duplicates a file descriptor."),
+    ("dup2", "Duplicate a descriptor (to a number)", "Duplicates a file descriptor onto the given number."),
+    ("brk", "Set the data end", "Sets the end of the program's data area (the heap)."),
+    ("sbrk", "Grow or shrink the data", "Grows the data area by n bytes and returns the old end."),
+    ("chdir", "Change directory", "Changes the current directory."),
+    ("_stat", "File information", "Reads the i-node information of the file at the path name."),
+    ("_fstat", "File information (descriptor)", "Reads the i-node information of a file descriptor."),
+    ("ioctl", "Control a device", "Reads or changes device settings such as the terminal's."),
+    ("getpid", "Process ID", "Returns the caller's process ID."),
+    ("_pause", "Wait for a signal", "Sleeps until a signal arrives."),
+    ("_getdirent", "Read a directory", "Reads directory entries."),
+    ("_select", "Wait for I/O", "Waits until one of several file descriptors can be read or written."),
+    ("setsid", "Make a session", "Makes a new session and process group."),
+    ("_time", "Time", "Reads the current time."),
+];
+
+const STATUS_EN: [&str; 9] = ["empty", "running", "ready", "sleeping", "I/O wait", "stopped", "forking", "zombie", "NOSLEEP"];
+
+/// (summary, explanation) of a call in the current language.
+fn texts(name: &str) -> (&'static str, &'static str) {
+    let table = if super::lang::en() { EXPLAIN_EN } else { EXPLAIN };
+    table.iter().find(|e| e.0 == name).map_or(("", ""), |e| (e.1, e.2))
+}
 
 const ERRNO: [&str; 60] = [
     "", "EPERM", "ENOENT", "ESRCH", "EINTR", "EIO", "ENXIO", "E2BIG", "ENOEXEC", "EBADF", "ECHILD", "EAGAIN",
@@ -179,7 +216,7 @@ impl Fuzix {
     }
     fn fd(&self, paths: &PathNames, pid: u8, fd: u32) -> String {
         match paths.get(&(pid, fd as u8)) {
-            Some(p) => format!("{fd}（{p}）"),
+            Some(p) => tr!(format!("{fd}（{p}）"), format!("{fd} ({p})")),
             None => format!("{fd}"),
         }
     }
@@ -208,22 +245,22 @@ impl OsMonitor for Fuzix {
         obj([
             ("os", "fuzix".into()),
             ("name", "FUZIX".into()),
-            ("title", "FUZIX 0.5（68000）".into()),
-            ("current", "実行中 udata_shadow".into()),
+            ("title", tr!("FUZIX 0.5（68000）", "FUZIX 0.5 (68000)").into()),
+            ("current", tr!("実行中 udata_shadow", "running udata_shadow").into()),
             (
                 "queues",
                 Json::Arr(vec![
-                    q("ready", "実行待ち（P_READY）"),
-                    q("sleep", "睡眠（P_SLEEP・P_IOWAIT）"),
-                    q("zombie", "ゾンビ（親のwaitpid待ち）"),
+                    q("ready", tr!("実行待ち（P_READY）", "ready (P_READY)")),
+                    q("sleep", tr!("睡眠（P_SLEEP・P_IOWAIT）", "sleeping (P_SLEEP, P_IOWAIT)")),
+                    q("zombie", tr!("ゾンビ（親のwaitpid待ち）", "zombie (waiting for the parent's waitpid)")),
                 ]),
             ),
-            ("image", "プロセスのメモリ".into()),
+            ("image", tr!("プロセスのメモリ", "process memory").into()),
             ("memmap", "regions".into()),
-            ("errorLabel", "FUZIXのエラー復帰（-1とerrno）".into()),
-            ("switchLabel", "FUZIXのプロセス切り替え".into()),
-            ("imagesTitle", "カーネルとプロセスのメモリ".into()),
-            ("internalLabel", "カーネル内部の呼び出し".into()),
+            ("errorLabel", tr!("FUZIXのエラー復帰（-1とerrno）", "FUZIX error return (-1 and errno)").into()),
+            ("switchLabel", tr!("FUZIXのプロセス切り替え", "FUZIX process switch").into()),
+            ("imagesTitle", tr!("カーネルとプロセスのメモリ", "kernel and process memory").into()),
+            ("internalLabel", tr!("カーネル内部の呼び出し", "calls inside the kernel").into()),
             ("breakExample", "_fork".into()),
         ])
     }
@@ -280,7 +317,7 @@ impl OsMonitor for Fuzix {
     }
     fn explain(&self, code: u8) -> &'static str {
         let name = NAMES.get(code as usize).copied().unwrap_or("");
-        EXPLAIN.iter().find(|e| e.0 == name).map_or("", |e| e.2)
+        texts(name).1
     }
     fn error_name(&self, code: u8) -> String {
         ERRNO.get(code as usize).filter(|n| !n.is_empty()).map_or_else(|| format!("errno {code}"), |n| n.to_string())
@@ -292,8 +329,8 @@ impl OsMonitor for Fuzix {
             .map(|(i, n)| Service {
                 code: i as u8,
                 name: n.to_string(),
-                desc: EXPLAIN.iter().find(|e| e.0 == *n).map_or("", |e| e.1).into(),
-                explain: EXPLAIN.iter().find(|e| e.0 == *n).map_or("", |e| e.2),
+                desc: texts(n).0.into(),
+                explain: texts(n).1,
             })
             .collect()
     }
@@ -319,12 +356,12 @@ impl OsMonitor for Fuzix {
         let path = |a: u32| format!("\"{}\"", cstr(m, a, 64));
         let name = NAMES.get(code as usize).copied().unwrap_or("");
         match name {
-            "_exit" => format!("終了コード{}", a1 as i32),
-            "open" => format!("{} フラグ${:X} モード{:o}", path(a1), a2, a3),
+            "_exit" => tr!(format!("終了コード{}", a1 as i32), format!("exit code {}", a1 as i32)),
+            "open" => tr!(format!("{} フラグ${:X} モード{:o}", path(a1), a2, a3), format!("{} flags ${:X} mode {:o}", path(a1), a2, a3)),
             "close" | "dup" | "_fstat" | "fchdir" => format!("fd {}", self.fd(paths, pid, a1)),
-            "read" => format!("fd {} ${:06X} {}バイト", self.fd(paths, pid, a1), a2, a3),
-            "write" => format!("fd {} {}バイト \"{}\"", self.fd(paths, pid, a1), a3, bytes_preview(m, a2, a3)),
-            "_lseek" => format!("fd {} 位置${:X} 基準{}", self.fd(paths, pid, a1), a2, a3),
+            "read" => tr!(format!("fd {} ${:06X} {}バイト", self.fd(paths, pid, a1), a2, a3), format!("fd {} ${:06X} {} bytes", self.fd(paths, pid, a1), a2, a3)),
+            "write" => tr!(format!("fd {} {}バイト \"{}\"", self.fd(paths, pid, a1), a3, bytes_preview(m, a2, a3)), format!("fd {} {} bytes \"{}\"", self.fd(paths, pid, a1), a3, bytes_preview(m, a2, a3))),
+            "_lseek" => tr!(format!("fd {} 位置${:X} 基準{}", self.fd(paths, pid, a1), a2, a3), format!("fd {} offset ${:X} whence {}", self.fd(paths, pid, a1), a2, a3)),
             "chdir" | "unlink" | "rmdir" | "chroot" | "_stat" | "access" | "chmod" | "chown" | "mkdir" | "_statfs" => {
                 path(a1)
             }
@@ -340,17 +377,17 @@ impl OsMonitor for Fuzix {
                 }
                 format!("{} [{}]", path(a1), argv.join(" "))
             }
-            "_fork" => format!("フラグ${a1:X}"),
-            "waitpid" => format!("pid {} 状態 ${:06X} オプション{}", a1 as i32, a2, a3),
-            "kill" => format!("pid {} シグナル{}", a1 as i32, a2),
-            "signal" => format!("シグナル{} 処理 ${:06X}", a1, a2),
+            "_fork" => tr!(format!("フラグ${a1:X}"), format!("flags ${a1:X}")),
+            "waitpid" => tr!(format!("pid {} 状態 ${:06X} オプション{}", a1 as i32, a2, a3), format!("pid {} status ${:06X} options {}", a1 as i32, a2, a3)),
+            "kill" => tr!(format!("pid {} シグナル{}", a1 as i32, a2), format!("pid {} signal {}", a1 as i32, a2)),
+            "signal" => tr!(format!("シグナル{} 処理 ${:06X}", a1, a2), format!("signal {} handler ${:06X}", a1, a2)),
             "dup2" => format!("fd {} → {}", self.fd(paths, pid, a1), a2),
             "brk" => format!("${a1:06X}"),
-            "sbrk" => format!("{}バイト", a1 as i32),
-            "ioctl" => format!("fd {} 要求${:X} ${:06X}", self.fd(paths, pid, a1), a2, a3),
-            "pipe" => format!("配列 ${a1:06X}"),
-            "_getdirent" => format!("fd {} ${:06X} {}バイト", self.fd(paths, pid, a1), a2, a3),
-            "_select" => format!("{}個", a1),
+            "sbrk" => tr!(format!("{}バイト", a1 as i32), format!("{} bytes", a1 as i32)),
+            "ioctl" => tr!(format!("fd {} 要求${:X} ${:06X}", self.fd(paths, pid, a1), a2, a3), format!("fd {} request ${:X} ${:06X}", self.fd(paths, pid, a1), a2, a3)),
+            "pipe" => tr!(format!("配列 ${a1:06X}"), format!("array ${a1:06X}")),
+            "_getdirent" => tr!(format!("fd {} ${:06X} {}バイト", self.fd(paths, pid, a1), a2, a3), format!("fd {} ${:06X} {} bytes", self.fd(paths, pid, a1), a2, a3)),
+            "_select" => tr!(format!("{}個", a1), format!("{} fds", a1)),
             _ => {
                 let _ = a4;
                 String::new()
@@ -369,18 +406,18 @@ impl OsMonitor for Fuzix {
             "open" | "dup" | "dup2" => format!("fd {d0}"),
             "_fork" => {
                 if d0 == 0 {
-                    "0（子）".into()
+                    tr!("0（子）", "0 (child)").into()
                 } else {
-                    format!("子のpid {d0}")
+                    tr!(format!("子のpid {d0}"), format!("child pid {d0}"))
                 }
             }
             "waitpid" => {
                 let st = m.peek16(inp.a[0]);
-                format!("pid {d0} 状態${st:04X}（終了コード{}）", st >> 8)
+                tr!(format!("pid {d0} 状態${st:04X}（終了コード{}）", st >> 8), format!("pid {d0} status ${st:04X} (exit code {})", st >> 8))
             }
-            "read" => format!("{}バイト \"{}\"", d0, bytes_preview(m, inp.a[0], d0.max(0) as u32)),
-            "write" | "_getdirent" => format!("{d0}バイト"),
-            "pipe" => format!("fd {} と {}", m.peek32(inp.d[1]) as i32, m.peek32(inp.d[1] + 4) as i32),
+            "read" => tr!(format!("{}バイト \"{}\"", d0, bytes_preview(m, inp.a[0], d0.max(0) as u32)), format!("{} bytes \"{}\"", d0, bytes_preview(m, inp.a[0], d0.max(0) as u32))),
+            "write" | "_getdirent" => tr!(format!("{d0}バイト"), format!("{d0} bytes")),
+            "pipe" => tr!(format!("fd {} と {}", m.peek32(inp.d[1]) as i32, m.peek32(inp.d[1] + 4) as i32), format!("fd {} and {}", m.peek32(inp.d[1]) as i32, m.peek32(inp.d[1] + 4) as i32)),
             "brk" | "sbrk" => format!("${:06X}", out.d[0]),
             _ => format!("{d0}"),
         }
@@ -427,7 +464,7 @@ impl OsMonitor for Fuzix {
                     queue: QUEUE.get(st as usize).copied().unwrap_or("-"),
                     fields: vec![
                         ("name", name8(m, p + P_NAME).into()),
-                        ("status", STATUS.get(st as usize).copied().unwrap_or("?").into()),
+                        ("status", if super::lang::en() { &STATUS_EN[..] } else { &STATUS[..] }.get(st as usize).copied().unwrap_or("?").into()),
                         ("pid", u32::from(m.peek16(p + P_PID)).into()),
                         ("uid", u32::from(m.peek16(p + P_UID)).into()),
                         ("tty", u32::from(m.peek(p + P_TTY)).into()),
@@ -449,7 +486,7 @@ impl OsMonitor for Fuzix {
         let Some(s) = self.s() else { return Vec::new() };
         let mut v = vec![Image {
             name: "kernel".into(),
-            fields: vec![("kind", "カーネル".into()), ("addr", "$000400".into())],
+            fields: vec![("kind", tr!("カーネル", "kernel").into()), ("addr", "$000400".into())],
             chunks: vec![(0x400, s.kernel_end.saturating_sub(0x400) as usize, 0x400)],
         }];
         for p in self.entries(m) {
@@ -466,7 +503,7 @@ impl OsMonitor for Fuzix {
             v.push(Image {
                 name: format!("{}[{pid}]", name8(m, u + U_NAME)),
                 fields: vec![
-                    ("kind", "プロセス".into()),
+                    ("kind", tr!("プロセス", "process").into()),
                     ("addr", format!("${base:06X}").into()),
                     ("size", format!("{}K", (top - base) / 1024).into()),
                     ("insys", (m.peek(u + U_INSYS) != 0).into()),
@@ -478,7 +515,7 @@ impl OsMonitor for Fuzix {
         v
     }
     fn memory_map(&self, m: &dyn Mem) -> Json {
-        let mut regions = vec![obj([("name", "例外ベクタ".into()), ("kind", "sys".into()), ("start", 0.into()), ("end", 0x400.into())])];
+        let mut regions = vec![obj([("name", tr!("例外ベクタ", "exception vectors").into()), ("kind", "sys".into()), ("start", 0.into()), ("end", 0x400.into())])];
         for img in self.images(m) {
             let (start, len, _) = img.chunks[0];
             let kind = if img.name == "kernel" { "sys" } else { "prog" };

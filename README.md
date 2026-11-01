@@ -1,50 +1,52 @@
+English | [日本語](README.ja.md)
+
 # rs6809
 
-Pure RustのMotorola 6809・68000エミュレータです。外部crate・Cコード・FFIを使わず、標準ライブラリだけで動きます。
+A Motorola 6809 and 68000 emulator in pure Rust. It uses no external crates, no C code and no FFI; it runs on the standard library alone.
 
-- **6809**：Multicomp互換機でNitrOS-9 Level 1 / BASIC09とLevel 2を起動します。Level 2ではTelnetから複数ユーザーが同時に使え、ゲスト上のCコンパイラのデモもあります。
-- **68000**：全命令・例外・割り込みを実装し、公開の命令テスト（SingleStepTests、約100万件）で検証したコアです。
-  Tiny68K互換機でCP/M-68K 1.3（Alcyon Cでのコンパイルを含む）と、Unix系のFUZIX 0.5（2端末）を動かします。
-- **ICE**：ブラウザのデバッガとVS Code（DAP）から、ブレーク・ステップ・ソース行・Cの変数を扱えます。
-  OSモニタが、NitrOS-9・CP/M-68K・FUZIXのシステムコールを呼び出しから復帰まで追い、プロセス表・スケジューラ・メモリを日本語の説明付きで見せます。
-  リセットと、機械の状態の保存・読み込みもできます。
+- **6809**: boots NitrOS-9 Level 1 / BASIC09 and Level 2 on a Multicomp-compatible machine. Level 2 supports several simultaneous users over Telnet, and there is a demo of the C compiler running on the guest.
+- **68000**: a core that implements every instruction, exception and interrupt, verified against the public instruction tests (SingleStepTests, about one million cases).
+  On a Tiny68K-compatible machine it runs CP/M-68K 1.3 (including compiling with Alcyon C) and the Unix-like FUZIX 0.5 (two terminals).
+- **ICE**: from a browser debugger and from VS Code (DAP) you can use breakpoints, stepping, source lines and C variables.
+  The OS monitor follows NitrOS-9, CP/M-68K and FUZIX system calls from call to return, and shows the process table, scheduler and memory with explanations.
+  It can also reset the machine and save and load its state.
 
-| 説明 | 内容 |
+| Document | Contents |
 |---|---|
-| [ICEとOSモニタ](docs/ice.md) | デバッガ、OSの差し替え口、HTTP API、DAP |
-| [68000 CPUコア](docs/m68k.md) | 68000の実装と検証、機械の構成 |
-| [CP/M-68K](docs/cpm68k.md)・[FUZIX/68000](docs/fuzix68k.md) | BIOS、ディスク、BDOSモニタ／FUZIXのビルドとプロセスモニタ |
-| [fork・exec・waitとOS-9のF$Fork・F$Wait](docs/fork-compare.md) | 同じICEで取った記録で2つのOSを比べた資料 |
+| [ICE and OS monitor](docs/ice.md) | Debugger, OS plug-in interface, HTTP API, DAP |
+| [68000 CPU core](docs/m68k.md) | 68000 implementation and verification, machine configuration |
+| [CP/M-68K](docs/cpm68k.md) / [FUZIX/68000](docs/fuzix68k.md) | BIOS, disks, BDOS monitor / building FUZIX and the process monitor |
+| [fork, exec, wait and OS-9's F$Fork, F$Wait](docs/fork-compare.md) | A comparison of the two OSes using traces recorded with the same ICE |
 
-## 簡単セットアップ
+## Quick setup
 
-NitrOS-9（6809）、CP/M-68K、FUZIX（68000）を、シェル一発でそろえて動かせます。
+NitrOS-9 (6809), CP/M-68K and FUZIX (68000) can be set up and run with a single shell command each.
 
 ```sh
 git clone https://github.com/jl1nie/rs6809.git && cd rs6809
-./setup.sh                 # 必要なものをすべて取得（2回目以降は足りないものだけ）
-./run.sh nitros9           # NitrOS-9 Level 1 / BASIC09（6809、Multicomp）
-./run.sh cpm68k            # CP/M-68K 1.3（68000、Tiny68K）。Alcyon Cでhello.cをコンパイルできる
-./run.sh fuzix             # FUZIX 0.5（68000、Tiny68K）。rootでログイン済みのシェル
-./run.sh fuzix --ice       # どれも --ice でデバッガ（http://127.0.0.1:6809/）、--dap でVS Code
+./setup.sh                 # fetch everything needed (on later runs, only what is missing)
+./run.sh nitros9           # NitrOS-9 Level 1 / BASIC09 (6809, Multicomp)
+./run.sh cpm68k            # CP/M-68K 1.3 (68000, Tiny68K). hello.c can be compiled with Alcyon C
+./run.sh fuzix             # FUZIX 0.5 (68000, Tiny68K). A shell already logged in as root
+./run.sh fuzix --ice       # any of these: --ice for the debugger (http://127.0.0.1:6809/), --dap for VS Code
 ```
 
-`setup.sh` は次を行い、ダウンロードはすべてリポジトリ内のSHA-256（`release/images.sha256` など）で確かめます。
+`setup.sh` does the following, and checks every download against the SHA-256 sums in the repository (`release/images.sha256` and others).
 
-| 段階 | 内容 |
+| Stage | Contents |
 |---|---|
-| エミュレータ | Rust 1.89以降があれば `cargo build --release`。なければ（または古ければ）実行ファイルを [Releases](https://github.com/jl1nie/rs6809/releases) から取得：Linux x86-64（静的リンクで、ディストリビューションを問わない）、macOS（Apple Silicon）。システムには何もインストールしない |
-| NitrOS-9 | ブートROMとSDイメージを [nitros9-basic09-starter-kit](https://github.com/kyo-ta04/nitros9-basic09-starter-kit) のコミット `bf60370` から取得（明示的なライセンスがないため再配布しない） |
-| CP/M-68K・FUZIX | コンパイル済みのイメージをReleasesから取得（CP/M-68Kのシステムとディスク、FUZIXのディスクとカーネルのシンボル） |
-| Alcyon C | CP/M-68K 1.3の元の配布物（cpm.z80.de）から取得してディスクに書き込み、`AS68 -I AS68INIT` まで済ませる（ライセンスの扱いが明記されていないため再配布しない。取れなければCなしで動く） |
+| Emulator | With Rust 1.89 or later, `cargo build --release`. Without it (or if it is too old), fetches the executable from [Releases](https://github.com/jl1nie/rs6809/releases): Linux x86-64 (statically linked, works on any distribution) or macOS (Apple Silicon). Installs nothing on the system |
+| NitrOS-9 | Fetches the boot ROM and SD image from commit `bf60370` of [nitros9-basic09-starter-kit](https://github.com/kyo-ta04/nitros9-basic09-starter-kit) (not redistributed, as there is no explicit license) |
+| CP/M-68K, FUZIX | Fetches prebuilt images from Releases (the CP/M-68K system and disk, the FUZIX disk and kernel symbols) |
+| Alcyon C | Fetches it from the original CP/M-68K 1.3 distribution (cpm.z80.de), writes it to the disk and runs `AS68 -I AS68INIT` (not redistributed, as its license terms are not stated. If it cannot be fetched, the system runs without C) |
 
-必要なものは `curl`・`gzip`・`sha256sum`（または `shasum`）で、Alcyon Cには `python3` と `unzip` も使います。
-各イメージの中身・ライセンス・ソースの入手先はReleaseの `NOTICE.md`（`release/NOTICE.md`）にあります。
-FUZIXの書き込みを残す `./run.sh fuzix --persist`（終わる前に `telinit 6`）、2つ目の端末の `./run.sh fuzix --tty2`（`telnet 127.0.0.1 6812`）も使えます。
+It needs `curl`, `gzip` and `sha256sum` (or `shasum`); Alcyon C also uses `python3` and `unzip`.
+The contents, licenses and source locations of each image are in the Release's `NOTICE.md` (`release/NOTICE.md`).
+You can also use `./run.sh fuzix --persist` to keep FUZIX's writes (run `telinit 6` before quitting), and `./run.sh fuzix --tty2` for a second terminal (`telnet 127.0.0.1 6812`).
 
-## ビルドと最小サンプル
+## Build and minimal example
 
-Rust 1.89以降（edition 2024対応）のツールチェーンを使用します。
+Uses a Rust 1.89 or later toolchain (edition 2024 support).
 
 ```sh
 cargo build --release
@@ -52,15 +54,15 @@ cargo run --example hello
 cargo test
 ```
 
-`hello`は6809の機械語を実行し、メモリマップされたACIA経由で `Hello, 6809!` を出力します。
+`hello` runs 6809 machine code and prints `Hello, 6809!` through a memory-mapped ACIA.
 
-## 6809とNitrOS-9
+## 6809 and NitrOS-9
 
 ### NitrOS-9 / BASIC09
 
-[kyo-ta04/nitros9-basic09-starter-kit](https://github.com/kyo-ta04/nitros9-basic09-starter-kit) の起動ROMとSDイメージを利用します。
-検証したコミットは `bf60370cfa180636cde3ee305d089d94872de82a` です。
-取得済みならクローンは不要です。参照キットのCエミュレータやOSをビルドする必要はありません。
+Uses the boot ROM and SD image from [kyo-ta04/nitros9-basic09-starter-kit](https://github.com/kyo-ta04/nitros9-basic09-starter-kit).
+The verified commit is `bf60370cfa180636cde3ee305d089d94872de82a`.
+If you have already fetched them, no clone is needed. You do not need to build the reference kit's C emulator or OS.
 
 ```sh
 git clone --recursive https://github.com/kyo-ta04/nitros9-basic09-starter-kit.git reference/nitros9-basic09-starter-kit
@@ -71,13 +73,13 @@ cargo run --release -- \
   --boot
 ```
 
-取得・ビルド後は `sh examples/nitros9.sh` でも同じ構成で起動できます。
+After fetching and building, `sh examples/nitros9.sh` starts the same configuration.
 
-`--boot`はCamelForthで `NITROS9` を入力します。`Time ?` に `2026/10/30 12:00:00` のように入力すると `OS9:` が表示されます。
-`basic09` を実行すると `B:` プロンプトに入ります。
-標準入力はホストの端末設定に従います。通常の端末では行を入力してEnterで送信します。終了はCtrl-Cです。
+`--boot` types `NITROS9` into CamelForth. Answer `Time ?` with something like `2026/10/30 12:00:00` and `OS9:` appears.
+Running `basic09` takes you to the `B:` prompt.
+Standard input follows the host's terminal settings. In a normal terminal, type a line and press Enter to send it. Quit with Ctrl-C.
 
-自動でBASIC09プログラムを編集・実行し、`42` を出力する例：
+An example that edits and runs a BASIC09 program automatically and prints `42`:
 
 ```sh
 cargo run --release -- \
@@ -86,37 +88,37 @@ cargo run --release -- \
   --boot --script examples/basic09.tsv --until 42 --max-cycles 300000000
 ```
 
-スクリプトの各行は `待機する出力<TAB>入力文字列` です。入力末尾にCRを付け、仮想CPUのサイクル数に合わせて1文字ずつ送信します。
-自動実行中は標準入力に文字を送らないでください。
+Each line of the script is `output to wait for<TAB>input string`. A CR is appended to the input, which is sent one character at a time, paced by the virtual CPU's cycle count.
+Do not type into standard input during an automated run.
 
-実機コードを使用した起動テスト：
+Boot test using the real code:
 
 ```sh
 cargo test --release --test nitros9 -- --ignored --nocapture
 ```
 
-このテストはROM→NitrOS-9→シェル→BASIC09→編集モード→`RUN test`→`42`→`B:` の全経路を確認します。
-参照キットが必要なので通常の `cargo test` では無視されます。
+This test checks the whole path ROM → NitrOS-9 → shell → BASIC09 → edit mode → `RUN test` → `42` → `B:`.
+It needs the reference kit, so it is ignored by a normal `cargo test`.
 
-### NitrOS-9 Level 2（512KB／1MB）
+### NitrOS-9 Level 2 (512KB / 1MB)
 
-上記と同じ参照キット（コミット `bf60370cfa180636cde3ee305d089d94872de82a`）から、
-Multicomp用Level 2カーネルと専用ディスクを構築できます。
-Python 3.12以降・make・ホストのCコンパイラ・curl・patchが必要です。
-LWTOOLS 4.25とToolShedは「Cコンパイラ」と同じ手順で作業ディレクトリ内に用意されます。
+From the same reference kit as above (commit `bf60370cfa180636cde3ee305d089d94872de82a`),
+you can build a Level 2 kernel for Multicomp and a dedicated disk.
+It needs Python 3.12 or later, make, a host C compiler, curl and patch.
+LWTOOLS 4.25 and ToolShed are set up in the working directory by the same procedure as in "C compiler".
 
 ```sh
 python3 scripts/build-level2-disk.py
 sh examples/nitros9-level2.sh
 ```
 
-起動後に `NitrOS-9/6809 Level 2 V03.3.0`、`LEVEL2-STARTED`、`OS9:` が表示されます。
-`mfree` で物理メモリの上限と空きメモリを確認できます。既定の512KBでは `$7FFFF` まで、
-`--ram-kb 1024` を付けて起動すると `$FFFFF` までを使います。
-ディスクには `shell`、`echo`、`del`、`mfree` と、Microware Cのオリジナルのドライバ `cc1` 一式
-（`c.prep`〜`c.link`、`/dd/DEFS` のヘッダ、`/dd/LIB` のライブラリ）、BASIC09（`basic09`・`runb`・`inkey`・`syscall`）を収録しています。
-BASIC09は参照キットの検証済みBASIC09ディスクから同じモジュールを取り出します。
-`/dd/SOURCES` には `hello.c`・`mandel.c`・`mandel.b09` を置きます。
+After boot, `NitrOS-9/6809 Level 2 V03.3.0`, `LEVEL2-STARTED` and `OS9:` are shown.
+`mfree` shows the upper limit of physical memory and the free memory. The default 512KB uses up to `$7FFFF`;
+starting with `--ram-kb 1024` uses up to `$FFFFF`.
+The disk contains `shell`, `echo`, `del`, `mfree`, the full set of Microware C's original driver `cc1`
+(`c.prep` to `c.link`, headers in `/dd/DEFS`, libraries in `/dd/LIB`), and BASIC09 (`basic09`, `runb`, `inkey`, `syscall`).
+BASIC09 is taken as the same modules from the reference kit's verified BASIC09 disk.
+`/dd/SOURCES` holds `hello.c`, `mandel.c` and `mandel.b09`.
 
 ```text
 OS9:chd /dd/SOURCES
@@ -125,8 +127,8 @@ OS9:/dd/SOURCES/hello
 Hello from C: 42
 ```
 
-`cc1` は作業用のシェルスクリプト `c.com` と中間ファイル `ctmp.<プロセス番号>.*` を現在のディレクトリに作ります。
-`-f=` を省略すると実行ファイルを実行ディレクトリ `/dd/CMDS` に出力します。
+`cc1` creates a working shell script `c.com` and intermediate files `ctmp.<process number>.*` in the current directory.
+If `-f=` is omitted, the executable is written to the execution directory `/dd/CMDS`.
 
 ```text
 OS9:chd /dd/SOURCES
@@ -134,113 +136,113 @@ OS9:basic09
 B:load mandel.b09
 B:run mandel
 ```
-Level 2では各プロセスが専用の64KB空間を持つため、Level 1でメモリ不足になった `cc1` も動作します。
-Level 2用の参照ソースに必要な変更は生成先だけに適用し、参照キットとLevel 1ディスクは保持します。
-変更理由は [Level 2対応の記録](docs/level2.md) を参照してください。
+In Level 2 each process has its own 64KB space, so `cc1`, which ran out of memory on Level 1, works.
+Changes needed in the reference sources for Level 2 are applied only to the generated output; the reference kit and the Level 1 disk are left as they are.
+For the reasons behind the changes, see [Notes on Level 2 support](docs/level2.md).
 
 ```sh
 cargo test --release --test nitros9_level2 -- --ignored
 ```
 
-このテストはROMからの起動、startup実行、シェルでの `mfree`、別プロセスの `echo` 実行と
-シェルへの復帰、`cc1` による `hello.c` のコンパイル・実行、BASIC09での `6*7` と `mandel.b09` の実行を確認します。
+This test checks booting from ROM, running startup, `mfree` in the shell, running `echo` as a separate process and
+returning to the shell, compiling and running `hello.c` with `cc1`, and running `6*7` and `mandel.b09` in BASIC09.
 
-MulticompのRAMは既定512KBで、`--ram-kb 64|128|256|512|1024` で選べます。
-従来の64KB構成は `--ram-kb 64` で再現できます。
-Level 2カーネルは起動時に512KBか1MBかを検出するため、同じディスクをどちらでも使えます。
-Level 2には512KB以上が必要です。起動スクリプトにも `--ram-kb 1024` を追加できます（例：`sh examples/nitros9-telnet.sh --ram-kb 1024`）。
-CoCo 3専用のROM・ディスク・GIMEには対応しません。
+Multicomp RAM is 512KB by default, selectable with `--ram-kb 64|128|256|512|1024`.
+The old 64KB configuration is reproduced with `--ram-kb 64`.
+The Level 2 kernel detects 512KB or 1MB at boot, so the same disk works with either.
+Level 2 needs 512KB or more. You can also add `--ram-kb 1024` to the start scripts (for example `sh examples/nitros9-telnet.sh --ram-kb 1024`).
+The CoCo 3-specific ROM, disks and GIME are not supported.
 
-### Telnet・マルチユーザー
+### Telnet and multiple users
 
-OS-9 Level 2の端末設定に合わせて同時1〜4セッションを利用できます。
-各接続を空きACIAへ割り当て、OS-9の `login` で認証します。プロセスとSIGHUP処理もOS-9が管理します。
-待ち受けはlocalhost限定、TCPポート番号は空き番号を自動取得します。Telnetモードのファイル書き込みは永続化します。
+One to four simultaneous sessions are available, according to the OS-9 Level 2 terminal configuration.
+Each connection is assigned to a free ACIA and authenticated by OS-9's `login`. Processes and SIGHUP handling are also managed by OS-9.
+It listens on localhost only, and the TCP port number is chosen automatically from free ports. File writes in Telnet mode are persistent.
 
 ```sh
 python3 scripts/build-level2-disk.py --multi-user --acia-count 3
 sh examples/nitros9-telnet.sh
 ```
 
-起動時に表示された `127.0.0.1:ポート番号` に別の端末から接続し、Enterを押してログインします。
-例えば表示が `127.0.0.1:49152` なら：
+From another terminal, connect to the `127.0.0.1:port` shown at startup and press Enter to log in.
+For example, if it shows `127.0.0.1:49152`:
 
 ```sh
 telnet 127.0.0.1 49152
 ```
 
-初期構成は `/term`・`/t0`・`/t1` の3端末です。構築時の `--acia-count 1|2|3|4` で、
-OS-9の端末記述子と `tsmon` の起動数を変更できます。準備できた端末だけを空きACIAとして受け付け、
-同時接続数はOS-9側の設定で決まります。Telnetモードではホストの標準入力は使いません。
+The initial configuration has three terminals: `/term`, `/t0` and `/t1`. With `--acia-count 1|2|3|4` at build time,
+you can change the OS-9 terminal descriptors and the number of `tsmon` instances started. Only terminals that are ready are accepted as free ACIAs,
+and the number of simultaneous connections is decided by the OS-9 configuration. In Telnet mode the host's standard input is not used.
 
-初期アカウントは `user1`〜`user3` で、ランダムな初期パスワードを
-`artifacts/level2-multiuser/accounts.txt` に保存します。認証はOS-9の `login` が行い、
-切断はACIAのDCD消失として通知します。OS-9のドライバと既存のSIGHUPハンドラが後処理を行います。
+The initial accounts are `user1` to `user3`; random initial passwords are saved in
+`artifacts/level2-multiuser/accounts.txt`. Authentication is done by OS-9's `login`, and
+a disconnect is signalled as loss of DCD on the ACIA. OS-9's driver and its existing SIGHUP handler do the cleanup.
 
-ファイルの保存先は `artifacts/level2-multiuser/multicomp09-level2.img` です。
-コマンド完了後の変更はエミュレータ再起動後も残ります。同じイメージへの二重書き込みは排他ロックで防ぎます。
-既存のマルチユーザーディスクがある場合、構築スクリプトは再構築を拒否します。
-`--force` を指定した再構築は保存ファイルとアカウントを初期化します。
+Files are stored in `artifacts/level2-multiuser/multicomp09-level2.img`.
+Changes made after a command completes survive restarting the emulator. An exclusive lock prevents two writers on the same image.
+If a multi-user disk already exists, the build script refuses to rebuild it.
+Rebuilding with `--force` resets the stored files and the accounts.
 
-実際のOS-9で同時ログイン・接続上限・セッション分離・再接続・ファイル永続化を検証するには：
+To verify simultaneous logins, the connection limit, session isolation, reconnection and file persistence on real OS-9:
 
 ```sh
 python3 scripts/test-telnet.py
 python3 scripts/test-telnet.py --acia-count 4
 ```
 
-テスト用ディスクは一時ディレクトリに作成します。
-設定・切断時の動作・保存先・検証手順は [Telnet接続の説明](docs/telnet.md) にまとめています。
+The test disk is created in a temporary directory.
+Configuration, disconnect behavior, storage location and verification steps are described in [Telnet connections](docs/telnet.md).
 
-#### 複数ユーザーで同時にマンデルブロー
+#### Mandelbrot with several users at once
 
-複数のTelnetユーザーが1台の6809を共有し、それぞれのホームで `mandel.c` を `cc1` でコンパイルして実行します。
-参照キットと「Cコンパイラ」の必要ツール、`cargo build --release` を事前に済ませてください。
+Several Telnet users share one 6809, and each compiles `mandel.c` with `cc1` in their home directory and runs it.
+Prepare the reference kit and the tools required for "C compiler", and run `cargo build --release`, beforehand.
 
 ```sh
 python3 scripts/demo-mandelbrot.py --users 3
 ```
 
-スクリプトは `artifacts/level2-mandel/` にマルチユーザーディスクを作り直し、次の順に実行します。
+The script recreates a multi-user disk in `artifacts/level2-mandel/` and runs the following in order.
 
-1. 1人で `cc1 mandel.c -f=/dd/ユーザー名/mandel` と `/dd/ユーザー名/mandel` を実行し、基準の画像と時間を記録します。
-2. 全員が同時にコンパイルします。
-3. 全員が同時に自分の `mandel` を実行し、画像が基準と一致することを確認します。
+1. One user runs `cc1 mandel.c -f=/dd/username/mandel` and `/dd/username/mandel`, recording the reference image and time.
+2. All users compile at the same time.
+3. All users run their own `mandel` at the same time, and each image is checked against the reference.
 
-端末では各ユーザーのコンパイル段階と描画済み行数を表示し、最後に単独時と同時実行時の所要時間を比較します。
-`--users 1|2|3|4` で人数を、`--skip-build` で既存ディスクの再利用を指定できます。
-マルチユーザー構成では各ユーザーのホームに `hello.c`・`mandel.c`・`mandel.b09` を置きます。
-出力先は `-f=` で自分のホームを指定してください。省略すると全員共通の `/dd/CMDS` に書き込みます。
+The terminal shows each user's compile stage and number of rows drawn, and at the end compares the time taken alone and when run simultaneously.
+`--users 1|2|3|4` sets the number of users, and `--skip-build` reuses an existing disk.
+In the multi-user configuration, `hello.c`, `mandel.c` and `mandel.b09` are placed in each user's home.
+Use `-f=` to direct output to your own home. If omitted, everyone writes to the shared `/dd/CMDS`.
 
-手動で試す場合は、デモでディスクを作成した後に起動し、別々の端末から接続します。
+To try it by hand, start it after the demo has created the disk, and connect from separate terminals.
 
 ```sh
 sh examples/nitros9-mandel-telnet.sh
-telnet 127.0.0.1 ポート番号
+telnet 127.0.0.1 port
 ```
 
-アカウントは `artifacts/level2-mandel/accounts.txt` にあります。
-エミュレータの標準出力には起動ログだけを表示するため、同じ端末でtelnetを使っても出力は混ざりません。
+The accounts are in `artifacts/level2-mandel/accounts.txt`.
+The emulator's standard output shows only the boot log, so output does not get mixed even if you use telnet in the same terminal.
 
-### Cコンパイラ
+### C compiler
 
-Microware Cの各段階・ヘッダ・標準ライブラリと、64KB向けの小さな `cc` ドライバを追加したディスクを使用します。
-元のBASIC09用イメージは保持します。C開発用イメージの作成：
+Uses a disk with Microware C's stages, headers and standard library, plus a small `cc` driver for 64KB.
+The original BASIC09 image is kept. To create the C development image:
 
 ```sh
 python3 scripts/build-c-disk.py
 ```
 
-初回の構築にはPython 3.12以降・make・ホストのCコンパイラ・curlが必要です。
-LWTOOLS 4.25を取得してSHA-256を確認し、LWASMと参照キットのToolShedを作業ディレクトリ内にビルドします。
-システムへのインストールは行いません。既存のツールを使う場合は `LWASM` と `OS9_TOOL` に実行ファイルのパスを指定できます。
-ホストのCコンパイラはこれらの構築に使用します。ゲスト側のCのコンパイルは6809上で実行します。
+The first build needs Python 3.12 or later, make, a host C compiler and curl.
+It fetches LWTOOLS 4.25, checks its SHA-256, and builds LWASM and the reference kit's ToolShed in the working directory.
+Nothing is installed on the system. To use existing tools, set `LWASM` and `OS9_TOOL` to the executable paths.
+The host C compiler is used for building these. Compiling C for the guest runs on the 6809.
 
 ```sh
 sh examples/nitros9-c.sh
 ```
 
-日時を入力した後、OS9のシェルで：
+After entering the date and time, in the OS9 shell:
 
 ```text
 chd /dd/SOURCES
@@ -248,148 +250,148 @@ cc hello
 ./hello
 ```
 
-`Hello from C: 42` と表示されます。サンプルは `examples/hello.c` です。
-K&R形式のCを使い、関数・ループ・整数演算と `printf` を実行します。現代のISO Cとは構文や標準ライブラリが異なります。
+`Hello from C: 42` is shown. The sample is `examples/hello.c`.
+It is K&R-style C and runs functions, loops, integer arithmetic and `printf`. Syntax and the standard library differ from modern ISO C.
 
-`cc hello` または `cc hello.c` は現在のディレクトリにある単一ソースを対象に、次の順に起動します。
+`cc hello` or `cc hello.c` takes a single source in the current directory and runs the following in order.
 
 ```text
 c.prep → c.pass1 → c.pass2 → c.opt → c.asm → c.link
 ```
 
-`cc` はファイル名のみを受け取り、パス指定や複数ソース、追加オプションには対応していません。
-出力実行ファイルは同じディレクトリの `hello`、中間ファイルは `hello.m/.i/.a/.o/.r` です。
-各段階が失敗するとそこで停止します。Microwareの元の `cc1` と `make` も収録していますが、
-この64KB構成では `cc1` 経由の実行でメモリ不足が発生したため、検証済みの `cc` を使用してください。
+`cc` accepts only a file name; paths, multiple sources and extra options are not supported.
+The output executable is `hello` in the same directory, and the intermediate files are `hello.m/.i/.a/.o/.r`.
+If a stage fails, it stops there. Microware's original `cc1` and `make` are also included, but
+in this 64KB configuration running through `cc1` ran out of memory, so use the verified `cc`.
 
-前処理器は `/dd/DEFS`、リンカは `/dd/LIB/cstart.r` と `/dd/LIB/clib.l` を使用します。
-ホストでサンプルソースを変更した場合はディスク作成スクリプトを再実行してください。
-ディスク再構築はC開発用イメージを初期状態に戻します。ゲストで作成した実行ファイルや変更は、現在の仕様では終了時に消えます。
+The preprocessor uses `/dd/DEFS`, and the linker uses `/dd/LIB/cstart.r` and `/dd/LIB/clib.l`.
+If you change the sample sources on the host, rerun the disk build script.
+Rebuilding the disk resets the C development image. With the current design, executables and changes made on the guest are lost on exit.
 
-自動でコンパイル・実行する場合：
+To compile and run automatically:
 
 ```sh
 sh examples/nitros9-c.sh --script examples/ccompiler.tsv --until 'Hello from C: 42' --max-cycles 300000000
 ```
 
-Cのコンパイル、再コンパイル、失敗後のシェル復帰のテスト：
+Tests for C compilation, recompilation and returning to the shell after a failure:
 
 ```sh
 cargo test --release --test ccompiler -- --ignored
 ```
 
-### マンデルブロー集合のCデモ
+### Mandelbrot set C demo
 
-リポジトリのルートで、エミュレータのコマンド作成、C開発用ディスク作成、
-ゲスト内でのCベンチマークのコンパイル・実行を順に行います。
-事前に上記の参照キット取得と「Cコンパイラ」の必要ツールの準備を済ませてください。
+From the repository root, build the emulator command, create the C development disk,
+and compile and run the C benchmark on the guest, in that order.
+First fetch the reference kit as above and prepare the tools required for "C compiler".
 
-1. ホストでエミュレータのコマンドを作成します。
+1. Build the emulator command on the host.
 
    ```sh
    cargo build --release
    ```
 
-   実行ファイルは `target/release/rs6809` です。
+   The executable is `target/release/rs6809`.
 
-2. CソースとMicroware Cを収録したディスクを作り、エミュレータを起動します。
+2. Create a disk containing the C source and Microware C, and start the emulator.
 
    ```sh
    python3 scripts/build-c-disk.py
    sh examples/nitros9-c.sh
    ```
 
-   `Time ?` に `2026/10/31 12:00:00` のように日時を入力します。
+   Answer `Time ?` with a date and time such as `2026/10/31 12:00:00`.
 
-3. ゲストの `OS9:` プロンプトでCベンチマークをコンパイルします。
+3. At the guest's `OS9:` prompt, compile the C benchmark.
 
    ```text
    chd /dd/SOURCES
    cc mandel
    ```
 
-   `c.prep` から `c.link` まで実行され、同じディレクトリに実行コマンド `mandel` ができます。
+   `c.prep` through `c.link` run, and the command `mandel` is created in the same directory.
 
-4. ゲストで実行します。
+4. Run it on the guest.
 
    ```text
    ./mandel
    ```
 
-   79列×25行のマンデルブローが描画され、`MANDELBROT-DONE` と表示されます。
-   対話実行の終了はCtrl-Cです。
+   A 79-column by 25-row Mandelbrot set is drawn and `MANDELBROT-DONE` is shown.
+   Quit an interactive run with Ctrl-C.
 
-ディスク作成からコンパイル・実行・1回の速度計測まで自動で行う場合は：
+To automate everything from disk creation through compiling, running and one speed measurement:
 
 ```sh
 sh examples/mandelbrot.sh
 ```
 
-標準エラーの `measured_cycles` が描画区間の仮想CPUサイクル数、続く `host_seconds` が
-ホストでの所要秒数です。起動・コンパイル時間はこの描画区間に含みません。
+`measured_cycles` on standard error is the number of virtual CPU cycles for the drawing section, and the following `host_seconds` is
+the time taken on the host in seconds. Boot and compile time are not included in the drawing section.
 
-ウォームアップ1回と計測7回で中央値を求める場合は、ディスク作成後に：
+To get the median of seven measured runs after one warm-up run, after creating the disk:
 
 ```sh
 python3 scripts/benchmark-emulator.py --workload basic09 --runs 7 --output artifacts/benchmark/mandelbrot-c.json
 ```
 
-こちらはビルド済みの `target/release/rs6809` を使います。
-結果は画面と指定したJSONに保存します。Cソースを変更した場合はディスクを作り直してください。
+This uses the already built `target/release/rs6809`.
+Results are shown on screen and saved to the given JSON file. If you change the C source, recreate the disk.
 
-画像で指定されたBASIC09の `PROCEDURE mandel` をCへ直接移植しています。
-79列×25行、X=-39〜39、Y=-12〜12、実数演算、最大16回反復で、発散した点を0〜F、内部を空白で表示します。
-初期値z=c、更新後の発散判定も元のBASIC09に合わせています。
-ソースは [examples/mandel.c](examples/mandel.c)、自動入力は `examples/mandelbrot.tsv` です。
-元のBASIC09とC版を実行して比較し、**1,975文字すべての一致**を確認しました。
-この実数版の描画時間は7回の中央値 **1.673355秒**、704,530,641仮想サイクル（421.0MHz相当）でした。
-起動・コンパイルを除いた計測で、[詳細と再現手順](docs/mandelbrot-basic09-port.md#c移植版の速度ベンチマーク)を保存しています。
+It is a direct port to C of the BASIC09 `PROCEDURE mandel` given in an image.
+79 columns by 25 rows, X=-39 to 39, Y=-12 to 12, floating-point arithmetic, up to 16 iterations; diverging points are shown as 0 to F and interior points as spaces.
+The initial value z=c and the divergence check after the update also match the original BASIC09.
+The source is [examples/mandel.c](examples/mandel.c), and the automated input is `examples/mandelbrot.tsv`.
+Running and comparing the original BASIC09 and the C version confirmed that **all 1,975 characters match**.
+The drawing time of this floating-point version was a median of **1.673355 seconds** over seven runs, 704,530,641 virtual cycles (equivalent to 421.0MHz).
+Measured excluding boot and compile; [details and reproduction steps](docs/ja/mandelbrot-basic09-port.md#c移植版の速度ベンチマーク) (Japanese) are saved.
 
-元のBASIC09ソースも `/dd/SOURCES/mandel.b09` に収録しています。
-再比較は `python3 scripts/compare-basic09-port.py` で実行できます。
-詳しい移植対応とSDドライバの修正は [移植の記録](docs/mandelbrot-basic09-port.md) を参照してください。
+The original BASIC09 source is also included as `/dd/SOURCES/mandel.b09`.
+Run the comparison again with `python3 scripts/compare-basic09-port.py`.
+For the details of the port and the SD driver fix, see [Notes on the port](docs/ja/mandelbrot-basic09-port.md) (Japanese).
 
-以前の76×25・固定小数点版は `benchmarks/mandel_fixed.c` として保存しました。
-エミュレータの性能比較は凍結した旧版のディスクで続け、現在のデモとは混ぜません。
+The earlier 76×25 fixed-point version is kept as `benchmarks/mandel_fixed.c`.
+Emulator performance comparisons continue with the frozen old disk, and are not mixed with the current demo.
 
-### 6809の機械の構成
+### 6809 machine configuration
 
-| 項目 | 標準マシン | NitrOS-9用Multicomp互換モード |
+| Item | Standard machine | Multicomp-compatible mode for NitrOS-9 |
 |---|---|---|
-| 物理RAM | 64KB | 既定512KB（64KB〜1MBを選択可） |
-| 起動ROM | なし | `$E000–$FFFF`、8KB、無効化可能 |
-| ACIA status/control | `$8018` | `$FFD0`、追加端末は `$FFD2`・`$FFD4`・`$FFD6` |
-| ACIA data | `$8019` | `$FFD1`、追加端末は `$FFD3`・`$FFD5`・`$FFD7` |
-| タイマー | `$8010` | `$FFDD` |
-| SD data/control/LBA | なし | `$FFD8–$FFDC` |
-| マッピング制御 | なし | `$FFDE–$FFDF` |
+| Physical RAM | 64KB | 512KB by default (64KB to 1MB selectable) |
+| Boot ROM | None | `$E000–$FFFF`, 8KB, can be disabled |
+| ACIA status/control | `$8018` | `$FFD0`, extra terminals at `$FFD2`, `$FFD4`, `$FFD6` |
+| ACIA data | `$8019` | `$FFD1`, extra terminals at `$FFD3`, `$FFD5`, `$FFD7` |
+| Timer | `$8010` | `$FFDD` |
+| SD data/control/LBA | None | `$FFD8–$FFDC` |
+| Mapping control | None | `$FFDE–$FFDF` |
 
-- CPU：6809の定義済み命令、各アドレッシング、CC、IRQ/FIRQ/NMI、SWI/SWI2/SWI3、SYNC/CWAI、命令サイクル加算。
-- ACIA：最大4台。受信キュー、送信出力、受信・送信IRQ、DCD、マスターリセット。送信は即時完了です。
-- タイマー：既定20,000サイクルごと。1MHz換算で50Hz。実時間への速度制限はありません。
-- SD：512バイト単位。Telnetモードまたは `--persist-disk` で永続化し、排他ロックします。その他の既定モードと `--volatile-disk` はメモリ内の差分を使用します。
-- MMU：8KBバンク、2組の独立したタスクマップ、バンクごとの書き込み保護。未搭載バンクは `$FF` を返し書き込みを無視します。固定上位領域 `$FE00–$FFFF` は物理バンク7を共有し、I/Oを除き常に読み書き可能です。
-- エミュレーションは命令単位です。バスサイクル単位の精密タイミング、未定義命令、6309拡張、ACIAのボーレート・パリティ・エラーフラグは扱いません。
+- CPU: the defined 6809 instructions, all addressing modes, CC, IRQ/FIRQ/NMI, SWI/SWI2/SWI3, SYNC/CWAI, instruction cycle accounting.
+- ACIA: up to four. Receive queue, transmit output, receive and transmit IRQs, DCD, master reset. Transmission completes immediately.
+- Timer: every 20,000 cycles by default. 50Hz at 1MHz. There is no throttling to real time.
+- SD: 512-byte blocks. Persistent with an exclusive lock in Telnet mode or with `--persist-disk`. The other default modes and `--volatile-disk` use an in-memory overlay.
+- MMU: 8KB banks, two independent task maps, per-bank write protection. Unpopulated banks return `$FF` and ignore writes. The fixed upper area `$FE00–$FFFF` shares physical bank 7 and is always readable and writable, except for I/O.
+- Emulation is per instruction. Bus-cycle-accurate timing, undefined instructions, 6309 extensions, and ACIA baud rate, parity and error flags are not handled.
 
-任意のバイナリをRAMにロードする場合：
+To load an arbitrary binary into RAM:
 
 ```sh
 cargo run --release -- --bin program.bin --load 0x1000 --pc 0x1000 --max-cycles 1000000
 ```
 
-ライブラリからは `Cpu` と `Bus` を使ってCPUだけを組み込めます。`Machine` はRAM・コンソール・タイマー付きの実装です。
-`Machine::multicomp()` は512KB、`Machine::multicomp_with_ram(rom, disk, ram_bytes)` は指定サイズのRAMを用意します。
-公開フィールド `ram` は物理メモリの `Box<[u8]>` です。`load()` は従来どおり下位64KB内への直接ロードです。
-命令エラーとディスク読み込みエラーは実行を失敗として報告します。
-`--until` は出力文字列への到達で成功終了し、到達前にサイクル上限に達すると失敗します。
+From the library, `Cpu` and `Bus` let you embed just the CPU. `Machine` is an implementation with RAM, console and timer.
+`Machine::multicomp()` provides 512KB, and `Machine::multicomp_with_ram(rom, disk, ram_bytes)` provides RAM of the given size.
+The public field `ram` is the physical memory as a `Box<[u8]>`. `load()` loads directly into the low 64KB, as before.
+Instruction errors and disk read errors are reported as a failed run.
+`--until` exits successfully when the output reaches the given string, and fails if the cycle limit is reached first.
 
-## 68000とCP/M-68K・FUZIX
+## 68000, CP/M-68K and FUZIX
 
-### 68000 CPUコア
+### 68000 CPU core
 
-`src/m68k/` に、68000の全命令・例外・割り込みを命令単位のサイクル数で実行するコアと逆アセンブラがあります。
-`--cpu 68000` で、RAMとコンソールだけの素の機械か、Tiny68K互換の機械（`--machine tiny68k`：68681 DUART・IDE）でプログラムを動かし、ICE（ブラウザ・DAP）で調べられます。
-SingleStepTests/680x0の約100万件（アドレスエラーのフレームとサイクル数を含む）で検証しています。詳細は [68000 CPUコア](docs/m68k.md) を参照してください。
+`src/m68k/` has a core that runs every 68000 instruction, exception and interrupt with per-instruction cycle counts, and a disassembler.
+With `--cpu 68000` you can run programs on a bare machine with only RAM and a console, or on a Tiny68K-compatible machine (`--machine tiny68k`: 68681 DUART, IDE), and examine them with the ICE (browser, DAP).
+It is verified against about one million cases from SingleStepTests/680x0 (including address error frames and cycle counts). For details, see [68000 CPU core](docs/m68k.md).
 
 ```sh
 python3 scripts/fetch-68000-tests.py
@@ -397,118 +399,120 @@ cargo test --release --test m68k_sst -- --ignored --nocapture
 rs6809 --cpu 68000 --bin prog.s68 --ice --ice-halt   # http://127.0.0.1:6809/
 ```
 
-### CP/M-68KとBDOSモニタ
+### CP/M-68K and the BDOS monitor
 
-CP/M-68K 1.3を、Tiny68K互換の機械と自作のBIOS（`examples/cpm68k/bios.s`）で動かします。
-ICEのOSタブでBDOS・BIOSの呼び出し（名前・引数・結果）、読み込んだプログラム、メモリ領域を観察し、名前で呼び出し・復帰に停止できます。
-Alcyon CでCのコンパイルと実行もできます。詳細は [CP/M-68K](docs/cpm68k.md) を参照してください。
+Runs CP/M-68K 1.3 on the Tiny68K-compatible machine with a custom BIOS (`examples/cpm68k/bios.s`).
+In the ICE's OS tab you can observe BDOS and BIOS calls (name, arguments, result), the loaded program and memory regions, and stop on a call or return by name.
+C can also be compiled and run with Alcyon C. For details, see [CP/M-68K](docs/cpm68k.md).
 
 ```sh
-sh examples/cpm68k.sh            # 初回は配布物を取得してディスクを作る。A> が出る
+sh examples/cpm68k.sh            # first run fetches the distribution and creates the disk. A> appears
 sh examples/cpm68k.sh --ice      # ICE: http://127.0.0.1:6809/
 ```
 
-### FUZIX/68000とプロセスモニタ
+### FUZIX/68000 and the process monitor
 
-小さなUnix系OSのFUZIX 0.5（Tiny68K版）を、モニタROMなしでディスクから起動し、シェルでコマンドを動かします。
-ICEのOSタブで、システムコール（`_fork`・`execve`・`waitpid` など、名前・引数・結果付き）、プロセス表、プロセス切り替えのタイムラインを観察できます。
-詳細は [FUZIX/68000](docs/fuzix68k.md)、OS-9との比較は [fork・exec・waitとOS-9のF$Fork・F$Wait](docs/fork-compare.md) を参照してください。
+Boots FUZIX 0.5 (Tiny68K version), a small Unix-like OS, from disk without a monitor ROM, and runs commands in the shell.
+In the ICE's OS tab you can observe system calls (`_fork`, `execve`, `waitpid` and others, with name, arguments and result), the process table and a timeline of process switches.
+For details, see [FUZIX/68000](docs/fuzix68k.md); for a comparison with OS-9, see [fork, exec, wait and OS-9's F$Fork, F$Wait](docs/fork-compare.md).
 
 ```sh
-sh scripts/build-m68k-elf.sh          # 初回だけ。m68k-elfのbinutilsとgcc
-sh scripts/build-fuzix-tiny68k.sh     # FUZIXのビルドとディスク
+sh scripts/build-m68k-elf.sh          # first time only. m68k-elf binutils and gcc
+sh scripts/build-fuzix-tiny68k.sh     # build FUZIX and its disk
 sh examples/fuzix68k.sh --ice         # http://127.0.0.1:6809/
-sh examples/fuzix68k.sh --tty2        # 2つ目の端末：telnet 127.0.0.1 6812
+sh examples/fuzix68k.sh --tty2        # second terminal: telnet 127.0.0.1 6812
 ```
 
-ICEには、リセット（「↺ リセット」・DAPの `restart`）と、68000の機械の状態の保存・読み込み（「保存」「読込」・`--load-state`）があります。
+The ICE has reset ("↺ Reset", DAP's `restart`) and saving and loading the 68000 machine's state ("Save", "Load", `--load-state`).
 
-## ICE（GUIデバッガ）とOSモニタ
+## ICE (GUI debugger) and OS monitor
 
-ブラウザから操作するインサーキット・エミュレータ相当のデバッガです。外部crateを使わず、エミュレータ自身がlocalhostでHTTPを提供します。
+A debugger operated from the browser, equivalent to an in-circuit emulator. Without external crates, the emulator itself serves HTTP on localhost.
 
 ```sh
 sh examples/nitros9-ice.sh            # NitrOS-9 Level 1 → http://127.0.0.1:6809/
-sh examples/nitros9-level2.sh --ice   # Level 2（ディスク構築後）
-./run.sh cpm68k --ice                 # CP/M-68K（BDOSモニタ）
-./run.sh fuzix --ice                  # FUZIX（プロセスモニタ）
+sh examples/nitros9-level2.sh --ice   # Level 2 (after building the disk)
+./run.sh cpm68k --ice                 # CP/M-68K (BDOS monitor)
+./run.sh fuzix --ice                  # FUZIX (process monitor)
 ```
 
-- **デバッガ**：実行・停止・ステップ・ステップオーバー／アウト・その行まで実行、ブレークポイント、ウォッチポイント、
-  逆アセンブル（`OS9 F$Fork` 形式）、メモリ（CPU論理・OS-9システム空間・物理）、レジスタ編集、MMUマップ、実行トレース、速度上限。
-- **OS-9モニタ**：すべての `OS9` システムコールを呼び出しから復帰まで追跡し、引数・結果・所要サイクルを表示します。
-  各プリミティブの日本語の説明、カーネル内部で発生した呼び出しの木、スケジューラのキューとタイムライン、プロセス表、
-  モジュールディレクトリ、メモリマップを表示し、「F$Forkの呼び出しで停止」「エラー復帰で停止」などをICEのブレーク条件として設定できます。
-- **シンボルとソース行**：LWASM・Microware RMAのリストとリンクマップ（`--symbols`）から逆アセンブルとスタックにラベルを付け、
-  Cやアセンブリのソース行でブレーク・ステップできます。OS-9のモジュールはロードされた位置へ自動で配置します（Level 1／2）。
-  Cは `python3 scripts/c-debug-build.py examples/hello.c` でゲスト上で行情報付きにコンパイルし、
-  引数・ローカル変数・大域変数を型に応じて表示・変更できます（構造体・配列・ポインタの展開、`p->next->val` などの式）。
-- **CP/M-68K・FUZIXのモニタ**：BDOS・BIOSの呼び出し、FUZIXの `fork`・`execve`・`waitpid` などのシステムコール、プロセス表、
-  タイムライン、メモリ領域を同じ画面で表示します（[CP/M-68K](docs/cpm68k.md)・[FUZIX/68000](docs/fuzix68k.md)）。
-- **リセットと状態**：「↺ リセット」で起動時の状態に戻し、68000では「保存」「読込」・`--load-state` で途中の状態から再開できます。
-- **エディタ連携**：`--dap` でDebug Adapter Protocolを提供し、VS Code（`editors/vscode`）などから同じICEを操作できます。
+- **Debugger**: run, stop, step, step over / out, run to line, breakpoints, watchpoints,
+  disassembly (in `OS9 F$Fork` form), memory (CPU logical, OS-9 system space, physical), register editing, MMU map, execution trace, speed limit.
+- **OS-9 monitor**: traces every `OS9` system call from call to return, showing arguments, results and cycles taken.
+  It shows an explanation of each primitive, the tree of calls made inside the kernel, the scheduler queues and timeline, the process table,
+  the module directory and the memory map, and lets you set ICE break conditions such as "stop on a call to F$Fork" or "stop on an error return".
+- **Symbols and source lines**: labels the disassembly and stack from LWASM and Microware RMA listings and link maps (`--symbols`),
+  and lets you break and step by C or assembly source line. OS-9 modules are placed automatically at the address where they are loaded (Level 1 / 2).
+  C is compiled on the guest with line information by `python3 scripts/c-debug-build.py examples/hello.c`,
+  and arguments, local variables and globals can be shown and changed according to their type (expanding structs, arrays and pointers, expressions such as `p->next->val`).
+- **CP/M-68K and FUZIX monitors**: show BDOS and BIOS calls, FUZIX system calls such as `fork`, `execve` and `waitpid`, the process table,
+  the timeline and memory regions on the same screen ([CP/M-68K](docs/cpm68k.md), [FUZIX/68000](docs/fuzix68k.md)).
+- **Reset and state**: "↺ Reset" returns to the state at startup, and on the 68000 "Save", "Load" and `--load-state` let you resume from a saved state.
+- **Editor integration**: `--dap` provides the Debug Adapter Protocol, so VS Code (`editors/vscode`) and others can drive the same ICE.
 
-詳細・仕組み・APIは [ICEとOS-9モニタ](docs/ice.md) を参照してください。
+The UI language is English by default, and Japanese when the locale (LC_ALL / LC_MESSAGES / LANG) starts with `ja`; `--lang ja|en` overrides it, and the language selector in the header switches it while running.
 
-## 速さ
+For details, internals and the API, see [ICE and OS-9 monitor](docs/ice.md).
 
-CPUを使い切る処理で、1秒あたりに進むゲストのサイクル数を測りました（AMD Ryzen 9 9900X、WSL2、rustc 1.99.1。2026年11月）。
+## Speed
 
-| CPU | 処理 | 1命令の平均 | ICEなし | ICEの中 | 実機との比（ICEなし） |
+We measured how many guest cycles advance per second in CPU-bound work (AMD Ryzen 9 9900X, WSL2, rustc 1.99.1, November 2026).
+
+| CPU | Workload | Average per instruction | Without ICE | Inside ICE | Ratio to real hardware (without ICE) |
 |---|---|---|---|---|---|
-| 6809 | NitrOS-9 Level 1上のCのマンデルブローの描画（`scripts/benchmark-emulator.py`、3回の中央値） | 5.9サイクル | 約391MHz相当（約6,600万命令／秒） | 約175MHz相当（約3,000万命令／秒） | 実機を1MHzとして約390倍 |
-| 68000 | CP/M-68K上でAlcyon Cの `hello.c` をコンパイル・リンク・実行（3億7,550万サイクル、3回） | 13.7サイクル | 約750MHz相当（約5,500万命令／秒） | 約300MHz相当（約2,200万命令／秒） | Tiny68Kを10MHzとして約75倍 |
+| 6809 | Drawing the C Mandelbrot on NitrOS-9 Level 1 (`scripts/benchmark-emulator.py`, median of 3 runs) | 5.9 cycles | About 391MHz equivalent (about 66 million instructions/s) | About 175MHz equivalent (about 30 million instructions/s) | About 390x, taking real hardware as 1MHz |
+| 68000 | Compiling, linking and running `hello.c` with Alcyon C on CP/M-68K (375.5 million cycles, 3 runs) | 13.7 cycles | About 750MHz equivalent (about 55 million instructions/s) | About 300MHz equivalent (about 22 million instructions/s) | About 75x, taking Tiny68K as 10MHz |
 
-- 「MHz相当」はゲストのクロック数です。68000はメモリの1回の読み書きに4クロック、命令は最短4クロックかかり、1命令あたりのクロックが6809（1回の読み書きが1クロック）よりずっと多いため、大きな数字になります。
-  命令の数で比べると、実効アドレスや32ビットの演算が重い68000のほうが2割ほど遅くなります。1命令の平均は、ICEの `/api/step?n=` で実行中に測りました。
-- ICEの中は、命令ごとにブレークポイントの確認、トレースの記録、システムコールの追跡をするぶん遅くなります。
-- 68000がゲストの割り込み待ち（`STOP`）にいる間は命令を回さず、時間を実時間で進めます（ゲストが休んでいる間、ホストのCPUはほとんど使いません）。上の値はCPUを使い切っているときのものです。
-- 6809の性能の調べ方と最適化の経緯は、下の「第0版と性能計測」「Rust向けの最適化」にあります。
+- "MHz equivalent" is the guest's clock count. The 68000 takes 4 clocks per memory read or write, and at least 4 clocks per instruction, so it needs far more clocks per instruction than the 6809 (1 clock per read or write), which gives the larger number.
+  Compared by instruction count, the 68000, with its heavier effective addresses and 32-bit arithmetic, is about 20% slower. The average per instruction was measured while running, with the ICE's `/api/step?n=`.
+- Inside the ICE it is slower, because each instruction checks breakpoints, records the trace and tracks system calls.
+- While the 68000 is waiting for a guest interrupt (`STOP`), no instructions are run and time advances in real time (the host CPU is barely used while the guest is idle). The values above are for when the CPU is fully used.
+- How the 6809's performance was investigated and the history of the optimizations are in "Version 0 and performance measurement" and "Optimizing for Rust" below.
 
-## 開発者向け
+## For developers
 
-### Releaseのイメージの作り直し
+### Rebuilding the Release images
 
 ```sh
 sh scripts/build-m68k-elf.sh && sh scripts/build-fuzix-tiny68k.sh && python3 scripts/fetch-cpm68k.py
-sh scripts/make-release.sh   # artifacts/release と release/images.sha256 のイメージの行を作る
+sh scripts/make-release.sh   # creates artifacts/release and the image lines of release/images.sha256
 gh release create images-v1 artifacts/release/* --title "rs6809 images v1" --notes-file release/NOTICE.md
-gh workflow run release-binaries -f tag=images-v1   # 実行ファイル（Linux x86-64・macOS arm64）をビルドしてReleaseに上げる
-# 終わったら release/images.sha256 の rs6809-* の行を更新してコミットする
+gh workflow run release-binaries -f tag=images-v1   # build the executables (Linux x86-64, macOS arm64) and upload them to the Release
+# when done, update the rs6809-* lines of release/images.sha256 and commit
 ```
 
-### 第0版と性能計測
+### Version 0 and performance measurement
 
-現状を第0版（v0）としてソース・実行ファイル・入力ハッシュとともに保存しています。
-マンデルブローを7回測定した中央値は1.481785秒（331.2MHz相当）でした。
-最大のホットスポットはメモリ読み取りで、描画後半の約34%です。
-詳細と改善順序は [第0版の性能調査](docs/v0-performance.md)、機械可読の記録は [v0-baseline.json](docs/v0-baseline.json) を参照してください。
+The current state is saved as version 0 (v0), together with the source, executable and input hashes.
+The median of seven Mandelbrot measurements was 1.481785 seconds (equivalent to 331.2MHz).
+The biggest hotspot is memory reads, about 34% of the latter half of the drawing.
+For details and the order of improvements, see [Version 0 performance investigation](docs/ja/v0-performance.md) (Japanese); the machine-readable record is [v0-baseline.json](docs/v0-baseline.json).
 
 ```sh
 python3 scripts/benchmark-emulator.py
 ```
 
-既存のrelease実行ファイルとC開発用ディスクを使い、ウォームアップ後に7回測定します。
-既定は現在のBASIC09移植版です。
-結果は `artifacts/benchmark/current.json` に保存します。
-過去の測定と比較する場合は `--workload fixed` を指定します。このモードは
-`benchmarks/fixed-inputs.json` に記録した、この作業環境に保存済みの旧固定小数点版の入力が必要です。
+Uses the existing release executable and the C development disk, and measures seven times after a warm-up.
+The default is the current BASIC09 port.
+Results are saved to `artifacts/benchmark/current.json`.
+To compare with past measurements, specify `--workload fixed`. This mode needs
+the inputs of the old fixed-point version recorded in `benchmarks/fixed-inputs.json` and saved in this working environment.
 
-### Rust向けの最適化
+### Optimizing for Rust
 
-releaseビルドはopt-level=3、ThinLTO、codegen-units=1です。
-通常のメモリアクセスを小さな関数に分け、I/O処理を別関数へ出しています。
-さらに、MMU使用時のアドレス変換と保護属性を事前計算し、その表を別オブジェクトへ分けました。
+The release build uses opt-level=3, ThinLTO and codegen-units=1.
+Normal memory access is split into small functions, and I/O handling is moved into separate functions.
+In addition, address translation and protection attributes under the MMU are precomputed, and that table is moved into a separate object.
 
-固定小数点版を前後交互に7回測定した中央値は0.972秒→0.878秒で、今回の変更により約1.11倍になりました。
-通常RAM・MMU・シリアル出力の別負荷も比較しています。
-最新の調査は [実装パターンの再検証](docs/pattern-validation.md)、前回の段階は [Rust最適化の記録](docs/rust-optimization.md) を参照してください。
+Measuring the fixed-point version seven times, alternating before and after, the median went from 0.972 seconds to 0.878 seconds, about 1.11x from this change.
+Separate workloads for normal RAM, the MMU and serial output were also compared.
+For the latest investigation, see [Re-validating implementation patterns](docs/ja/pattern-validation.md) (Japanese); for the previous stage, see [Notes on Rust optimization](docs/ja/rust-optimization.md) (Japanese).
 
-## ライセンスと参照
+## License and references
 
-rs6809のコードはMITライセンスです。`reference/` は本体の配布対象外で、取得したキット、ROM、OS、BASIC09にはそれぞれの権利・ライセンスが適用されます。
-Releaseで配布するCP/M-68K・FUZIXのイメージの中身・ライセンス・ソースの入手先は [release/NOTICE.md](release/NOTICE.md) にあります。
+The rs6809 code is under the MIT license. `reference/` is not part of the distribution; the fetched kit, ROM, OS and BASIC09 are subject to their own rights and licenses.
+The contents, licenses and source locations of the CP/M-68K and FUZIX images distributed in Releases are in [release/NOTICE.md](release/NOTICE.md).
 
-CPU仕様：[Motorola MC6809/MC6809E Programming Manual](https://www.maddes.net/m6809pm/index.htm)。
-Multicompのレジスタ仕様と起動手順は参照キットの `exec09/miscsbc.c`、`nitros9-mc09-build/defs/mc09.d`、`nitros9-runtime/` を確認しています。
-68000の仕様：MC68000 User's Manual（命令の時間は8章）。命令テスト：[SingleStepTests/680x0](https://github.com/SingleStepTests/680x0)。
+CPU specification: [Motorola MC6809/MC6809E Programming Manual](https://www.maddes.net/m6809pm/index.htm).
+The Multicomp register specification and boot procedure were checked against the reference kit's `exec09/miscsbc.c`, `nitros9-mc09-build/defs/mc09.d` and `nitros9-runtime/`.
+68000 specification: MC68000 User's Manual (instruction timing in chapter 8). Instruction tests: [SingleStepTests/680x0](https://github.com/SingleStepTests/680x0).

@@ -6,6 +6,7 @@
 //! whose layout is not published. The current drive, user number, DMA
 //! address, open files, TPA and the loaded program are therefore learned
 //! from the calls themselves as they return.
+use crate::tr;
 use super::json::{Json, obj};
 use super::osmon::{Call, CpuRegs, Image, Mem, OsMonitor, PathNames, Process, Regs68k, Service, Svc};
 use std::cell::RefCell;
@@ -91,6 +92,89 @@ const BIOS_FUNCS: &[(u8, &str, &str, &str)] = &[
     (21, "BIOS_FLUSH", "フラッシュ", "書き込みバッファをディスクへ書き出す。"),
     (22, "BIOS_SETEXC", "例外ベクタ", "D1の番号のベクタをD2に変え、元の値を返す。"),
 ];
+
+/// (function, summary, explanation) in English, for the same codes.
+const BDOS_EN: &[(u8, &str, &str)] = &[
+    (0, "System reset", "Ends the program and goes back to the CCP (warm boot). Does not return."),
+    (1, "Console input", "Reads a character from the console, echoes it and returns it in D0."),
+    (2, "Console output", "Writes the character in D1 to the console; tabs are expanded and ^S pauses."),
+    (3, "Reader input", "Reads a character from the auxiliary input (the BIOS READER)."),
+    (4, "Punch output", "Writes a character to the auxiliary output (the BIOS PUNCH)."),
+    (5, "List output", "Writes a character to the printer (the BIOS LIST)."),
+    (6, "Direct console I/O", "D1=$FF reads (0 if nothing), $FE gives the status, anything else is written as is."),
+    (7, "Get I/O byte", "Returns the mapping of logical to physical devices (the I/O byte)."),
+    (8, "Set I/O byte", "Changes the I/O byte."),
+    (9, "Print string", "Writes the string at D1, ending with $, to the console."),
+    (10, "Read console buffer", "Reads an edited line into the buffer at D1 (its first byte is the maximum length)."),
+    (11, "Console status", "Returns $01 if a character is waiting, otherwise 0."),
+    (12, "Version number", "Returns the CP/M version ($2022 for CP/M-68K)."),
+    (13, "Reset disk system", "Logs out all drives, selects A: and sets the DMA address back to the default."),
+    (14, "Select disk", "Makes drive D1 (0 = A:) the default."),
+    (15, "Open file", "Looks for the file named in the FCB and opens it. D0=$FF: not found."),
+    (16, "Close file", "Writes the FCB back to the directory."),
+    (17, "Search for first", "Reads the first directory entry matching the FCB's name (? matches any) to the DMA buffer. D0=0-3 is its place, $FF none."),
+    (18, "Search for next", "Continues F_SFIRST with the next matching entry."),
+    (19, "Delete file", "Deletes the files matching the FCB's name."),
+    (20, "Read sequential", "Reads the current 128-byte record to the DMA buffer and moves on. D0=1 at the end of the file."),
+    (21, "Write sequential", "Writes the 128 bytes of the DMA buffer to the current record and moves on."),
+    (22, "Make file", "Creates an empty file in the directory and opens it."),
+    (23, "Rename file", "Renames the file named in the first half of the FCB to the name in the second half (+16)."),
+    (24, "Login vector", "Returns the logged-in drives, one bit each."),
+    (25, "Current disk", "Returns the default drive (0 = A:)."),
+    (26, "Set DMA address", "Sets the 128-byte buffer for disk reads and writes to D1."),
+    (28, "Write protect disk", "Makes the default drive read-only for now."),
+    (29, "Read-only vector", "Returns the read-only drives, one bit each."),
+    (30, "Set file attributes", "Rewrites the high bits of the file name (read-only, system)."),
+    (31, "Disk parameters", "Copies the default drive's disk parameter block to D1."),
+    (32, "User number", "D1=$FF returns the current user number; anything else sets it."),
+    (33, "Read random", "Reads the record at the FCB's random record number (r0-r2) to the DMA buffer."),
+    (34, "Write random", "Writes the DMA buffer at the random record number."),
+    (35, "File size", "Puts the file's record count in the FCB's random record number."),
+    (36, "Set random record", "Copies the sequential position to the random record number."),
+    (37, "Reset drive", "Logs out the drives whose bits are set in D1."),
+    (40, "Write random with zero fill", "Fills newly allocated blocks with zeros before writing."),
+    (46, "Disk free space", "Returns the free records of drive D1 in the DMA buffer."),
+    (47, "Chain to program", "Hands the command line in the DMA buffer to the CCP and runs it. Does not return."),
+    (48, "Flush buffers", "Calls the BIOS FLUSH so that writes reach the disk."),
+    (50, "Direct BIOS call", "Calls the BIOS with the block at D1 (function .W, D1.L, D2.L)."),
+    (59, "Program load", "Loads the open file of the load parameter block at D1 into the TPA and relocates it. Returns the base page address."),
+    (61, "Set exception vector", "Replaces an exception vector with the block at D1 and returns the old address."),
+    (62, "Set supervisor state", "Returns to the caller in supervisor state (sets the S bit of SR)."),
+    (63, "Get/set TPA limits", "Returns the TPA's low and high addresses in the block at D1 (or sets them, by its flags)."),
+];
+const BIOS_EN: &[(u8, &str, &str)] = &[
+    (0, "Cold boot", "Initializes the devices and sets the TRAP #3 vector."),
+    (1, "Warm boot", "Goes back to the CCP."),
+    (2, "Console status", "$FF if a character is waiting, otherwise 0."),
+    (3, "Console input", "Waits for a character and returns it."),
+    (4, "Console output", "Writes the character in D1."),
+    (5, "List output", "One character to the printer."),
+    (6, "Auxiliary output", "One character to the auxiliary output."),
+    (7, "Auxiliary input", "One character from the auxiliary input."),
+    (8, "Home", "Sets the current track to 0."),
+    (9, "Select disk", "Selects drive D1 and returns its disk parameter header (0: none)."),
+    (10, "Set track", "Sets the track of the next read or write to D1."),
+    (11, "Set sector", "Sets the sector (128-byte units) of the next read or write to D1."),
+    (12, "Set DMA", "Sets the buffer of reads and writes to D1."),
+    (13, "Read sector", "Reads the selected sector to the DMA buffer. 0: success."),
+    (14, "Write sector", "Writes the 128 bytes of the DMA buffer to the selected sector."),
+    (15, "List status", "$FF if the printer can take a character."),
+    (16, "Sector translate", "Translates a logical sector to the physical one (skew)."),
+    (18, "Memory region table", "Returns the address of the table giving the TPA."),
+    (19, "Get I/O byte", "Returns the I/O byte."),
+    (20, "Set I/O byte", "Changes the I/O byte."),
+    (21, "Flush buffers", "Writes the write buffer out to the disk."),
+    (22, "Set exception vector", "Sets vector number D1 to D2 and returns the old value."),
+];
+
+/// The summary and explanation of a call in the current language.
+fn texts(code: u8) -> (&'static str, &'static str) {
+    if super::lang::en() {
+        let (table, f) = if code >= BIOS { (BIOS_EN, code - BIOS) } else { (BDOS_EN, code) };
+        return table.iter().find(|e| e.0 == f).map_or(("", ""), |e| (e.1, e.2));
+    }
+    lookup(code).map_or(("", ""), |f| (f.2, f.3))
+}
 
 fn lookup(code: u8) -> Option<&'static (u8, &'static str, &'static str, &'static str)> {
     if code >= BIOS {
@@ -207,17 +291,17 @@ impl OsMonitor for Cpm68k {
             ("os", "cpm68k".into()),
             ("name", "CP/M-68K".into()),
             ("title", "CP/M-68K 1.3".into()),
-            ("current", "実行中のプログラム".into()),
+            ("current", tr!("実行中のプログラム", "running program").into()),
             ("queues", Json::Arr(Vec::new())),
-            ("image", "プログラム".into()),
+            ("image", tr!("プログラム", "programs").into()),
             ("memmap", "regions".into()),
-            ("errorLabel", "BDOSのエラー復帰（$FFなど）".into()),
-            ("switchLabel", "プログラムの切り替え".into()),
-            ("procsTitle", "プログラム".into()),
-            ("imagesTitle", "メモリ上のプログラムとシステム".into()),
-            ("callsTitle", "BDOS・BIOSの呼び出し".into()),
-            ("internalLabel", "BDOS内部の呼び出し（BIOS・BDOS）".into()),
-            ("schedTitle", "システム".into()),
+            ("errorLabel", tr!("BDOSのエラー復帰（$FFなど）", "BDOS error return ($FF and others)").into()),
+            ("switchLabel", tr!("プログラムの切り替え", "program switch").into()),
+            ("procsTitle", tr!("プログラム", "programs").into()),
+            ("imagesTitle", tr!("メモリ上のプログラムとシステム", "programs and system in memory").into()),
+            ("callsTitle", tr!("BDOS・BIOSの呼び出し", "BDOS and BIOS calls").into()),
+            ("internalLabel", tr!("BDOS内部の呼び出し（BIOS・BDOS）", "calls inside the BDOS (BIOS, BDOS)").into()),
+            ("schedTitle", tr!("システム", "system").into()),
             ("breakExample", "F_OPEN".into()),
         ])
     }
@@ -302,11 +386,11 @@ impl OsMonitor for Cpm68k {
         n.parse::<u8>().ok().filter(|&k| k < BIOS)
     }
     fn explain(&self, code: u8) -> &'static str {
-        lookup(code).map_or("", |f| f.3)
+        texts(code).1
     }
     fn error_name(&self, code: u8) -> String {
         match code {
-            0xff => "$FF（見つからない・失敗）".into(),
+            0xff => tr!("$FF（見つからない・失敗）", "$FF (not found, failed)").into(),
             c => format!("${c:02X}"),
         }
     }
@@ -318,8 +402,8 @@ impl OsMonitor for Cpm68k {
             .map(|(code, f)| Service {
                 code,
                 name: f.1.into(),
-                desc: f.2.into(),
-                explain: f.3,
+                desc: texts(code).0.into(),
+                explain: texts(code).1,
             })
             .collect()
     }
@@ -350,26 +434,26 @@ impl OsMonitor for Cpm68k {
             }
             2 | 4 | 5 => ch(d1b),
             6 => match d1b {
-                0xff => "入力".into(),
-                0xfe => "状態".into(),
-                c => format!("出力 {}", ch(c)),
+                0xff => tr!("入力", "input").into(),
+                0xfe => tr!("状態", "status").into(),
+                c => tr!(format!("出力 {}", ch(c)), format!("output {}", ch(c))),
             },
             8 => format!("${d1b:02X}"),
             9 => dollar_string(m, d1),
-            10 => format!("バッファ ${d1:06X}（最大{}文字）", m.peek(d1)),
+            10 => tr!(format!("バッファ ${d1:06X}（最大{}文字）", m.peek(d1)), format!("buffer ${d1:06X} (up to {} characters)", m.peek(d1))),
             14 => format!("{}:", char::from(b'A' + (d1b & 15))),
             15 | 16 | 17 | 19 | 20 | 21 | 22 | 30 | 35 | 36 => fcb(d1),
             23 => format!("{} → {}", fcb_name(m, d1, drive), fcb_name(m, d1 + 16, drive)),
-            33 | 34 | 40 => format!("{} レコード{}", fcb(d1), random_record(m, d1)),
+            33 | 34 | 40 => tr!(format!("{} レコード{}", fcb(d1), random_record(m, d1)), format!("{} record {}", fcb(d1), random_record(m, d1))),
             26 => format!("${d1:06X}"),
             32 => {
                 if d1b == 0xff {
-                    "取得".into()
+                    tr!("取得", "get").into()
                 } else {
-                    format!("ユーザー{d1b}")
+                    tr!(format!("ユーザー{d1b}"), format!("user {d1b}"))
                 }
             }
-            37 => format!("ドライブ ${:04X}", d1 as u16),
+            37 => tr!(format!("ドライブ ${:04X}", d1 as u16), format!("drives ${:04X}", d1 as u16)),
             46 => format!("{}:", char::from(b'A' + (d1b & 15))),
             50 => {
                 let f = m.peek16(d1);
@@ -380,19 +464,19 @@ impl OsMonitor for Cpm68k {
                 let hi = m.peek32(d1 + 8);
                 format!("{} TPA ${lo:06X}–${hi:06X}", fcb_name(m, m.peek32(d1), drive))
             }
-            61 => format!("ベクタ{} → ${:06X}", m.peek16(d1), m.peek32(d1 + 2)),
-            63 => if m.peek16(d1) & 1 != 0 { "設定" } else { "取得" }.into(),
+            61 => tr!(format!("ベクタ{} → ${:06X}", m.peek16(d1), m.peek32(d1 + 2)), format!("vector {} → ${:06X}", m.peek16(d1), m.peek32(d1 + 2))),
+            63 => if m.peek16(d1) & 1 != 0 { tr!("設定", "set") } else { tr!("取得", "get") }.into(),
             c if c == BIOS + 1 => {
                 self.state.borrow_mut().program = None;
                 String::new()
             }
             c if c == BIOS + 4 || c == BIOS + 5 || c == BIOS + 6 => ch(d1b),
             c if c == BIOS + 9 => format!("{}:", char::from(b'A' + (d1b & 15))),
-            c if c == BIOS + 10 => format!("トラック{}", d1 as u16),
-            c if c == BIOS + 11 => format!("セクタ{}", d1 as u16),
+            c if c == BIOS + 10 => tr!(format!("トラック{}", d1 as u16), format!("track {}", d1 as u16)),
+            c if c == BIOS + 11 => tr!(format!("セクタ{}", d1 as u16), format!("sector {}", d1 as u16)),
             c if c == BIOS + 12 => format!("${d1:06X}"),
             c if c == BIOS + 16 => format!("{}", d1 as u16),
-            c if c == BIOS + 22 => format!("ベクタ{} → ${:06X}", d1 as u16, r.d[2]),
+            c if c == BIOS + 22 => tr!(format!("ベクタ{} → ${:06X}", d1 as u16, r.d[2]), format!("vector {} → ${:06X}", d1 as u16, r.d[2])),
             _ => String::new(),
         }
     }
@@ -419,27 +503,27 @@ impl OsMonitor for Cpm68k {
             }
             15 | 16 | 17 | 18 | 19 | 22 | 23 | 30 => {
                 if d0 as u8 == 0xff {
-                    "$FF（見つからない）".into()
+                    tr!("$FF（見つからない）", "$FF (not found)").into()
                 } else if call.code == 17 || call.code == 18 {
                     let dma = self.st().dma.unwrap_or(0x80);
                     let at = dma + 32 * (d0 & 3);
-                    format!("{}（項目{}）", fcb_name(m, at, self.st().drive), d0 & 3)
+                    tr!(format!("{}（項目{}）", fcb_name(m, at, self.st().drive), d0 & 3), format!("{} (entry {})", fcb_name(m, at, self.st().drive), d0 & 3))
                 } else {
                     "OK".into()
                 }
             }
             20 | 21 | 33 | 34 | 40 => match d0 as u8 {
                 0 => "OK".into(),
-                1 => "ファイルの終わり／未書き込み".into(),
-                2 => "ディスクが一杯".into(),
+                1 => tr!("ファイルの終わり／未書き込み", "end of file / unwritten").into(),
+                2 => tr!("ディスクが一杯", "disk full").into(),
                 c => format!("${c:02X}"),
             },
-            35 => format!("{}レコード", random_record(m, d1)),
-            32 => format!("ユーザー{}", d0 as u8),
+            35 => tr!(format!("{}レコード", random_record(m, d1)), format!("{} records", random_record(m, d1))),
+            32 => tr!(format!("ユーザー{}", d0 as u8), format!("user {}", d0 as u8)),
             59 => {
                 if d0 as u16 == 0 {
                     let bp = m.peek32(d1 + 12);
-                    format!(
+                    tr!(format!(
                         "ベースページ ${bp:06X} テキスト ${:06X}+{} データ ${:06X}+{} BSS ${:06X}+{}",
                         m.peek32(bp + 8),
                         m.peek32(bp + 12),
@@ -447,18 +531,35 @@ impl OsMonitor for Cpm68k {
                         m.peek32(bp + 20),
                         m.peek32(bp + 24),
                         m.peek32(bp + 28)
-                    )
+                    ), format!(
+                        "base page ${bp:06X} text ${:06X}+{} data ${:06X}+{} BSS ${:06X}+{}",
+                        m.peek32(bp + 8),
+                        m.peek32(bp + 12),
+                        m.peek32(bp + 16),
+                        m.peek32(bp + 20),
+                        m.peek32(bp + 24),
+                        m.peek32(bp + 28)
+                    ))
                 } else {
-                    format!(
+                    tr!(format!(
                         "エラー{}（{}）",
                         d0 as u16,
                         match d0 as u16 {
-                            1 => "TPAに入らない",
-                            2 => "読み込みエラー",
-                            3 => "再配置の誤り",
-                            _ => "不明",
+                            1 => tr!("TPAに入らない", "does not fit the TPA"),
+                            2 => tr!("読み込みエラー", "read error"),
+                            3 => tr!("再配置の誤り", "bad relocation"),
+                            _ => tr!("不明", "unknown"),
                         }
-                    )
+                    ), format!(
+                        "error {} ({})",
+                        d0 as u16,
+                        match d0 as u16 {
+                            1 => tr!("TPAに入らない", "does not fit the TPA"),
+                            2 => tr!("読み込みエラー", "read error"),
+                            3 => tr!("再配置の誤り", "bad relocation"),
+                            _ => tr!("不明", "unknown"),
+                        }
+                    ))
                 }
             }
             63 => {
@@ -466,14 +567,14 @@ impl OsMonitor for Cpm68k {
                 self.state.borrow_mut().tpa = Some((lo, hi));
                 format!("TPA ${lo:06X}–${hi:06X}")
             }
-            61 => format!("元 ${d0:06X}"),
+            61 => tr!(format!("元 ${d0:06X}"), format!("was ${d0:06X}")),
             c if c == BIOS + 3 => ch(d0 as u8),
             c if c == BIOS + 2 || c == BIOS + 15 => format!("${:02X}", d0 as u8),
             c if c == BIOS + 9 => {
-                if d0 == 0 { "無し".into() } else { format!("DPH ${d0:06X}") }
+                if d0 == 0 { tr!("無し", "none").into() } else { format!("DPH ${d0:06X}") }
             }
             c if c == BIOS + 13 || c == BIOS + 14 => {
-                if d0 == 0 { "OK".into() } else { format!("エラー{d0}") }
+                if d0 == 0 { "OK".into() } else { tr!(format!("エラー{d0}"), format!("error {d0}")) }
             }
             c if c == BIOS + 16 => format!("{}", d0 as u16),
             c if c == BIOS + 18 || c == BIOS + 22 => format!("${d0:06X}"),
@@ -587,7 +688,7 @@ impl OsMonitor for Cpm68k {
             let stem = name.split(':').nth(1).unwrap_or(name).split('.').next().unwrap_or("").to_string();
             v.push(Image {
                 name: stem,
-                fields: vec![("kind", "プログラム".into()), ("addr", format!("${text:06X}").into()), ("basepage", format!("${bp:06X}").into())],
+                fields: vec![("kind", tr!("プログラム", "programs").into()), ("addr", format!("${text:06X}").into()), ("basepage", format!("${bp:06X}").into())],
                 chunks: vec![(text as usize, total.min(0x100_0000) as usize, 0)],
             });
         }
@@ -601,7 +702,7 @@ impl OsMonitor for Cpm68k {
                 regions.push(obj([("name", name.into()), ("kind", kind.into()), ("start", start.into()), ("end", end.into())]));
             }
         };
-        add("例外ベクタ", "sys", 0, 0x400);
+        add(tr!("例外ベクタ", "exception vectors"), "sys", 0, 0x400);
         if let Some((lo, hi)) = s.tpa {
             add("TPA", "free", lo, hi);
         }
@@ -612,7 +713,7 @@ impl OsMonitor for Cpm68k {
         }
         if let Some((_, lpb)) = &s.program {
             let bp = m.peek32(lpb + 12);
-            add("ベースページ", "prog", bp, bp + 0x100);
+            add(tr!("ベースページ", "base page"), "prog", bp, bp + 0x100);
         }
         obj([("regions", Json::Arr(regions)), ("ram", m.ram().len().into())])
     }

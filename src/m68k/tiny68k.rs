@@ -10,6 +10,7 @@
 //! The DUART interrupts on level 2 with the vector in its IVR. The IDE data
 //! register is 16 bits wide with the bytes swapped (the first byte of a
 //! sector is the low byte of the word), as on the board.
+use crate::tr;
 use super::Bus68k;
 use super::state::{Reader, Writer};
 use std::collections::VecDeque;
@@ -68,7 +69,7 @@ impl Tiny68k {
     pub fn load(&mut self, addr: u32, data: &[u8]) -> Result<(), String> {
         let end = addr as usize + data.len();
         if end > self.ram.len() {
-            return Err(format!("${addr:06X}+{} はRAMの外", data.len()));
+            return Err(tr!(format!("${addr:06X}+{} はRAMの外", data.len()), format!("${addr:06X}+{} is outside RAM", data.len())));
         }
         self.ram[addr as usize..end].copy_from_slice(data);
         Ok(())
@@ -93,7 +94,7 @@ impl Tiny68k {
     pub fn load_state(&mut self, r: &mut Reader) -> Result<(), String> {
         let ram = r.bytes()?;
         if ram.len() != self.ram.len() {
-            return Err("RAMの大きさが違う".into());
+            return Err(tr!("RAMの大きさが違う", "the RAM size differs").into());
         }
         self.ram.copy_from_slice(ram);
         self.duart.load(r)?;
@@ -450,7 +451,7 @@ impl Ide {
         }
     }
     fn load(&mut self, r: &mut Reader) -> Result<(), String> {
-        self.regs.copy_from_slice(r.bytes()?.get(..8).ok_or("IDEのレジスタが足りない")?);
+        self.regs.copy_from_slice(r.bytes()?.get(..8).ok_or(tr!("IDEのレジスタが足りない", "too few IDE registers"))?);
         self.status = r.u8()?;
         self.buf = r.bytes()?.to_vec();
         self.pos = r.u64()? as usize;
@@ -460,7 +461,7 @@ impl Ide {
         if r.bool()? {
             let d = r.bytes()?;
             if self.file.is_some() && d != self.disk.as_slice() {
-                return Err("書き込みを残すディスク（--persist-disk）には、ディスクを含む状態を読み込めない".into());
+                return Err(tr!("書き込みを残すディスク（--persist-disk）には、ディスクを含む状態を読み込めない", "a state with a disk cannot be loaded onto a disk whose writes are kept (--persist-disk)").into());
             }
             self.disk = d.to_vec();
         }

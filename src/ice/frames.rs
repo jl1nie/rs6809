@@ -4,6 +4,7 @@
 //! from the static stack depth is accepted only if the word at its return
 //! slot really follows a call to the function; otherwise nearby depths are
 //! searched, so an unknown helper's stack effect cannot misplace variables.
+use crate::tr;
 use super::debuginfo::{Ctx, Loc, Place, Type, Var};
 use super::target::Target;
 use super::{Ice, json_str};
@@ -162,9 +163,9 @@ impl<T: Target> Ice<T> {
             Loc::Frame(o) => f
                 .cfa
                 .map(|c| Place::Mem(c.wrapping_add(*o as u32)))
-                .ok_or("フレームの位置が分かりません"),
+                .ok_or(tr!("フレームの位置が分かりません", "the frame's place is not known")),
             Loc::Reg("U") => Ok(Place::Value(f.u)),
-            Loc::Reg(_) => Err("レジスタ"),
+            Loc::Reg(_) => Err(tr!("レジスタ", "register")),
             Loc::Data(o) => Ok(Place::Mem(y.wrapping_add(*o))),
             Loc::Abs(a) => Ok(Place::Mem(*a)),
             Loc::Unknown(why) => Err(why),
@@ -266,7 +267,7 @@ impl<T: Target> Ice<T> {
                     (c.format(ty, p), at, kids)
                 })
                 .unwrap_or_default(),
-            Err(why) => (format!("（{why}）"), String::new(), Vec::new()),
+            Err(why) => (tr!(format!("（{why}）"), format!(" ({why})")), String::new(), Vec::new()),
         };
         format!(
             "{{\"name\":{},\"type\":{},\"value\":{},\"at\":{},\"children\":[{}]}}",

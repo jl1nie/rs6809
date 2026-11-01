@@ -73,7 +73,7 @@ BASIC09から移植した実数版（79×25文字、最大16反復）をNitrOS-9
 全7回で描画・総サイクル数と出力ハッシュが一致した。
 1 MHz換算は仮想サイクル数からの計算値であり、実機の実測時間ではない。
 BASIC09自体との速度比はこの計測には含まない。
-全試行と入力・実行ファイルのハッシュは [計測JSON](mandelbrot-c-benchmark.json) に保存した。
+全試行と入力・実行ファイルのハッシュは [計測JSON](../mandelbrot-c-benchmark.json) に保存した。
 
 ```sh
 python3 scripts/compare-basic09-port.py

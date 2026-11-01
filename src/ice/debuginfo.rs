@@ -5,6 +5,7 @@
 //! whatever its tools leave behind; the debugger front ends (DAP, browser)
 //! only use this module.
 
+use crate::tr;
 #[derive(Debug, Clone, PartialEq)]
 pub enum Type {
     Void,
@@ -263,7 +264,7 @@ impl Ctx<'_> {
                     .iter()
                     .map(|b| format!("{b:02X}"))
                     .collect();
-                format!("${hex}（浮動小数点は未対応）")
+                tr!(format!("${hex}（浮動小数点は未対応）"), format!("${hex} (floating point not shown)"))
             }
             Type::Ptr(inner) => {
                 let a = self.ptr(p);
@@ -316,7 +317,7 @@ impl Ctx<'_> {
                 let more = if s.fields.len() > 6 { ", …" } else { "" };
                 format!("{{{}{more}}}", items.join(", "))
             }
-            Type::Func(_) => "関数".into(),
+            Type::Func(_) => tr!("関数", "function").into(),
             Type::Void | Type::Unknown => "?".into(),
         }
     }

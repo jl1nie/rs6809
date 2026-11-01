@@ -1,134 +1,136 @@
-# CP/M-68KとBDOSモニタ
+English | [日本語](ja/cpm68k.md)
 
-CP/M-68K 1.3を、Tiny68K互換の機械（[68000 CPUコア](m68k.md)）と自作のBIOSで動かし、ICEでBDOS・BIOSの呼び出しを観察します。
+# CP/M-68K and the BDOS monitor
+
+CP/M-68K 1.3 runs on the Tiny68K-compatible machine ([68000 CPU core](m68k.md)) with our own BIOS, and the ICE watches its BDOS and BIOS calls.
 
 ```sh
-sh examples/cpm68k.sh            # コンソールはこの端末（^Cで終了）
-sh examples/cpm68k.sh --ice      # ICE: http://127.0.0.1:6809/（--dap でVS Codeなどからも）
+sh examples/cpm68k.sh            # the console is this terminal (^C to quit)
+sh examples/cpm68k.sh --ice      # ICE: http://127.0.0.1:6809/ (add --dap for VS Code and others)
 ```
 
-初回は `scripts/fetch-cpm68k.py` で配布物を取得し、`scripts/cpm68k-disk.py` でディスク `artifacts/cpm68k/a.img` を作ります。
-ディスクへの書き込みは残ります（作り直すにはファイルを消してください）。
+The first run fetches the distribution with `scripts/fetch-cpm68k.py` and builds the disk `artifacts/cpm68k/a.img` with `scripts/cpm68k-disk.py`.
+Writes to the disk are kept (delete the file to rebuild it).
 
 ```text
 A>DIR *.SUB
 A: RELOC1   SUB : RELOC2   SUB : CLINK    SUB : CLINKE   SUB : CLINKF   SUB
 ...
-A>AS68 -I AS68INIT          ← 初回だけ。アセンブラの記号表を作る
+A>AS68 -I AS68INIT          ← first time only: builds the assembler's symbol table
 A>SUBMIT C HELLO            ← CP68 → C068 → C168 → AS68
-A>SUBMIT CLINK HELLO        ← LO68 でリンクして HELLO.68K
+A>SUBMIT CLINK HELLO        ← links with LO68 into HELLO.68K
 A>HELLO
 Hello from Alcyon C on CP/M-68K
 1+2+...+10 = 55
 ```
 
-## 配布物と構成
+## Distribution and layout
 
-| もの | 出どころ | リポジトリ |
+| Item | Source | In the repository |
 |---|---|---|
-| CP/M-68K 1.3（`68kv1_3.zip`、SHA-256で確認） | [The Unofficial CP/M Web Site](http://www.cpm.z80.de/)、[ライセンス](http://www.cpm.z80.de/license.html) | 含めない（取得スクリプト） |
-| システム本体 `CPM15000.SR`（BIOSなし、`$15000`〜`$1ACC1`） | 配布物の `DISK8` | 含めない |
-| BIOS `examples/cpm68k/bios.s` と組み立てた `bios.sr`・`bios.lst`・`bios.map` | 自作 | 含める |
-| ディスクイメージ | `scripts/cpm68k-disk.py` で作る | 含めない |
+| CP/M-68K 1.3 (`68kv1_3.zip`, checked by SHA-256) | [The Unofficial CP/M Web Site](http://www.cpm.z80.de/), [license](http://www.cpm.z80.de/license.html) | no (fetch script) |
+| The system `CPM15000.SR` (no BIOS, `$15000`–`$1ACC1`) | `DISK8` of the distribution | no |
+| BIOS `examples/cpm68k/bios.s` and the assembled `bios.sr`, `bios.lst`, `bios.map` | our own | yes |
+| Disk image | built by `scripts/cpm68k-disk.py` | no |
 
-Alcyon CがCP/Mのライセンスに含まれるかは明記がないため、本体と同じく取得スクリプトで扱います。
+It is not stated whether Alcyon C is covered by the CP/M license, so it is handled by the fetch script like the system itself.
 
-メモリの配置：
+Memory layout:
 
-| 番地 | 内容 |
+| Address | Contents |
 |---|---|
-| `$000000`〜`$0003FF` | 例外ベクタ（TRAP #2がBDOS、TRAP #3がBIOS） |
-| `$015000`〜`$017321` | CCP（`$15000` が入口。`_ccp`＝`$150BC` がウォームブート先） |
-| `$017322`〜`$01AFFF` | BDOS（TRAP #2の入口 `_traphnd` から） |
-| `$01B000`〜 | BIOS（`_init`） |
-| `$020000`〜`$FDFFFF` | TPA（プログラムはここに再配置して読み込まれる） |
+| `$000000`–`$0003FF` | Exception vectors (TRAP #2 is the BDOS, TRAP #3 the BIOS) |
+| `$015000`–`$017321` | CCP (entry at `$15000`; `_ccp` = `$150BC` is the warm boot target) |
+| `$017322`–`$01AFFF` | BDOS (from the TRAP #2 entry `_traphnd`) |
+| `$01B000`– | BIOS (`_init`) |
+| `$020000`–`$FDFFFF` | TPA (programs are relocated and loaded here) |
 
-起動はモニタROMなしで、エミュレータが2つのS-recordを読み込み、`$15000` からスーパーバイザ状態で始めます。
-システムはスタックを設定して `JSR $1B000`（BIOSの `_init`）を呼び、BDOSを初期化してCCPのプロンプトを出します。
+There is no monitor ROM: the emulator loads the two S-records and starts at `$15000` in supervisor mode.
+The system sets up its stack, calls `JSR $1B000` (the BIOS `_init`), initialises the BDOS and shows the CCP prompt.
 
 ## BIOS
 
-`examples/cpm68k/bios.s`（GNU as、Motorola記法）。組み立ては `python3 scripts/build-cpm68k-bios.py`
-（Ubuntuの `binutils-m68k-linux-gnu`。組み立てた結果をリポジトリに入れているので、動かすだけなら不要）。
+`examples/cpm68k/bios.s` (GNU as, Motorola syntax). Assemble it with `python3 scripts/build-cpm68k-bios.py`
+(needs Ubuntu's `binutils-m68k-linux-gnu`; the assembled output is in the repository, so this is not needed just to run it).
 
-- `_init`：TRAP #3のベクタを設定し、DUARTのチャネルAを初期化して、D0＝0（ドライブA:、ユーザー0）で戻ります。
-- TRAP #3：D0.Wの機能番号（0〜22）で表を引きます。D1〜D7・A0〜A6は保存します。
-- コンソールはDUARTのチャネルA、LIST・PUNCH・READERはチャネルBです。
-  `CONIN` は空回りせず、受信割り込み（レベル2、ベクタ64）を有効にして `STOP` で待ちます。割り込み処理はIMRを0に戻すだけです
-  （要求は1バイト読むまで出続けるため）。
-- ディスクA:はIDEです。BDOSは128バイトのセクタで読み書きするので、BIOSが512バイトのIDEセクタを1つ持ち、
-  読み込みはそこから写し、書き込みはそこを書き換えてすぐIDEへ書きます（ライトスルー）。IDEの語はバイトを入れ替えて読み書きします。
-- `GETMRT` はTPAを `$20000`〜`$FE0000` とする表を返します。`SETEXC` はTRAP #3以外のベクタを書き換えます。
+- `_init`: sets the TRAP #3 vector, initialises DUART channel A and returns D0 = 0 (drive A:, user 0).
+- TRAP #3: dispatches on the function number in D0.W (0–22). D1–D7 and A0–A6 are preserved.
+- The console is DUART channel A; LIST, PUNCH and READER are channel B.
+  `CONIN` does not spin: it enables the receive interrupt (level 2, vector 64) and waits in `STOP`. The interrupt handler only sets IMR back to 0
+  (the request stays up until a byte is read).
+- Disk A: is the IDE. The BDOS reads and writes 128-byte sectors, so the BIOS keeps one 512-byte IDE sector;
+  reads copy from it, and writes change it and write it to the IDE at once (write-through). IDE words are read and written with their bytes swapped.
+- `GETMRT` returns a table with the TPA at `$20000`–`$FE0000`. `SETEXC` changes any vector except TRAP #3.
 
-## ディスクの形式
+## Disk format
 
-8 MiB（512バイト×16384）。1トラック＝128バイト×32、2048トラック、予約トラック1、ブロック4 KiB（2047個）、ディレクトリ512項目（ブロック0〜3）、
-ディレクトリの割り当て表は16ビットのブロック番号です。番号はリトルエンディアンで、8080版のCP/Mと同じ並びです（BDOSは68000で動くのにこの並び）。
+8 MiB (16384 × 512 bytes). One track = 32 × 128 bytes, 2048 tracks, 1 reserved track, 4 KiB blocks (2047 of them), 512 directory entries (blocks 0–3);
+the directory allocation map uses 16-bit block numbers. They are little-endian, the same order as 8080 CP/M (even though the BDOS runs on a 68000).
 
 ```sh
-python3 scripts/cpm68k-disk.py dist a.img [FILE[=NAME]]...   # 配布物の道具一式＋ファイル
-python3 scripts/cpm68k-disk.py create a.img FILE...          # 空のディスク＋ファイル
+python3 scripts/cpm68k-disk.py dist a.img [FILE[=NAME]]...   # the distribution's tools plus files
+python3 scripts/cpm68k-disk.py create a.img FILE...          # an empty disk plus files
 python3 scripts/cpm68k-disk.py add a.img FILE...
 python3 scripts/cpm68k-disk.py ls a.img
 python3 scripts/cpm68k-disk.py get a.img X.SUB -
 ```
 
-配布物のコマンドは `.REL`（再配置情報付き）ですが、BDOSのプログラムロード（関数59）が再配置するので、`.68K` の名前で書き込み、RELOCは使いません。
-テキストファイル（`.C`・`.H`・`.SUB` など）は改行をCR LFにして、末尾を^Zで埋めます。
+The distribution's commands are `.REL` (with relocation information), but the BDOS program load (function 59) relocates them, so they are written under `.68K` names and RELOC is not used.
+Text files (`.C`, `.H`, `.SUB` and so on) get CR LF line ends and are padded with ^Z.
 
-## BDOSモニタ（`src/ice/cpm68k.rs`）
+## BDOS monitor (`src/ice/cpm68k.rs`)
 
-ICEのOSの層（`OsMonitor`）のCP/M-68K版です。システムの先頭の `CP/M-68K` の文字列と、TRAP #2がBDOSを指すことで見つけます。
+The CP/M-68K version of the ICE's OS layer (`OsMonitor`). It recognises the system by the `CP/M-68K` string at its start and by TRAP #2 pointing into the BDOS.
 
-| 項目 | 内容 |
+| Item | Contents |
 |---|---|
-| 捕捉 | `TRAP #2`（BDOS、機能番号D0.W、引数D1）と `TRAP #3`（BIOS、D0.W・D1・D2）。機能番号は実行直前のレジスタから決めます（`svc_regs`） |
-| 名前 | BDOSは `F_OPEN`・`C_WRITESTR`・`P_LOAD` などCP/Mで一般的な名前、BIOSは `BIOS_CONOUT` など。日本語の要約と説明付き |
-| 内部の呼び出し | BIOSの呼び出しと、BDOSの中からのBDOS呼び出し（`P_LOAD` の中の `F_READ` など）は内部呼び出しとして、元のBDOS呼び出しの下に数えます |
-| 引数・結果 | 文字、`$` で終わる文字列、FCBのファイル名（`A:HELLO.C`）、ランダムレコード番号、DMA番地、ロードパラメータブロック（TPA、ベースページ、テキスト・データ・BSS） |
-| エラー | ディレクトリ操作の `$FF`、順書き・ランダム読み書き・プログラムロードの失敗、BIOSの読み書きの失敗。`F_SFIRST`／`F_SNEXT` の `$FF`（項目の終わり）はエラーにしません |
-| 状態 | BDOSの内部の配置は公開されていないため、現在のドライブ・ユーザー番号・DMA番地・開いているFCB・TPA・読み込んだプログラムを、呼び出しの引数と結果から学びます |
-| プログラム | CCPを1、`P_LOAD` で読み込んだプログラムを2以降として表示し、`P_TERMCPM`・ウォームブートでCCPに戻ります |
-| メモリ | 例外ベクタ・CCP・BDOS・BIOS・TPA・プログラム・ベースページの領域 |
+| Catching | `TRAP #2` (BDOS, function number in D0.W, argument D1) and `TRAP #3` (BIOS, D0.W, D1, D2). The function number is taken from the registers just before the trap (`svc_regs`) |
+| Names | Common CP/M names for the BDOS such as `F_OPEN`, `C_WRITESTR`, `P_LOAD`, and `BIOS_CONOUT` and so on for the BIOS, with summaries and explanations |
+| Inner calls | BIOS calls, and BDOS calls from inside the BDOS (`F_READ` inside `P_LOAD`, for example), are counted as inner calls under the original BDOS call |
+| Arguments and results | Characters, `$`-terminated strings, FCB file names (`A:HELLO.C`), random record numbers, DMA addresses, the load parameter block (TPA, base page, text, data, BSS) |
+| Errors | `$FF` from directory operations; failures of sequential writes, random reads and writes and program loads; failed BIOS reads and writes. `$FF` from `F_SFIRST`/`F_SNEXT` (end of entries) is not an error |
+| State | The BDOS's internal layout is not published, so the current drive, user number, DMA address, open FCBs, TPA and loaded programs are learnt from call arguments and results |
+| Programs | The CCP is shown as 1 and programs loaded by `P_LOAD` as 2 onwards; `P_TERMCPM` and warm boot return to the CCP |
+| Memory | Regions for the exception vectors, CCP, BDOS, BIOS, TPA, programs and base pages |
 
-OSタブでは、システム情報（実行中のプログラム、ドライブ・ユーザー、DMA、TPA、開いているファイル）、プログラム表、メモリ上のプログラムとシステム、
-メモリ領域、BDOS・BIOSの呼び出しの記録（呼び出しを選ぶと、レジスタD0〜D2・A0・A1・A7・SRの入力と出力、内部の呼び出しの木）を表示します。
+The OS tab shows system information (running program, drive and user, DMA, TPA, open files), the program table, programs and system in memory,
+memory regions, and the log of BDOS and BIOS calls (select a call to see the input and output of registers D0–D2, A0, A1, A7 and SR, and the tree of inner calls).
 
 ```sh
-# 名前で停止（HTTP API）
-curl -X POST 'localhost:6809/api/os/break?code=F_OPEN'                 # 呼び出し前
-curl -X POST 'localhost:6809/api/os/break?code=P_LOAD&when=return'     # 復帰後
-curl -X POST 'localhost:6809/api/os/break?code=BIOS_READ'              # BIOSも名前か「BIOS 13」で
-curl -X POST 'localhost:6809/api/os/break?errors=1'                    # エラー復帰
+# stop by name (HTTP API)
+curl -X POST 'localhost:6809/api/os/break?code=F_OPEN'                 # before the call
+curl -X POST 'localhost:6809/api/os/break?code=P_LOAD&when=return'     # after it returns
+curl -X POST 'localhost:6809/api/os/break?code=BIOS_READ'              # BIOS too, by name or as "BIOS 13"
+curl -X POST 'localhost:6809/api/os/break?errors=1'                    # error returns
 ```
 
-DAPでは、例外ブレークポイントの「システムコールの呼び出し」「システムコールの復帰」の条件に名前をカンマ区切りで書きます（[ICE](ice.md)）。
+In DAP, put names, comma-separated, in the conditions of the "system call" and "system call return" exception breakpoints ([ICE](ice.md)).
 
-## シンボルとソース
+## Symbols and source
 
-`examples/cpm68k.sh` は、BIOSのリスト（`bios.lst`＋`bios.map`）とシステムの番地表（`CPM15000.MAP`）を読み込みます。
-逆アセンブルとスタックにCCP・BDOSの関数名（`_traphnd`、`_pgmld` など、NM68の8文字）とBIOSのラベルが付き、
-BIOSはソース行でブレーク・ステップできます（VS Codeでは `bios.s` に行ブレークポイントを置けます）。
+`examples/cpm68k.sh` loads the BIOS listing (`bios.lst` + `bios.map`) and the system's address map (`CPM15000.MAP`).
+The disassembly and the stack show CCP and BDOS function names (`_traphnd`, `_pgmld` and so on, NM68's 8 characters) and BIOS labels,
+and the BIOS can be broken and stepped by source line (in VS Code you can put line breakpoints in `bios.s`).
 
-## 検証
+## Verification
 
 ```sh
 python3 scripts/fetch-cpm68k.py
 cargo test --release --test cpm68k -- --ignored
-cargo test --release --lib tiny68k            # DUARTとIDE
+cargo test --release --lib tiny68k            # DUART and IDE
 ```
 
-- 起動して `DIR`・`TYPE`・`STAT`・`PIP X.SUB=C.SUB` の出力を確かめ、その裏の `F_OPEN`・`F_MAKE`（一時名 `X.$$$`）・`F_RENAME`・`P_LOAD`・`F_READ` と、
-  内部のBIOS呼び出しの記録、学んだドライブとTPAを確かめます。
-- `F_OPEN` の呼び出し前（D0＝15、D1がCCPのFCB `STAT    68K`）、`P_LOAD` の復帰後（プログラム表のベースページ `$020000`、イメージ `STAT`）、
-  `TYPE NOSUCH.TXT` の `F_OPEN` のエラー復帰で停止します。
-- Alcyon Cで `examples/cpm68k/hello.c` をコンパイル・リンクして実行します。
-- DAP：`F_SFIRST` の呼び出しで止め、スレッド名に `CP/M-68K` が出ること、`bios.s` の `conout:` の行のブレークポイントで止まり、
-  フレーム名 `conout` と行番号、行単位のステップを確かめます。
+- Boots and checks the output of `DIR`, `TYPE`, `STAT` and `PIP X.SUB=C.SUB`, and behind them the `F_OPEN`, `F_MAKE` (temporary name `X.$$$`), `F_RENAME`, `P_LOAD` and `F_READ` calls,
+  the log of inner BIOS calls, and the learnt drive and TPA.
+- Stops before `F_OPEN` (D0 = 15, D1 the CCP's FCB `STAT    68K`), after `P_LOAD` returns (base page `$020000` in the program table, image `STAT`),
+  and at the error return of `F_OPEN` for `TYPE NOSUCH.TXT`.
+- Compiles, links and runs `examples/cpm68k/hello.c` with Alcyon C.
+- DAP: stops at an `F_SFIRST` call and checks that the thread name shows `CP/M-68K`; stops at a breakpoint on the `conout:` line of `bios.s`
+  and checks the frame name `conout`, the line number and line stepping.
 
-## 制約
+## Limitations
 
-- CP/M-68Kは1度に1つのプログラムしか動かないため、OS-9のようなスケジューラ・キューはありません。タイムラインはCCPとプログラムの切り替えだけです。
-- BDOSの内部状態は呼び出しから学ぶため、ICEを途中から有効にした場合などは、次に該当する呼び出しがあるまで「—」です。
-- ドライブはA:だけです。割り込みは `CONIN` の待ちにだけ使います。
-- Alcyon Cのソースレベルデバッグは範囲外です。
+- CP/M-68K runs only one program at a time, so there is no scheduler or queue as in OS-9. The timeline only shows switches between the CCP and programs.
+- The BDOS's internal state is learnt from calls, so when the ICE is enabled part way through, for example, it shows "—" until the next relevant call.
+- Only drive A: exists. Interrupts are used only while waiting in `CONIN`.
+- Source-level debugging of Alcyon C is out of scope.

@@ -16,6 +16,7 @@
 //!   plus the `vsect` offset.
 //! - Addressing is S-relative, so the frame base at each instruction comes
 //!   from tracking pushes, pops, `leas` and `,s++`-style operands.
+use crate::tr;
 use super::cdecl::{CBlock, CDecl, CProgram, Storage};
 use super::debuginfo::{DebugInfo, Function, Loc, Type, Var, VarKind};
 use std::collections::HashMap;
@@ -222,7 +223,7 @@ impl Layout<'_> {
                 let l = &self.data[i];
                 Loc::Data(self.bases.data(l.kind).wrapping_add(l.off))
             }
-            None => Loc::Unknown("静的変数の位置が見つかりません"),
+            None => Loc::Unknown(tr!("静的変数の位置が見つかりません", "the static variable's place was not found")),
         }
     }
     fn block(
@@ -250,7 +251,7 @@ impl Layout<'_> {
                     _ => {
                         cum = None;
                         (
-                            Loc::Unknown("サイズの分からない変数より後ろです"),
+                            Loc::Unknown(tr!("サイズの分からない変数より後ろです", "after a variable of unknown size")),
                             VarKind::Local,
                         )
                     }
@@ -316,7 +317,7 @@ pub fn build(input: Input) -> DebugInfo {
                             Loc::Frame(i32::from(o) + 1)
                         }
                         (Some(o), Some(_)) => Loc::Frame(i32::from(o)),
-                        _ => Loc::Unknown("引数の位置が分かりません"),
+                        _ => Loc::Unknown(tr!("引数の位置が分かりません", "the argument's place is not known")),
                     }
                 };
                 off = match (off, slot) {
@@ -366,7 +367,7 @@ pub fn build(input: Input) -> DebugInfo {
             let l = &input.data[i];
             Loc::Data(input.bases.data(l.kind).wrapping_add(l.off))
         } else {
-            Loc::Unknown("他のファイルで定義されています")
+            Loc::Unknown(tr!("他のファイルで定義されています", "defined in another file"))
         };
         info.globals.push(Var {
             name: g.name.clone(),

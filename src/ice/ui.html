@@ -176,6 +176,7 @@ canvas { width: 100%; display: block; }
 <body>
 <header>
   <h1>rs6809 ICE</h1>
+  <select id="lang" title="言語" style="width:auto"><option value="ja">日本語</option><option value="en">English</option></select>
   <button id="bRun" class="primary" title="実行 (F5)">▶ 実行</button>
   <button id="bPause" title="一時停止 (F6)">⏸ 停止</button>
   <button id="bStep" title="ステップイン (F11)">ステップ</button>
@@ -369,6 +370,241 @@ canvas { width: 100%; display: block; }
 </main>
 <script>
 "use strict";
+// ---------- language ----------
+// Japanese is written in place; EN maps it to English. The ICE's language
+// (state.lang, /api/lang) is the UI's: one switch for both.
+const EN = {
+"1 MHz（実機相当）": "1 MHz (real 6809)",
+"1行入力して Enter（CRを付けて送信）": "Type a line and press Enter (sent with CR)",
+"CPU論理": "CPU logical",
+"LWASM/RMAのリスト、LWLINK/c.linkのマップ、またはそのディレクトリ（ホスト上のパス）": "LWASM/RMA listing, LWLINK/c.link map, GNU as listing, nm output, or a directory of them (path on the host)",
+"MMU（8KBバンク）": "MMU (8 KB banks)",
+"OS ブレーク条件": "OS break conditions",
+"OS モニタ": "OS monitor",
+"OSのシステム空間": "OS system space",
+"PC追従": "Follow PC",
+"↩ は呼び出し命令の直後を指す値（戻り番地）です。": "↩ marks values that point just after a call instruction (return addresses).",
+"↺ リセット": "↺ Reset",
+"⏸ 停止": "⏸ Pause",
+"▶ 実行": "▶ Run",
+"なし": "none",
+"アドレス": "Address",
+"アドレス(16進)、シンボル名、またはファイル名:行": "Address (hex), symbol, or file:line",
+"アドレス空間": "Address space",
+"ウォッチポイント": "Watchpoints",
+"エラーで復帰したら停止": "Stop on an error return",
+"コンソール": "Console",
+"コンソール /term": "Console /term",
+"コンソールの表示/非表示": "Show/hide the console",
+"サイクル": "Cycle",
+"サイズ": "Size",
+"システムコール": "System calls",
+"システムコールとプロセス切り替えを記録する": "Record system calls and process switches",
+"シンボル": "Symbols",
+"スケジューラ": "Scheduler",
+"スタック": "Stack",
+"ステップ": "Step",
+"ステップアウト": "Step out",
+"ステップアウト (Shift+F11) — 現在のサブルーチンから戻るまで実行": "Step out (Shift+F11): run until the current subroutine returns",
+"ステップイン (F11)": "Step in (F11)",
+"ステップオーバー": "Step over",
+"ステップオーバー (F10) — JSR/BSR/OS9呼び出しを1命令として実行": "Step over (F10): run a JSR/BSR/system call as one instruction",
+"タイムライン：横軸は仮想サイクル。帯はそのプロセスがCPUを持っていた区間、▲はユーザーのシステムコール。": "Timeline: guest cycles across. A band is a time the process had the CPU; ▲ is a user system call.",
+"デバッガ": "Debugger",
+"バイト数": "Bytes",
+"フレーム": "Frame",
+"ブレークポイント": "Breakpoints",
+"プロセス": "Processes",
+"プロセスIDで絞り込み": "Filter by process ID",
+"プロセスが切り替わったら停止": "Stop on a process switch",
+"メモリ": "Memory",
+"メモリマップ": "Memory map",
+"モジュールディレクトリ": "Module directory",
+"ユーザー呼び出しのみ": "User calls only",
+"リセット — 起動したときの状態に戻す（ディスクの中身はそのまま。起動の自動入力も最初から）": "Reset: back to the startup state (the disk keeps its contents; the boot script starts over)",
+"リンク": "Links",
+"レジスタ": "Registers",
+"一時停止 (F6)": "Pause (F6)",
+"両方": "Both",
+"保存": "Save",
+"保存した状態から再開": "Continue from a saved state",
+"全て": "all",
+"全削除": "Clear all",
+"名前": "Name",
+"名前で検索": "Search by name",
+"呼び出し": "Call",
+"呼び出しで停止": "Stop on call",
+"命令": "Instruction",
+"変数": "Variables",
+"実行 (F5)": "Run (F5)",
+"実行トレース（直近）": "Execution trace (recent)",
+"実行速度の上限（仮想サイクル/秒）。遅くするとOS-9の動きを目で追えます": "Speed limit (guest cycles per second); slow it down to follow the OS by eye",
+"対象プロセスID": "Process ID",
+"引数": "Arguments",
+"復帰で停止": "Stop on return",
+"書込": "Write",
+"最大": "Max",
+"最新へ追従": "Follow the latest",
+"機械の状態をファイルに保存（--load-state や「読込」で、そこから再開できます）": "Save the machine state to a file (continue from it with --load-state or Load)",
+"欄に合わせる": "Fit the panel",
+"消去": "Clear",
+"物理RAM(先頭64KB)": "Physical RAM (first 64 KB)",
+"移動": "Go",
+"種別": "Type",
+"端末の大きさ。80×24は文字の大きさを欄に合わせる。「欄に合わせる」は欄に収まる桁数・行数にする。どちらもゲストの端末の大きさに反映する（FUZIX）": "Terminal size. 80×24 scales the font to the panel; \"Fit the panel\" uses the columns and rows that fit. The guest's terminal size follows either (FUZIX)",
+"端末の桁数×行数": "Terminal columns × rows",
+"端末の種類（ゲストのTERMに合わせる。FUZIXはvt52）": "Terminal type (match the guest's TERM; FUZIX uses vt52)",
+"範囲": "Range",
+"結果": "Result",
+"行にカーソルを置くと処理内容を表示します。": "Hover over a row to see what it does.",
+"行を選ぶと、そのプリミティブの意味、レジスタの変化、カーネル内部で発生した呼び出しを表示します。": "Select a row to see what the call does, how the registers changed and the calls made inside the kernel.",
+"行頭クリックでブレークポイント、ダブルクリックでその行まで実行。": "Click the left edge for a breakpoint; double-click to run to the line.",
+"表示": "Show",
+"表示を消去": "Clear the list",
+"表示テーマ切り替え": "Switch the theme",
+"解除": "Clear",
+"言語": "Language",
+"読出": "Read",
+"読込": "Load",
+"追加": "Add",
+"逆アセンブル": "Disassembly",
+"速度": "Speed",
+"（クリックしてキー入力）": " (click to type)",
+"\" title=\"プロセス": "\" title=\"process ",
+"リセットしますか？（ディスクの中身はそのまま）": "Reset the machine? (the disk keeps its contents)",
+"保存するファイル（エミュレータ側のパス）": "File to save to (a path on the emulator's machine)",
+"読み込むファイル（エミュレータ側のパス）": "File to load (a path on the emulator's machine)",
+" に保存しました（": ": saved (",
+" KiB）": " KiB)",
+"トレース": "Trace",
+"スーパーバイザ": "Supervisor",
+"拡張": "Extend",
+"負": "Negative",
+"ゼロ": "Zero",
+"オーバーフロー": "Overflow",
+"キャリー": "Carry",
+"<span class=\"on\" title=\"割り込みマスク\">I": "<span class=\"on\" title=\"interrupt mask\">I",
+"STOP中": "in STOP",
+"全レジスタ退避": "Entire state saved",
+"FIRQマスク": "FIRQ mask",
+"ハーフキャリー": "Half carry",
+"IRQマスク": "IRQ mask",
+"キャリー（OS-9ではエラー）": "Carry (an error on OS-9)",
+"SYNC待ち": "waiting in SYNC",
+"CWAI待ち": "waiting in CWAI",
+" の新しい値（16進）": ": new value (hex)",
+"有効・タスク": "on, task ",
+"・FRT": ", FRT",
+"・ROM": ", ROM",
+"無効": "off",
+"\" title=\"論理 $": "\" title=\"logical $",
+" → 物理 $": " → physical $",
+"（書込禁止）": " (write-protected)",
+"エディタ(DAP)から設定": "set from the editor (DAP)",
+" 別空間": " another space",
+" 未ロード": " not loaded",
+"<span class=\"mute\">なし</span>": "<span class=\"mute\">none</span>",
+"読": "R",
+"書": "W",
+"読書": "RW",
+"シンボル ": " symbols ",
+"行": " lines",
+" / モジュール ": " / module ",
+"（未ロード）": " (not loaded)",
+"ローカル": "Locals",
+"大域": "Globals",
+"<span class=\"mute\">変数情報なし（Cのデバッグビルドのシンボルを読み込むと表示します）</span>": "<span class=\"mute\">No variables (load the symbols of a C debug build to see them)</span>",
+"物理 ": "phys ",
+" に書き込む値（16進、複数バイト可）": ": value to write (hex, several bytes allowed)",
+" モニタ": " monitor",
+" ブレーク条件": " break conditions",
+"実行中": "running",
+" 未検出": " not found yet",
+"が起動すると表示されます</td></tr>": ": shown once it is running</td></tr>",
+"<span class=\"mute\">アイドル</span>": "<span class=\"mute\">idle</span>",
+"<tr><th>ID</th><th>親</th><th>キュー</th>": "<tr><th>ID</th><th>Parent</th><th>Queue</th>",
+"1マス＝": "1 cell = ",
+"バイト": " bytes",
+"<span><i style=\"background:var(--warn)\"></i>使用中</span><span><i style=\"background:var(--chip)\"></i>空き</span>": "<span><i style=\"background:var(--warn)\"></i>in use</span><span><i style=\"background:var(--chip)\"></i>free</span>",
+"実行待ち": "ready",
+"待機": "waiting",
+"睡眠": "sleeping",
+"<tr><th>ID</th><th>親</th><th>モジュール</th><th>状態</th><th>キュー</th><th>優先</th><th>エージ</th><th>パス</th><th id=\"thDat\"></th></tr>": "<tr><th>ID</th><th>Parent</th><th>Module</th><th>State</th><th>Queue</th><th>Priority</th><th>Age</th><th>Paths</th><th id=\"thDat\"></th></tr>",
+"DATイメージ": "DAT image",
+"データ": "Data",
+"ページ": " pages",
+"<td class=\"mono\" title=\"ローカルパス:システムパス\">": "<td class=\"mono\" title=\"local path:system path\">",
+"ブロック": "Blocks",
+"<td class=\"mono\" title=\"モジュールDATイメージ内 $": "<td class=\"mono\" title=\"in the module's DAT image $",
+"\">物理$": "\">phys $",
+"1マス＝256バイト（D.FMBM ビットマップ）": "1 cell = 256 bytes (D.FMBM bitmap)",
+"記述子 ": "descriptor ",
+"使用中": "in use",
+"空き": "free",
+"<span><i style=\"background:var(--cat-mem)\"></i>モジュール</span><span><i style=\"background:var(--cat-proc)\"></i>プロセス記述子</span><span><i style=\"background:var(--warn)\"></i>使用中（データ・スタック等）</span><span><i style=\"background:var(--chip)\"></i>空き</span>": "<span><i style=\"background:var(--cat-mem)\"></i>modules</span><span><i style=\"background:var(--cat-proc)\"></i>process descriptors</span><span><i style=\"background:var(--warn)\"></i>in use (data, stacks and others)</span><span><i style=\"background:var(--chip)\"></i>free</span>",
+"1マス＝8KB物理ブロック（D.BlkMap）": "1 cell = an 8 KB physical block (D.BlkMap)",
+"システム": "system",
+"\" title=\"ブロック$": "\" title=\"block $",
+" 物理$": " phys $",
+"<span><i style=\"background:var(--cat-sys)\"></i>システム空間</span><span><i style=\"background:var(--cat-mem)\"></i>モジュール</span><span><i style=\"background:var(--warn)\"></i>使用中</span><span>色付き＝各プロセスのDAT</span><span><i style=\"background:var(--chip)\"></i>空き</span>": "<span><i style=\"background:var(--cat-sys)\"></i>system space</span><span><i style=\"background:var(--cat-mem)\"></i>modules</span><span><i style=\"background:var(--warn)\"></i>in use</span><span>coloured = each process's DAT</span><span><i style=\"background:var(--chip)\"></i>free</span>",
+"<span><i style=\"background:var(--accent)\"></i>システム</span><span><i style=\"background:var(--warn)\"></i>プログラム</span><span><i style=\"background:var(--chip)\"></i>TPA</span>": "<span><i style=\"background:var(--accent)\"></i>system</span><span><i style=\"background:var(--warn)\"></i>programs</span><span><i style=\"background:var(--chip)\"></i>TPA</span>",
+"<div class=\"queue cpm\"><h3>ドライブ・ユーザー</h3><div class=\"mono\">": "<div class=\"queue cpm\"><h3>Drive, user</h3><div class=\"mono\">",
+"<div class=\"queue cpm\"><h3>開いているファイル</h3><div class=\"chips\">": "<div class=\"queue cpm\"><h3>Open files</h3><div class=\"chips\">",
+"実行中…": "running…",
+"<tr><td colspan=\"6\" class=\"empty\">まだ記録がありません</td></tr>": "<tr><td colspan=\"6\" class=\"empty\">Nothing recorded yet</td></tr>",
+"呼び出し元へは戻らない": "does not return to the caller",
+"未復帰": "not returned yet",
+" · コード $": " · code $",
+"システム状態（カーネル・ドライバ内部）からの呼び出し": "Called in system state (inside the kernel or a driver)",
+"ユーザー状態からの呼び出し": "Called in user state",
+" · 開始 ": " · started ",
+" サイクル": " cycles",
+"<tbody><tr><th>入力</th>": "<tbody><tr><th>In</th>",
+"</tr><tr><th>出力</th>": "</tr><tr><th>Out</th>",
+"<p><b>引数</b> ": "<p><b>Arguments</b> ",
+"<br><b>結果</b> ": "<br><b>Result</b> ",
+" の呼び出しで停止</button><button data-b=\"return\">復帰で停止</button>": ": stop on call</button><button data-b=\"return\">Stop on return</button>",
+" のメモリを表示</button></div>": ": show memory</button></div>",
+"カーネル内部の呼び出し": "Calls inside the kernel",
+"<div class=\"tree\" id=\"tree\"><span class=\"mute\">読み込み中…</span></div>": "<div class=\"tree\" id=\"tree\"><span class=\"mute\">loading…</span></div>",
+"個々の内部呼び出しは記録の保持範囲外です（上は集計）": "The individual internal calls are no longer kept (the counts above remain)",
+"(戻らない)": "(no return)",
+"… 最新60件のみ表示</div>": "… only the latest 60 shown</div>",
+"実行中（速度制限）": "running (speed limited)",
+"停止": "stopped",
+"接続できません": "cannot connect"
+};
+let LANG = "ja";
+const t = (s) => (LANG === "en" ? EN[s] ?? s : s);
+const L = (ja, en) => (LANG === "en" ? en : ja);
+const JP = /[\u3040-\u30ff\u4e00-\u9fff\uff00-\uffef\u3000-\u303f]/;
+// The page's own text (not what scripts write): text nodes and titles,
+// with the Japanese kept so the switch can go back.
+function translatePage() {
+  document.documentElement.lang = LANG;
+  const walk = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+  for (let n = walk.nextNode(); n; n = walk.nextNode()) {
+    if (n.parentElement?.closest("script, #term, .dyn")) continue;
+    if (n.jaText === undefined) {
+      if (!JP.test(n.nodeValue)) continue;
+      n.jaText = n.nodeValue;
+    }
+    const key = n.jaText.trim();
+    n.nodeValue = LANG === "en" && EN[key] !== undefined ? n.jaText.replace(key, EN[key]) : n.jaText;
+  }
+  for (const el of document.querySelectorAll("[title], [placeholder]")) {
+    for (const a of ["title", "placeholder"]) {
+      const v = el.getAttribute(a);
+      if (v === null) continue;
+      const k = "ja" + a;
+      if (el.dataset[k] === undefined) {
+        if (!JP.test(v)) continue;
+        el.dataset[k] = v;
+      }
+      el.setAttribute(a, LANG === "en" ? EN[el.dataset[k]] ?? el.dataset[k] : el.dataset[k]);
+    }
+  }
+}
 const $ = (id) => document.getElementById(id);
 const hex = (v, n) => v.toString(16).toUpperCase().padStart(n, "0");
 // The CPU under the ICE ("6809" or "68000"): address digits and mask.
@@ -381,7 +617,7 @@ async function api(path, body) {
   return r.json();
 }
 const pidColor = (p) => p === 0 ? "#6b7280" : `hsl(${(p * 67 + 200) % 360} 62% 46%)`;
-const pidChip = (p) => `<span class="chip pid" style="background:${pidColor(p)}" title="プロセス${p}">${p}</span>`;
+const pidChip = (p) => `<span class="chip pid" style="background:${pidColor(p)}${t("\" title=\"プロセス")}${p}">${p}</span>`;
 const CAT = {
   proc: ["F$Fork", "F$Wait", "F$Chain", "F$Exit", "F$Send", "F$Icpt", "F$Sleep", "F$SSpd", "F$ID", "F$SPrior", "F$AProc", "F$NProc", "F$AllPrc", "F$DelPrc", "F$GPrDsc", "F$IOQu"],
   mem: ["F$Link", "F$Load", "F$UnLink", "F$Mem", "F$SRqMem", "F$SRtMem", "F$All64", "F$Ret64", "F$Find64", "F$Move", "F$AllRAM", "F$AllImg", "F$DelImg", "F$SetImg", "F$AllTsk", "F$DelTsk", "F$SetTsk", "F$SLink", "F$VModul", "F$CpyMem", "F$UnLoad", "F$ELink", "F$FModul", "F$MapBlk", "F$ClrBlk", "F$DelRAM"],
@@ -395,15 +631,15 @@ let consoleNext = 0, memPrev = {}, viewAddr = null;
 // ---------- toolbar ----------
 $("bRun").onclick = () => act("run");
 $("bPause").onclick = () => act("pause");
-$("bReset").onclick = () => { if (confirm("リセットしますか？（ディスクの中身はそのまま）")) act("reset"); };
+$("bReset").onclick = () => { if (confirm(t("リセットしますか？（ディスクの中身はそのまま）"))) act("reset"); };
 // The path is on the machine running the emulator, relative to its directory.
 async function stateFile(op) {
-  const path = prompt(op === "save" ? "保存するファイル（エミュレータ側のパス）" : "読み込むファイル（エミュレータ側のパス）", localStorage.getItem("rs6809.state") || "rs6809.state");
+  const path = prompt(op === "save" ? t("保存するファイル（エミュレータ側のパス）") : t("読み込むファイル（エミュレータ側のパス）"), localStorage.getItem("rs6809.state") || "rs6809.state");
   if (!path) return;
   try { localStorage.setItem("rs6809.state", path); } catch (e) { /* private mode */ }
   const r = await fetch(`/api/machine/${op}?path=${encodeURIComponent(path)}`, { method: "POST" });
   const j = await r.json();
-  if (j.error) alert(j.error); else if (op === "save") alert(`${j.path} に保存しました（${Math.round(j.bytes / 1024)} KiB）`);
+  if (j.error) alert(j.error); else if (op === "save") alert(`${j.path}${t(" に保存しました（")}${Math.round(j.bytes / 1024)}${t(" KiB）")}`);
   poll(true);
 }
 $("bSave").onclick = () => stateFile("save");
@@ -446,10 +682,10 @@ function renderRegs() {
     let h = "";
     for (let i = 0; i < 8; i++) h += cell("D" + i, r["d" + i], 8, p["d" + i]) + cell("A" + i, r["a" + i], 8, p["a" + i]);
     $("regs").innerHTML = h + cell("PC", r.pc, 6, p.pc) + cell("SR", r.sr, 4, p.sr) + cell("USP", r.usp, 8, p.usp) + cell("SSP", r.ssp, 8, p.ssp);
-    const bits = [[15, "T", "トレース"], [13, "S", "スーパーバイザ"], [4, "X", "拡張"], [3, "N", "負"], [2, "Z", "ゼロ"], [1, "V", "オーバーフロー"], [0, "C", "キャリー"]];
+    const bits = [[15, "T", t("トレース")], [13, "S", t("スーパーバイザ")], [4, "X", t("拡張")], [3, "N", t("負")], [2, "Z", t("ゼロ")], [1, "V", t("オーバーフロー")], [0, "C", t("キャリー")]];
     $("flags").innerHTML = bits.map(([b, f, t]) => `<span class="${r.sr & (1 << b) ? "on" : ""}" title="${t}">${f}</span>`).join("") +
-      `<span class="on" title="割り込みマスク">I${(r.sr >> 8) & 7}</span>`;
-    $("waitState").textContent = st.wait ? "STOP中" : "";
+      `${t("<span class=\"on\" title=\"割り込みマスク\">I")}${(r.sr >> 8) & 7}</span>`;
+    $("waitState").textContent = st.wait ? t("STOP中") : "";
   } else {
     $("regs").innerHTML =
       cell("A", r.a, 2, p.a) + cell("B", r.b, 2, p.b) +
@@ -457,24 +693,24 @@ function renderRegs() {
       cell("X", r.x, 4, p.x) + cell("Y", r.y, 4, p.y) +
       cell("U", r.u, 4, p.u) + cell("S", r.s, 4, p.s) +
       cell("PC", r.pc, 4, p.pc) + cell("CC", r.cc, 2, p.cc);
-    $("flags").innerHTML = "EFHINZVC".split("").map((f, i) => `<span class="${r.cc & (0x80 >> i) ? "on" : ""}" title="${["全レジスタ退避","FIRQマスク","ハーフキャリー","IRQマスク","負","ゼロ","オーバーフロー","キャリー（OS-9ではエラー）"][i]}">${f}</span>`).join("");
-    $("waitState").textContent = ["", "SYNC待ち", "CWAI待ち"][st.wait] || "";
+    $("flags").innerHTML = "EFHINZVC".split("").map((f, i) => `<span class="${r.cc & (0x80 >> i) ? "on" : ""}" title="${[t("全レジスタ退避"),t("FIRQマスク"),t("ハーフキャリー"),t("IRQマスク"),t("負"),t("ゼロ"),t("オーバーフロー"),t("キャリー（OS-9ではエラー）")][i]}">${f}</span>`).join("");
+    $("waitState").textContent = ["", t("SYNC待ち"), t("CWAI待ち")][st.wait] || "";
   }
   document.querySelectorAll("#regs .v").forEach((el) => el.onclick = async () => {
     if (st.running) return;
-    const v = prompt(el.dataset.r.toUpperCase() + " の新しい値（16進）", el.textContent);
+    const v = prompt(el.dataset.r.toUpperCase() + t(" の新しい値（16進）"), el.textContent);
     if (v !== null) { await api(`reg?name=${el.dataset.r}&val=${encodeURIComponent(v)}`, ""); await poll(true); }
   });
   $("mmuPanel").style.display = st.mmu ? "" : "none";
   if (!st.mmu) return;
   const m = st.mmu;
-  $("mmuInfo").textContent = m.enabled ? `有効・タスク${m.task}${m.frt ? "・FRT" : ""}${m.romdis ? "" : "・ROM"}` : "無効";
+  $("mmuInfo").textContent = m.enabled ? `${t("有効・タスク")}${m.task}${m.frt ? t("・FRT") : ""}${m.romdis ? "" : t("・ROM")}` : t("無効");
   let h = '<div class="hd"></div>' + [0, 1, 2, 3, 4, 5, 6, 7].map((i) => `<div class="hd">${hex(i * 0x20, 2)}</div>`).join("");
   for (const t of [0, 1]) {
     h += `<div class="hd">T${t}</div>`;
     for (let i = 0; i < 8; i++) {
       const e = m.maps[t * 8 + i];
-      h += `<div class="${m.enabled && m.task === t ? "cur" : ""} ${e & 0x80 ? "wp" : ""}" title="論理 $${hex(i * 0x2000, 4)}–$${hex(i * 0x2000 + 0x1fff, 4)} → 物理 $${hex((e & 0x7f) * 0x2000, 5)}${e & 0x80 ? "（書込禁止）" : ""}">${hex(e & 0x7f, 2)}</div>`;
+      h += `<div class="${m.enabled && m.task === t ? "cur" : ""} ${e & 0x80 ? "wp" : ""}${t("\" title=\"論理 $")}${hex(i * 0x2000, 4)}–$${hex(i * 0x2000 + 0x1fff, 4)}${t(" → 物理 $")}${hex((e & 0x7f) * 0x2000, 5)}${e & 0x80 ? t("（書込禁止）") : ""}">${hex(e & 0x7f, 2)}</div>`;
     }
   }
   $("mmu").innerHTML = h;
@@ -484,12 +720,12 @@ function renderRegs() {
 function renderBps() {
   const plain = st.breakpoints.map((a) => `<div class="item">● $${hex(a, AW())}<button data-a="${a}">×</button></div>`);
   // Symbolic breakpoints follow their module; unresolved ones wait for it to load.
-  const sym = (st.symBreakpoints || []).map((b) => `<div class="item ${b.resolved ? "" : "mute"}" title="${b.owner ? "エディタ(DAP)から設定" : ""}">${b.resolved ? "●" : "○"} ${esc(b.text)}` +
-    `<span class="mute mono">${b.addrs.map((a) => " $" + hex(a, AW())).join("") || (b.resolved ? " 別空間" : " 未ロード")}</span>${b.owner ? "" : `<button data-s="${b.id}">×</button>`}</div>`);
-  $("bpList").innerHTML = plain.length + sym.length ? plain.concat(sym).join("") : '<span class="mute">なし</span>';
+  const sym = (st.symBreakpoints || []).map((b) => `<div class="item ${b.resolved ? "" : "mute"}" title="${b.owner ? t("エディタ(DAP)から設定") : ""}">${b.resolved ? "●" : "○"} ${esc(b.text)}` +
+    `<span class="mute mono">${b.addrs.map((a) => " $" + hex(a, AW())).join("") || (b.resolved ? t(" 別空間") : t(" 未ロード"))}</span>${b.owner ? "" : `<button data-s="${b.id}">×</button>`}</div>`);
+  $("bpList").innerHTML = plain.length + sym.length ? plain.concat(sym).join("") : t('<span class="mute">なし</span>');
   $("bpList").querySelectorAll("button[data-a]").forEach((b) => b.onclick = async () => { await api(`bp?op=del&addr=${hex(+b.dataset.a, AW())}`, ""); poll(true); });
   $("bpList").querySelectorAll("button[data-s]").forEach((b) => b.onclick = async () => { await api(`bp?symdel=${b.dataset.s}`, ""); poll(true); });
-  $("wList").innerHTML = st.watches.length ? st.watches.map((w, i) => `<div class="item">${{ r: "読", w: "書", rw: "読書" }[w.kind]} $${hex(w.start, AW())}${w.end > w.start ? "–$" + hex(w.end, AW()) : ""}<button data-i="${i}">×</button></div>`).join("") : '<span class="mute">なし</span>';
+  $("wList").innerHTML = st.watches.length ? st.watches.map((w, i) => `<div class="item">${{ r: t("読"), w: t("書"), rw: t("読書") }[w.kind]} $${hex(w.start, AW())}${w.end > w.start ? "–$" + hex(w.end, AW()) : ""}<button data-i="${i}">×</button></div>`).join("") : t('<span class="mute">なし</span>');
   $("wList").querySelectorAll("button").forEach((b) => b.onclick = async () => { await api(`watch?op=del&index=${b.dataset.i}`, ""); poll(true); });
 }
 $("bpAdd").onclick = async () => {
@@ -502,7 +738,7 @@ $("bpAddr").onkeydown = (e) => { if (e.key === "Enter") $("bpAdd").onclick(); };
 async function renderSymbols() {
   const d = await api("symbols");
   $("symList").innerHTML = d.tables.length ? d.tables.map((t) => `<div class="item" title="${esc(t.path)}"><span class="mono">${esc(t.path.split("/").pop())}</span>` +
-    `<span class="mute">${t.kind} ${t.symbols}シンボル ${t.lines}行${t.module ? ` / モジュール ${esc(t.module)}${t.placed ? "" : "（未ロード）"}` : ""}</span></div>`).join("") : '<span class="mute">なし</span>';
+    `<span class="mute">${t.kind} ${t.symbols}${t("シンボル ")}${t.lines}${t("行")}${t.module ? `${t(" / モジュール ")}${esc(t.module)}${t.placed ? "" : t("（未ロード）")}` : ""}</span></div>`).join("") : t('<span class="mute">なし</span>');
 }
 $("symLoad").onclick = async () => {
   const r = await fetch(`/api/symbols?path=${encodeURIComponent($("symPath").value.trim())}`, { method: "POST" });
@@ -524,8 +760,8 @@ async function renderVars() {
   const sel = $("varFrame");
   sel.innerHTML = d.frames.map((f, i) => `<option value="${i}" ${i === d.frame ? "selected" : ""}>#${i} ${esc(f.name)}${f.line ? " " + esc(f.line) : ""}</option>`).join("");
   const part = (title, list) => list.length ? `<h3>${title}</h3>` + list.map((v) => varTree(v, title)).join("") : "";
-  const html = part("ローカル", d.locals) + part("大域", d.globals);
-  $("vars").innerHTML = html || '<span class="mute">変数情報なし（Cのデバッグビルドのシンボルを読み込むと表示します）</span>';
+  const html = part(t("ローカル"), d.locals) + part(t("大域"), d.globals);
+  $("vars").innerHTML = html || t('<span class="mute">変数情報なし（Cのデバッグビルドのシンボルを読み込むと表示します）</span>');
   $("vars").querySelectorAll("details").forEach((el) => el.ontoggle = () => { el.open ? varOpen.add(el.dataset.k) : varOpen.delete(el.dataset.k); });
 }
 $("varFrame").onchange = () => { varFrame = +$("varFrame").value; renderVars(); };
@@ -551,7 +787,7 @@ async function renderDis() {
     const lbl = l.label ? `<tr class="lbl"><td></td><td colspan="4">${esc(l.label)}:</td></tr>` : "";
     return lbl + src + `<tr class="${l.addr === st.regs.pc ? "pc" : ""} ${l.bp ? "bp" : ""} ${os9 ? "os9" : ""}" data-a="${l.addr}" title="${esc(title)}">` +
       `<td class="g"></td><td>${hex(l.addr, AW())}</td><td class="b">${l.bytes}</td><td class="t">${esc(l.text)}${l.tsym ? ` <span class="sym">&lt;${esc(l.tsym)}&gt;</span>` : ""}</td>` +
-      `<td class="mute">${l.phys >= 0 ? (is68k() ? "RAM" : "物理 " + hex(l.phys, 5)) : (is68k() ? "I/O" : "ROM/IO")}</td></tr>`;
+      `<td class="mute">${l.phys >= 0 ? (is68k() ? "RAM" : t("物理 ") + hex(l.phys, 5)) : (is68k() ? "I/O" : "ROM/IO")}</td></tr>`;
   }).join("");
   $("dis").querySelectorAll("tr[data-a]").forEach((tr) => {
     tr.querySelector(".g").onclick = async () => { await api(`bp?op=toggle&addr=${hex(+tr.dataset.a, AW())}`, ""); poll(true); };
@@ -590,7 +826,7 @@ async function renderMem() {
   memPrev[key] = d.hex;
   $("mem").innerHTML = out;
   if (space === "cpu") $("mem").querySelectorAll(".byte").forEach((el) => el.ondblclick = async () => {
-    const v = prompt(`$${hex(+el.dataset.a, AW())} に書き込む値（16進、複数バイト可）`, el.textContent);
+    const v = prompt(`$${hex(+el.dataset.a, AW())}${t(" に書き込む値（16進、複数バイト可）")}`, el.textContent);
     if (v !== null) { await api(`mem?addr=${hex(+el.dataset.a, AW())}&val=${v.replace(/\s/g, "")}`, ""); renderMem(); }
   });
 }
@@ -1101,32 +1337,32 @@ async function loadOsInfo() {
   try { m = localStorage.getItem("rs6809.term." + osInfo.os); } catch (e) { /* private mode */ }
   termMode(m || (osInfo.os === "fuzix" ? "vt52" : "ansi"), false);
 
-  $("osTab").textContent = `${osInfo.name} モニタ`;
+  $("osTab").textContent = `${osInfo.name}${t(" モニタ")}`;
   // A bare program (no OS) has no OS monitor tab.
   $("osTab").style.display = osInfo.os === "none" ? "none" : "";
-  $("osBreakTitle").textContent = `${osInfo.name} ブレーク条件`;
+  $("osBreakTitle").textContent = `${osInfo.name}${t(" ブレーク条件")}`;
   // Panel titles an OS may rename (CP/M-68K has programs, not processes).
-  $("schedTitle").textContent = osInfo.schedTitle || "スケジューラ";
-  $("procsTitle").textContent = osInfo.procsTitle || "プロセス";
-  $("imagesTitle").textContent = osInfo.imagesTitle || "モジュールディレクトリ";
-  $("callsTitle").textContent = osInfo.callsTitle || "システムコール";
+  $("schedTitle").textContent = osInfo.schedTitle || t("スケジューラ");
+  $("procsTitle").textContent = osInfo.procsTitle || t("プロセス");
+  $("imagesTitle").textContent = osInfo.imagesTitle || t("モジュールディレクトリ");
+  $("callsTitle").textContent = osInfo.callsTitle || t("システムコール");
   $("trCode").placeholder = osInfo.breakExample || "F$Fork";
   const sys = (osInfo.spaces || []).find((x) => x.key === "sys");
-  $("sysSpace").textContent = sys ? sys.label : "OSのシステム空間";
-  $("queues").innerHTML = `<div class="queue"><h3>${esc(osInfo.current || "実行中")}</h3><div class="chips" id="qRun"></div></div>` +
+  $("sysSpace").textContent = sys ? sys.label : t("OSのシステム空間");
+  $("queues").innerHTML = `<div class="queue"><h3>${esc(osInfo.current || t("実行中"))}</h3><div class="chips" id="qRun"></div></div>` +
     (osInfo.queues || []).map((q) => `<div class="queue"><h3>${esc(q.label)}</h3><div class="chips" id="q_${q.key}"></div></div>`).join("");
 }
 async function renderOs9() {
   const o = st.os;
   if (!osInfo || (o && o.level !== osInfo.level)) await loadOsInfo();
   if (!o) {
-    $("osLevel").textContent = `${osInfo.name} 未検出`;
+    $("osLevel").textContent = `${osInfo.name}${t(" 未検出")}`;
     $("queues").querySelectorAll(".chips").forEach((q) => q.innerHTML = "");
-    $("procs").innerHTML = `<tr><td colspan="9" class="empty">${esc(osInfo.name)}が起動すると表示されます</td></tr>`;
+    $("procs").innerHTML = `<tr><td colspan="9" class="empty">${esc(osInfo.name)}${t("が起動すると表示されます</td></tr>")}`;
     return;
   }
   $("osLevel").textContent = osInfo.title || osInfo.name;
-  $("qRun").innerHTML = o.pid ? pidChip(o.pid) : '<span class="mute">アイドル</span>';
+  $("qRun").innerHTML = o.pid ? pidChip(o.pid) : t('<span class="mute">アイドル</span>');
   (osInfo.queues || []).forEach((q) => { $("q_" + q.key).innerHTML = (o[q.key] || []).map(pidChip).join(""); });
   const [p, m, mm] = await Promise.all([api("os/procs"), api("os/modules"), api("os/memmap")]);
   const view = OS_VIEWS[osInfo.os] || GENERIC_VIEW;
@@ -1141,7 +1377,7 @@ const fieldText = (v) => Array.isArray(v) ? v.join(" ") : v === null ? "" : Stri
 const GENERIC_VIEW = {
   procs(procs) {
     const keys = [...new Set(procs.flatMap((p) => Object.keys(p)))].filter((k) => !["id", "parent", "queue"].includes(k));
-    $("procHead").innerHTML = `<tr><th>ID</th><th>親</th><th>キュー</th>${keys.map((k) => `<th>${esc(k)}</th>`).join("")}</tr>`;
+    $("procHead").innerHTML = `${t("<tr><th>ID</th><th>親</th><th>キュー</th>")}${keys.map((k) => `<th>${esc(k)}</th>`).join("")}</tr>`;
     $("procs").innerHTML = procs.map((p) => `<tr><td>${pidChip(p.id)}</td><td>${p.parent}</td><td>${esc(p.queue)}</td>` +
       keys.map((k) => `<td class="mono">${esc(fieldText(p[k]))}</td>`).join("") + "</tr>").join("");
   },
@@ -1151,17 +1387,17 @@ const GENERIC_VIEW = {
       Object.entries(m).filter(([k]) => k !== "name").map(([k, v]) => `${esc(k)}=${esc(fieldText(v))}`).join(" ") + "</td></tr>").join("");
   },
   memmap(mm) {
-    $("memUnit").textContent = `1マス＝${mm.unit}バイト`;
+    $("memUnit").textContent = `${t("1マス＝")}${mm.unit}${t("バイト")}`;
     $("memgrid").style.gridTemplateColumns = "repeat(32, 1fr)";
     $("memgrid").innerHTML = (mm.map || []).map((f, i) => `<div style="background:${f ? "var(--warn)" : "var(--chip)"}" title="${i}: ${f}"></div>`).join("");
-    $("memLegend").innerHTML = '<span><i style="background:var(--warn)"></i>使用中</span><span><i style="background:var(--chip)"></i>空き</span>';
+    $("memLegend").innerHTML = t('<span><i style="background:var(--warn)"></i>使用中</span><span><i style="background:var(--chip)"></i>空き</span>');
   },
 };
 const STATE_BITS = [[0x80, "Sys"], [0x40, "TSlp"], [0x20, "TOut"], [0x10, "Img"], [0x08, "Susp"], [0x02, "Cond"], [0x01, "Dead"]];
-const QNAME = { running: "実行中", active: "実行待ち", wait: "待機", sleep: "睡眠", "-": "—" };
+const QNAME = { running: t("実行中"), active: t("実行待ち"), wait: t("待機"), sleep: t("睡眠"), "-": "—" };
 function renderProcs(procs, level) {
-  $("procHead").innerHTML = '<tr><th>ID</th><th>親</th><th>モジュール</th><th>状態</th><th>キュー</th><th>優先</th><th>エージ</th><th>パス</th><th id="thDat"></th></tr>';
-  $("thDat").textContent = level === 2 ? "DATイメージ" : "データ";
+  $("procHead").innerHTML = t('<tr><th>ID</th><th>親</th><th>モジュール</th><th>状態</th><th>キュー</th><th>優先</th><th>エージ</th><th>パス</th><th id="thDat"></th></tr>');
+  $("thDat").textContent = level === 2 ? t("DATイメージ") : t("データ");
   const kids = {};
   procs.forEach((p) => (kids[p.parent] = kids[p.parent] || []).push(p));
   const rows = [];
@@ -1171,49 +1407,49 @@ function renderProcs(procs, level) {
   $("procs").innerHTML = rows.map(([p, d]) => {
     const flags = STATE_BITS.filter(([b]) => p.state & b).map(([, n]) => n).join(" ");
     const paths = p.paths.map((x, i) => x ? `${i}:${x}` : "").filter(Boolean).join(" ");
-    const dat = level === 2 ? p.dat.map((b) => b === 0x333e ? "··" : hex(b, 2)).join(" ") : `${p.pages}ページ`;
+    const dat = level === 2 ? p.dat.map((b) => b === 0x333e ? "··" : hex(b, 2)).join(" ") : `${p.pages}${t("ページ")}`;
     return `<tr><td>${"&nbsp;".repeat(d * 3)}${pidChip(p.id)}</td><td>${p.parent}</td><td class="mono">${esc(p.module)}</td>` +
       `<td class="state-flags" title="P$State=$${hex(p.state, 2)}">${flags || "User"}</td><td>${QNAME[p.queue]}</td><td>${p.prior}</td><td>${p.age}</td>` +
-      `<td class="mono" title="ローカルパス:システムパス">${paths}</td><td class="mono">${dat}</td></tr>`;
+      `${t("<td class=\"mono\" title=\"ローカルパス:システムパス\">")}${paths}</td><td class="mono">${dat}</td></tr>`;
   }).join("");
 }
 const MTYPE = { 1: "Prgrm", 2: "Sbrtn", 3: "Multi", 4: "Data", 5: "ShellSub", 12: "Systm", 13: "FlMgr", 14: "Drivr", 15: "Devic" };
 const MLANG = { 0: "", 1: "6809", 2: "I-code", 3: "P-code", 4: "C", 5: "Cobol", 6: "Fortran", 7: "6309" };
 function renderMods(mods, level) {
-  $("thBlk").textContent = level === 2 ? "ブロック" : "";
+  $("thBlk").textContent = level === 2 ? t("ブロック") : "";
   $("mods").innerHTML = mods.map((m) => `<tr><td class="mono name">${esc(m.name)}</td><td>${MTYPE[m.type >> 4] || hex(m.type >> 4, 1)}</td><td>${MLANG[m.type & 15] ?? ""}</td>` +
     // Level 2's MD$MPtr is relative to the module's DAT image; show the physical address.
     (level === 2 && m.blocks.length
-      ? `<td class="mono" title="モジュールDATイメージ内 $${hex(m.addr, 4)}">物理$${hex(m.blocks[0] * 0x2000 + (m.addr & 0x1fff), 5)}</td>`
+      ? `${t("<td class=\"mono\" title=\"モジュールDATイメージ内 $")}${hex(m.addr, 4)}${t("\">物理$")}${hex(m.blocks[0] * 0x2000 + (m.addr & 0x1fff), 5)}</td>`
       : `<td class="mono">$${hex(m.addr, 4)}</td>`) + `<td class="mono">${m.size}</td><td>${m.links}</td><td class="mono">${level === 2 ? m.blocks.map((b) => hex(b, 2)).join(" ") : ""}</td></tr>`).join("");
 }
 function renderMemMap(mm, mods, procs, level) {
   const g = $("memgrid");
   if (level === 1) {
-    $("memUnit").textContent = "1マス＝256バイト（D.FMBM ビットマップ）";
+    $("memUnit").textContent = t("1マス＝256バイト（D.FMBM ビットマップ）");
     const owner = {};
     mods.forEach((m) => { for (let a = m.addr >> 8; a <= (m.addr + m.size - 1) >> 8; a++) owner[a] = owner[a] || ["mod", m.name]; });
-    procs.forEach((p) => { owner[p.addr >> 8] = owner[p.addr >> 8] || ["desc", "記述子 " + p.id]; });
+    procs.forEach((p) => { owner[p.addr >> 8] = owner[p.addr >> 8] || ["desc", t("記述子 ") + p.id]; });
     g.style.gridTemplateColumns = "repeat(32, 1fr)";
     g.innerHTML = mm.map.map((used, i) => {
       const o = owner[i];
       const bg = o && o[0] === "mod" ? "var(--cat-mem)" : o ? "var(--cat-proc)" : used ? "var(--warn)" : "var(--chip)";
-      return `<div style="background:${bg}" title="$${hex(i * 256, 4)}  ${used ? "使用中" : "空き"}${o ? " / " + esc(o[1]) : ""}"></div>`;
+      return `<div style="background:${bg}" title="$${hex(i * 256, 4)}  ${used ? t("使用中") : t("空き")}${o ? " / " + esc(o[1]) : ""}"></div>`;
     }).join("");
-    $("memLegend").innerHTML = '<span><i style="background:var(--cat-mem)"></i>モジュール</span><span><i style="background:var(--cat-proc)"></i>プロセス記述子</span><span><i style="background:var(--warn)"></i>使用中（データ・スタック等）</span><span><i style="background:var(--chip)"></i>空き</span>';
+    $("memLegend").innerHTML = t('<span><i style="background:var(--cat-mem)"></i>モジュール</span><span><i style="background:var(--cat-proc)"></i>プロセス記述子</span><span><i style="background:var(--warn)"></i>使用中（データ・スタック等）</span><span><i style="background:var(--chip)"></i>空き</span>');
   } else {
-    $("memUnit").textContent = "1マス＝8KB物理ブロック（D.BlkMap）";
+    $("memUnit").textContent = t("1マス＝8KB物理ブロック（D.BlkMap）");
     const owner = {};
-    mm.sysdat.forEach((b) => { if (b !== 0x333e) owner[b] = ["sys", "システム"]; });
+    mm.sysdat.forEach((b) => { if (b !== 0x333e) owner[b] = ["sys", t("システム")]; });
     mods.forEach((m) => m.blocks.forEach((b) => owner[b] = owner[b] || ["mod", m.name]));
-    procs.forEach((p) => p.dat.forEach((b) => { if (b !== 0x333e) owner[b] = owner[b] || ["proc", "プロセス" + p.id, p.id]; }));
+    procs.forEach((p) => p.dat.forEach((b) => { if (b !== 0x333e) owner[b] = owner[b] || ["proc", t("プロセス") + p.id, p.id]; }));
     g.style.gridTemplateColumns = "repeat(16, 1fr)";
     g.innerHTML = mm.map.map((f, i) => {
       const o = owner[i];
       const bg = f & 0x80 ? "transparent" : o && o[0] === "proc" ? pidColor(o[2]) : o && o[0] === "mod" ? "var(--cat-mem)" : o ? "var(--cat-sys)" : f & 1 ? "var(--warn)" : "var(--chip)";
-      return `<div style="background:${bg}" title="ブロック$${hex(i, 2)} 物理$${hex(i * 8192, 5)} flags=$${hex(f, 2)}${o ? " / " + esc(o[1]) : ""}">${hex(i, 2)}</div>`;
+      return `<div style="background:${bg}${t("\" title=\"ブロック$")}${hex(i, 2)}${t(" 物理$")}${hex(i * 8192, 5)} flags=$${hex(f, 2)}${o ? " / " + esc(o[1]) : ""}">${hex(i, 2)}</div>`;
     }).join("");
-    $("memLegend").innerHTML = '<span><i style="background:var(--cat-sys)"></i>システム空間</span><span><i style="background:var(--cat-mem)"></i>モジュール</span><span><i style="background:var(--warn)"></i>使用中</span><span>色付き＝各プロセスのDAT</span><span><i style="background:var(--chip)"></i>空き</span>';
+    $("memLegend").innerHTML = t('<span><i style="background:var(--cat-sys)"></i>システム空間</span><span><i style="background:var(--cat-mem)"></i>モジュール</span><span><i style="background:var(--warn)"></i>使用中</span><span>色付き＝各プロセスのDAT</span><span><i style="background:var(--chip)"></i>空き</span>');
   }
 }
 // NitrOS-9: P$State flags, DAT images, module blocks and the block/page map.
@@ -1227,7 +1463,7 @@ function renderRegions(mm) {
     `<div class="region" title="$${hex(r.start, 6)}–$${hex(r.end - 1, 6)}"><span class="mono">${hex(r.start, 6)}</span>` +
     `<span class="bar"><i style="left:${(r.start / ram) * 100}%;width:${Math.max(0.4, ((r.end - r.start) / ram) * 100)}%;background:${color[r.kind] || "var(--chip)"}"></i></span>` +
     `<span>${esc(r.name)}</span><span class="mute">${Math.max(1, Math.round((r.end - r.start) / 1024))} KiB</span></div>`).join("");
-  $("memLegend").innerHTML = '<span><i style="background:var(--accent)"></i>システム</span><span><i style="background:var(--warn)"></i>プログラム</span><span><i style="background:var(--chip)"></i>TPA</span>';
+  $("memLegend").innerHTML = t('<span><i style="background:var(--accent)"></i>システム</span><span><i style="background:var(--warn)"></i>プログラム</span><span><i style="background:var(--chip)"></i>TPA</span>');
 }
 const OS_VIEWS = {
   // FUZIX: the process table and memory as named regions.
@@ -1242,10 +1478,10 @@ const OS_VIEWS = {
       $("qRun").innerHTML = `<span class="mono">${esc(o.program)}</span>`;
       $("queues").querySelectorAll(".cpm").forEach((e) => e.remove());
       $("queues").insertAdjacentHTML("beforeend",
-        `<div class="queue cpm"><h3>ドライブ・ユーザー</h3><div class="mono">${esc(o.drive)}: / ${o.user}</div></div>` +
+        `${t("<div class=\"queue cpm\"><h3>ドライブ・ユーザー</h3><div class=\"mono\">")}${esc(o.drive)}: / ${o.user}</div></div>` +
         `<div class="queue cpm"><h3>DMA</h3><div class="mono">${o.dma === null ? "—" : "$" + hex(o.dma, 6)}</div></div>` +
         `<div class="queue cpm"><h3>TPA</h3><div class="mono">${o.tpa ? `$${hex(o.tpa[0], 6)}–$${hex(o.tpa[1], 6)}` : "—"}</div></div>` +
-        `<div class="queue cpm"><h3>開いているファイル</h3><div class="chips">${files || '<span class="mute">なし</span>'}</div></div>`);
+        `${t("<div class=\"queue cpm\"><h3>開いているファイル</h3><div class=\"chips\">")}${files || t('<span class="mute">なし</span>')}</div></div>`);
     },
     procs: (procs) => GENERIC_VIEW.procs(procs),
     mods: (mods) => GENERIC_VIEW.mods(mods),
@@ -1286,8 +1522,8 @@ function renderCalls() {
     const dur = c.end !== null ? c.end - c.cycle : pending ? "…" : "";
     return `<tr class="${cls}" data-id="${c.id}"><td class="mute">${c.id}</td><td>${pidChip(c.pid)}</td>` +
       `<td><span class="name cat-${cat(c.name)}">${"·".repeat(c.depth)}${esc(c.name)}</span>${c.system ? ' <span class="chip">sys</span>' : ""}</td>` +
-      `<td class="args">${esc(c.args)}</td><td class="r">${pending ? "実行中…" : esc(c.result)}</td><td class="mute">${dur}</td></tr>`;
-  }).join("") || '<tr><td colspan="6" class="empty">まだ記録がありません</td></tr>';
+      `<td class="args">${esc(c.args)}</td><td class="r">${pending ? t("実行中…") : esc(c.result)}</td><td class="mute">${dur}</td></tr>`;
+  }).join("") || t('<tr><td colspan="6" class="empty">まだ記録がありません</td></tr>');
   box.querySelectorAll("tr[data-id]").forEach((tr) => tr.onclick = () => { selCall = +tr.dataset.id; renderCalls(); renderDetail(calls.get(selCall), true); });
   if ($("cTail").checked) box.scrollTop = box.scrollHeight;
 }
@@ -1300,26 +1536,26 @@ async function renderDetail(c, loadChildren) {
   const regs = is68k() ? ["d0", "d1", "d2", "a0", "a1", "a7", "sr"] : ["a", "b", "x", "y", "u", "s", "cc"];
   const w = (k) => is68k() ? (k === "sr" ? 4 : 8) : k === "a" || k === "b" || k === "cc" ? 2 : 4;
   const ptr = is68k() ? "d1" : "x";
-  const outRow = c.out ? regs.map((k) => `<td class="${c.out[k] !== c.in[k] ? "chg" : ""}">${hex(c.out[k], w(k))}</td>`).join("") : `<td colspan="${regs.length}" class="mute">${c.noReturn ? "呼び出し元へは戻らない" : "未復帰"}</td>`;
-  let html = `<h3><span class="cat-${cat(c.name)}">${esc(c.name)}</span> <span class="mute" style="font-weight:400">${esc(s.desc || "")} · コード $${hex(c.code, 2)}</span></h3>` +
+  const outRow = c.out ? regs.map((k) => `<td class="${c.out[k] !== c.in[k] ? "chg" : ""}">${hex(c.out[k], w(k))}</td>`).join("") : `<td colspan="${regs.length}" class="mute">${c.noReturn ? t("呼び出し元へは戻らない") : t("未復帰")}</td>`;
+  let html = `<h3><span class="cat-${cat(c.name)}">${esc(c.name)}</span> <span class="mute" style="font-weight:400">${esc(s.desc || "")}${t(" · コード $")}${hex(c.code, 2)}</span></h3>` +
     (s.explain ? `<div class="explain">${esc(s.explain)}</div>` : "") +
-    `<p>${pidChip(c.pid)} ${c.system ? "システム状態（カーネル・ドライバ内部）からの呼び出し" : "ユーザー状態からの呼び出し"}` +
-    ` · 開始 ${c.cycle}${c.end !== null ? ` · ${c.end - c.cycle} サイクル` : ""}</p>` +
+    `<p>${pidChip(c.pid)} ${c.system ? t("システム状態（カーネル・ドライバ内部）からの呼び出し") : t("ユーザー状態からの呼び出し")}` +
+    `${t(" · 開始 ")}${c.cycle}${c.end !== null ? ` · ${c.end - c.cycle}${t(" サイクル")}` : ""}</p>` +
     `<table class="regdiff"><thead><tr><th></th>${regs.map((k) => `<th>${k.toUpperCase()}</th>`).join("")}</tr></thead>` +
-    `<tbody><tr><th>入力</th>${regs.map((k) => `<td>${hex(c.in[k], w(k))}</td>`).join("")}</tr><tr><th>出力</th>${outRow}</tr></tbody></table>` +
-    `<p><b>引数</b> ${esc(c.args)}<br><b>結果</b> ${esc(c.result || "")}</p>` +
-    `<div class="row"><button data-b="call">${esc(c.name)} の呼び出しで停止</button><button data-b="return">復帰で停止</button>` +
-    `<button data-b="mem">${ptr.toUpperCase()} のメモリを表示</button></div>` +
-    `<h3 style="margin-top:10px;font-size:13px">${esc(osInfo.internalLabel || "カーネル内部の呼び出し")}</h3>` +
+    `${t("<tbody><tr><th>入力</th>")}${regs.map((k) => `<td>${hex(c.in[k], w(k))}</td>`).join("")}${t("</tr><tr><th>出力</th>")}${outRow}</tr></tbody></table>` +
+    `${t("<p><b>引数</b> ")}${esc(c.args)}${t("<br><b>結果</b> ")}${esc(c.result || "")}</p>` +
+    `<div class="row"><button data-b="call">${esc(c.name)}${t(" の呼び出しで停止</button><button data-b=\"return\">復帰で停止</button>")}` +
+    `<button data-b="mem">${ptr.toUpperCase()}${t(" のメモリを表示</button></div>")}` +
+    `<h3 style="margin-top:10px;font-size:13px">${esc(osInfo.internalLabel || t("カーネル内部の呼び出し"))}</h3>` +
     (c.inner && c.inner.length ? `<p class="mono">${c.inner.slice().sort((a, b) => b[1] - a[1]).map(([n, k]) => `<span class="chip"><span class="cat-${cat(n)}">${esc(n)}</span>×${k}</span>`).join(" ")}</p>` : "") +
-    `<div class="tree" id="tree"><span class="mute">読み込み中…</span></div>`;
+    `${t("<div class=\"tree\" id=\"tree\"><span class=\"mute\">読み込み中…</span></div>")}`;
   $("callDetail").innerHTML = html;
   $("callDetail").querySelectorAll("button").forEach((b) => b.onclick = async () => {
     if (b.dataset.b === "mem") { $("memSpace").value = "cpu"; $("memAddr").value = hex(c.in[ptr], AW()); document.querySelector('[data-tab="dbg"]').click(); return; }
     await api(`os/break?code=${encodeURIComponent(c.name)}&when=${b.dataset.b}`, ""); poll(true);
   });
   const tree = await childTree(c.id, 0);
-  if ($("tree")) $("tree").innerHTML = tree || `<span class="mute">${c.inner && c.inner.length ? "個々の内部呼び出しは記録の保持範囲外です（上は集計）" : "なし"}</span>`;
+  if ($("tree")) $("tree").innerHTML = tree || `<span class="mute">${c.inner && c.inner.length ? t("個々の内部呼び出しは記録の保持範囲外です（上は集計）") : t("なし")}</span>`;
 }
 async function childTree(id, depth) {
   if (depth > 3) return "";
@@ -1327,10 +1563,10 @@ async function childTree(id, depth) {
   const kids = d.calls.sort((a, b) => a.id - b.id);
   let out = "";
   for (const k of kids) {
-    out += `<div>${"&nbsp;".repeat(depth * 4)}└ <span class="cat-${cat(k.name)} name">${esc(k.name)}</span> <span class="mute">${esc(k.args)}</span> → ${esc(k.result || (k.noReturn ? "(戻らない)" : "…"))}</div>`;
+    out += `<div>${"&nbsp;".repeat(depth * 4)}└ <span class="cat-${cat(k.name)} name">${esc(k.name)}</span> <span class="mute">${esc(k.args)}</span> → ${esc(k.result || (k.noReturn ? t("(戻らない)") : "…"))}</div>`;
     if (depth < 2 && kids.length < 20) out += await childTree(k.id, depth + 1);
   }
-  if (kids.length === 60) out += `<div class="mute">${"&nbsp;".repeat(depth * 4)}… 最新60件のみ表示</div>`;
+  if (kids.length === 60) out += `<div class="mute">${"&nbsp;".repeat(depth * 4)}${t("… 最新60件のみ表示</div>")}`;
   return out;
 }
 
@@ -1391,7 +1627,7 @@ function renderOs9Breaks() {
   const b = st.osbreak;
   $("trTrace").checked = b.trace; $("trErr").checked = b.errors; $("trSwitch").checked = b.switch;
   if (document.activeElement !== $("trPid")) $("trPid").value = b.pid || "";
-  const item = (n, w) => `<div class="item"><span class="cat-${cat(n)} name">${esc(n)}</span>${w === "call" ? "呼び出し" : "復帰"}<button data-n="${esc(n)}" data-w="${w}">×</button></div>`;
+  const item = (n, w) => `<div class="item"><span class="cat-${cat(n)} name">${esc(n)}</span>${w === "call" ? L("呼び出し", " (call)") : L("復帰", " (return)")}<button data-n="${esc(n)}" data-w="${w}">×</button></div>`;
   $("trList").innerHTML = b.calls.map((n) => item(n, "call")).join("") + b.returns.map((n) => item(n, "return")).join("");
   $("trList").querySelectorAll("button").forEach((x) => x.onclick = () => os9break(`code=${encodeURIComponent(x.dataset.n)}&when=${x.dataset.w}&op=del`));
 }
@@ -1399,7 +1635,7 @@ function renderOs9Breaks() {
 // ---------- polling ----------
 function renderHeader() {
   $("dot").className = "dot " + (st.running ? "run" : "stop");
-  $("stopText").textContent = st.running ? (st.speed ? "実行中（速度制限）" : "実行中") : st.stop || "停止";
+  $("stopText").textContent = st.running ? (st.speed ? t("実行中（速度制限）") : t("実行中")) : st.stop || t("停止");
   $("cycles").textContent = st.cycles.toLocaleString() + " cyc";
   $("bRun").disabled = st.running;
   $("bPause").disabled = !st.running;
@@ -1421,6 +1657,7 @@ async function poll(force) {
   busy = true;
   try {
     st = await api("state");
+    if (st.lang && st.lang !== LANG) await setLang(st.lang);
     const changed = st.cycles !== shownCycles;
     if (!st.running && (changed || force)) {
       // Highlight registers that differ from the previous stop.
@@ -1438,17 +1675,40 @@ async function poll(force) {
     }
     await pollConsole();
   } catch (e) {
-    $("stopText").textContent = "接続できません";
+    $("stopText").textContent = t("接続できません");
     $("dot").className = "dot";
   } finally {
     busy = false;
   }
 }
-(async () => {
-  await loadOsInfo();
+// Names, descriptions and explanations of the OS calls (in the ICE's language).
+async function loadServices() {
   const s = await api("os/services");
+  services = {};
   s.services.forEach((x) => services[x.name] = x);
   $("svcList").innerHTML = s.services.map((x) => `<option value="${esc(x.name)}">${esc(x.desc)}</option>`).join("");
+}
+// Switch the page (and, from the menu, the ICE) to a language.
+async function setLang(l) {
+  LANG = l;
+  $("lang").value = l;
+  translatePage();
+  await loadOsInfo();
+  await loadServices();
+  shownCycles = -1; // redraw everything
+}
+$("lang").onchange = async () => {
+  await api("lang?lang=" + $("lang").value, "");
+  await setLang($("lang").value);
+  poll(true);
+};
+(async () => {
+  const s0 = await api("state");
+  LANG = s0.lang || "ja";
+  $("lang").value = LANG;
+  translatePage();
+  await loadOsInfo();
+  await loadServices();
   await poll(true);
   setInterval(() => poll(false), 250);
 })();

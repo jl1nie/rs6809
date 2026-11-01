@@ -1,10 +1,12 @@
+English | [日本語](ja/level2.md)
+
 # Multicomp NitrOS-9 Level 2
 
-## 再現
+## Reproducing
 
-参照キットはREADMEに記載のコミット `bf60370cfa180636cde3ee305d089d94872de82a` を使用します。
-ビルドスクリプトはこのリビジョンを確認し、外部ソースへのパッチは `artifacts/level2/sources/` 内のコピーに適用します。
-カーネルやROMのバイナリはリポジトリへ追加しません。
+The reference kit is used at commit `bf60370cfa180636cde3ee305d089d94872de82a`, as given in the README.
+The build script checks this revision and applies patches to external sources only to copies in `artifacts/level2/sources/`.
+Kernel and ROM binaries are not added to the repository.
 
 ```sh
 python3 scripts/build-level2-disk.py
@@ -12,10 +14,10 @@ sh examples/nitros9-level2.sh
 cargo test --release --test nitros9_level2 -- --ignored
 ```
 
-検証した経路はCamelForth→Level 2カーネル→SysGo→startup用Shell→echo→対話Shell→mfree→echo→対話Shellです。
-`mfree` は物理メモリの上限 `$7FFFF` と440KBの空きを表示しました（既定の512KB構成）。
-`--ram-kb 1024` では同じディスクで `$FFFFF` と952KBになります。
-これは最小ディスクでの結果で、搭載モジュールや実行中プロセスによって空き量は変わります。
+The verified path is CamelForth → Level 2 kernel → SysGo → startup Shell → echo → interactive Shell → mfree → echo → interactive Shell.
+`mfree` showed the physical memory top `$7FFFF` and 440 KB free (the default 512 KB configuration).
+With `--ram-kb 1024` the same disk shows `$FFFFF` and 952 KB.
+These are results with the minimal disk; the free amount depends on the loaded modules and running processes.
 
 ```text
 NitrOS-9/6809 Level 2 V03.3.0
@@ -36,58 +38,58 @@ LEVEL2-DONE
 OS9:
 ```
 
-## エミュレータのMMU
+## The emulator's MMU
 
-CPU側のアドレスは16ビットのままです。`Machine::multicomp()` の物理RAMを512KBに拡張し、
-8KB×64バンクを選択できます。`multicomp_with_ram()` / `--ram-kb` では
-64・128・256・512・1024KBを選択でき、標準のフラットマシンは64KBのままです。
+CPU addresses stay 16 bits. The physical RAM of `Machine::multicomp()` is extended to 512 KB,
+and 64 banks of 8 KB can be selected. `multicomp_with_ram()` / `--ram-kb` select
+64, 128, 256, 512 or 1024 KB; the standard flat machine stays at 64 KB.
 
-- `$FFDE`：bit7=ROMDIS、bit6=実行タスク、bit5=MMUEN、bit3–0=書き換えるマップ番号。bit4が1の制御書き込みは無視します。
-- `$FFDF`：bit7=書き込み保護、bit6–0=物理バンク番号。タスクごとに8個のマップを保持します。
-- MMU無効時は下位64KBを直接アドレスします。未搭載バンクの読み取りは `$FF`、書き込みは無視します。
-- MMUENとROMDISがともに1の状態から、MMUENを保ちROMDISを0にする書き込みで固定上位領域を有効にします。
-  ROMは無効状態を維持します。MMUを無効化すると固定上位領域のラッチを解除します。
-- 固定上位領域 `$FE00–$FFFF` は物理バンク7の末尾512バイトです。
-  タスクやスロット7の保護・未搭載バンク指定にかかわらず読み書き可能で、I/Oが優先します。
+- `$FFDE`: bit 7 = ROMDIS, bit 6 = running task, bit 5 = MMUEN, bits 3–0 = the map number to change. Control writes with bit 4 set are ignored.
+- `$FFDF`: bit 7 = write protect, bits 6–0 = physical bank number. Each task holds 8 maps.
+- With the MMU disabled, the low 64 KB is addressed directly. Banks that are not fitted read `$FF` and ignore writes.
+- From the state with both MMUEN and ROMDIS set to 1, a write that keeps MMUEN and sets ROMDIS to 0 enables the fixed top area.
+  The ROM stays disabled. Disabling the MMU releases the fixed top area latch.
+- The fixed top area `$FE00–$FFFF` is the last 512 bytes of physical bank 7.
+  It can be read and written regardless of the task, slot 7's protection or a missing bank, and I/O takes priority.
 
-参照：キットの `exec09/miscsbc.c`、`defs/mc09.d`、`level1/coco1/modules/rel.asm`。
-実装はマッピング表の再計算をレジスタ変更時に限定しています。
+References: the kit's `exec09/miscsbc.c`, `defs/mc09.d`, `level1/coco1/modules/rel.asm`.
+The implementation recomputes the mapping table only when the registers change.
 
-## Level 2の起動イメージに必要な調整
+## Changes needed for the Level 2 boot image
 
-RAMの拡張だけでは、参照キットのLevel 2ソースをそのまま起動できませんでした。
-`scripts/nitros9-level2.patch` に以下をまとめています。
+Extending the RAM alone did not make the reference kit's Level 2 sources boot as they are.
+`scripts/nitros9-level2.patch` collects the following.
 
-1. RELのパディングを戻して304バイトにし、BOOTを464バイト、KRNのロード先を `$F000` に揃えます。
-2. 参照ソースの更新で変わったシンボル名（`InstallSvc` / `FSFreeLB`）と分岐距離を合わせます。
-3. `F$LDDXY` / `LDAXY`、タスク設定、`F$Move` に残っていたCoCoのDAT直接操作を
-   Multicompの `$FFDE–$FFDF` 操作に置き換えます。2バイト読み取りは8KB境界をまたげます。
-4. `F$Move` はソース・転送先をマップしている間にスタックを使いません。
-   カーネルのレジスタフレーム転送もこのルーチンを使用します。
-   プロセス記述子やシステムスタックが `$A000–$DFFF` に割り当てられると、従来の転送は
-   転送元をマップから外してしまい、子プロセスの起動・システムコール復帰に失敗しました。
-5. SDドライバのLSN0判定を加算からORへ変え、非ゼロのLSNが桁あふれでLSN0と誤判定される問題を防ぎます。
-   既存のC開発用ディスクと同じ修正です。
-6. mc09カーネルはブロックマップ終端を `ldd #$0240`（64ブロック、512KB）に固定していました。
-   構築スクリプトがこれを起動時の検出に置き換えます。タスク0のマップ5（`$A000`）に512KB直後のブロック `$40` を
-   割り当てて `$A200` に目印を書き、読み戻せてブロック0の同じ位置（`$0200`、ブロックマップ）に現れない場合だけ
-   `#$0280`（128ブロック、1MB）とします。未搭載バンクは `$FF` を返し、アドレス線が足りずに同じメモリが
-   重なる構成は目印がブロック0に現れるため、どちらも512KBになります。最後にマップ5を1:1の状態に戻します。
-   MMUのブロック番号は7ビット（`$FFDF` のbit7は書き込み保護）なので、1MBがハードウェア上の上限です。
-   ブロックマップは `$0200–$02FF` にあり128ブロックを収容でき、カーネル用ブロック `KrnBlk=$07` は容量に依存しません。
-   1MB構成では `#56k` のプロセスで512KB境界より上のブロックまで割り当てた状態で、`cc1` とCプログラムの実行を確認しました。
+1. Restores REL's padding to 304 bytes, making BOOT 464 bytes and KRN's load address `$F000`.
+2. Matches symbol names changed by updates to the reference sources (`InstallSvc` / `FSFreeLB`) and branch distances.
+3. Replaces the CoCo DAT accesses left in `F$LDDXY` / `LDAXY`, task setup and `F$Move`
+   with Multicomp `$FFDE–$FFDF` accesses. Two-byte reads can cross an 8 KB boundary.
+4. `F$Move` does not use the stack while the source and destination are mapped.
+   The kernel's register frame transfers use this routine too.
+   When a process descriptor or the system stack was allocated in `$A000–$DFFF`, the old transfer
+   unmapped its own source, and starting child processes and returning from system calls failed.
+5. The SD driver's LSN0 test is changed from an addition to an OR, so a non-zero LSN that overflows is not mistaken for LSN0.
+   This is the same fix as on the existing C development disk.
+6. The mc09 kernel fixed the end of the block map at `ldd #$0240` (64 blocks, 512 KB).
+   The build script replaces this with detection at boot. It maps block `$40`, just past 512 KB, into task 0's map 5 (`$A000`),
+   writes a marker at `$A200`, and only if it reads back and does not appear at the same place in block 0 (`$0200`, the block map)
+   uses `#$0280` (128 blocks, 1 MB). Missing banks read `$FF`, and with too few address lines the same memory
+   appears twice so the marker shows in block 0; both cases give 512 KB. Finally map 5 is set back to 1:1.
+   MMU block numbers are 7 bits (bit 7 of `$FFDF` is write protect), so 1 MB is the hardware limit.
+   The block map is at `$0200–$02FF` and holds 128 blocks; the kernel block `KrnBlk=$07` does not depend on the size.
+   In the 1 MB configuration, `cc1` and C programs were run with a `#56k` process holding blocks above the 512 KB boundary.
 
-アセンブル時はLevel 2用の `defsfile` を置いた生成ディレクトリでソースを処理します。
-Level 1のソース相対インクルードをそのまま使うとLevel 1のシステム変数オフセットが混入します。
-RBFはLevel 2版を使用します。最小ディスクの収録コマンドはShell 2.1、echo、mfreeです。
+At assembly time, the sources are processed in a generated directory holding the Level 2 `defsfile`.
+Using Level 1's source-relative includes as they are would mix in Level 1's system variable offsets.
+The Level 2 RBF is used. The minimal disk's commands are Shell 2.1, echo and mfree.
 
-## 検証範囲
+## What is verified
 
-`tests/memory_map.rs` では全RAM容量の全物理バンク、未搭載バンク、書き込み保護、
-2タスクの独立性と共有RAM、固定ベクタ領域、ROM切り替え条件を検証します。
-既存のLevel 1→BASIC09→`42` の起動テストも512KB構成で実行します。
+`tests/memory_map.rs` checks every physical bank at every RAM size, missing banks, write protection,
+two independent tasks and shared RAM, the fixed vector area and the ROM switching conditions.
+The existing Level 1 → BASIC09 → `42` boot test also runs in the 512 KB configuration.
 
-この構成はMulticomp向けNitrOS-9 Level 2です。CoCo 3のGIME・画面・キーボード・専用ディスクは対象外です。
-Level 2ディスクにはMicroware Cの `cc1` 一式とBASIC09を収録します。
-ローカルコンソールの既定モードではディスク差分は終了時に消えます。`--persist-disk` またはTelnetモードでは永続化します。
-マルチユーザー構成は [Telnet接続の説明](telnet.md) を参照してください。
+This is NitrOS-9 Level 2 for the Multicomp. The CoCo 3's GIME, screen, keyboard and disk formats are out of scope.
+The Level 2 disk holds the Microware C `cc1` set and BASIC09.
+In the default local console mode, disk changes are discarded at exit; `--persist-disk` or Telnet mode keeps them.
+For the multi-user setup see [Telnet connections](telnet.md).

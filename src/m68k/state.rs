@@ -2,6 +2,7 @@
 //! big-endian integers and length-prefixed byte strings, in a known order.
 //! Files start with a magic and a version so stale ones are refused.
 
+use crate::tr;
 pub const MAGIC: &[u8; 8] = b"RS68KST1";
 
 #[derive(Default)]
@@ -41,7 +42,7 @@ impl<'a> Reader<'a> {
         Self { data, pos: 0 }
     }
     fn take(&mut self, n: usize) -> Result<&'a [u8], String> {
-        let end = self.pos.checked_add(n).filter(|&e| e <= self.data.len()).ok_or("状態のデータが途中で終わっている")?;
+        let end = self.pos.checked_add(n).filter(|&e| e <= self.data.len()).ok_or(tr!("状態のデータが途中で終わっている", "the state data ends early"))?;
         let s = &self.data[self.pos..end];
         self.pos = end;
         Ok(s)
@@ -69,7 +70,7 @@ impl<'a> Reader<'a> {
         if self.take(m.len())? == m {
             Ok(())
         } else {
-            Err("rs6809の68000の状態ファイルではない（または版が違う）".into())
+            Err(tr!("rs6809の68000の状態ファイルではない（または版が違う）", "not an rs6809 68000 state file (or another version)").into())
         }
     }
 }

@@ -3,6 +3,7 @@
 //!
 //! The ICE is generic over [`Target`] (static dispatch, so the per-instruction
 //! path costs the same as calling the CPU directly).
+use crate::tr;
 use super::osmon::{CpuRegs, CpuState, Mem, Regs, Regs68k};
 use super::{Watch, WatchKind};
 use crate::cpu::I;
@@ -129,10 +130,10 @@ pub trait Target: Send {
     }
     /// The whole machine state (with `disk`, the disk too), for a file.
     fn save_state(&self, _disk: bool) -> Result<Vec<u8>, String> {
-        Err(format!("{}では状態の保存に対応していない", Self::CPU))
+        Err(tr!(format!("{}では状態の保存に対応していない", Self::CPU), format!("saving the state is not supported on the {}", Self::CPU)))
     }
     fn load_state(&mut self, _data: &[u8]) -> Result<(), String> {
-        Err(format!("{}では状態の読み込みに対応していない", Self::CPU))
+        Err(tr!(format!("{}では状態の読み込みに対応していない", Self::CPU), format!("loading a state is not supported on the {}", Self::CPU)))
     }
 }
 
@@ -435,7 +436,7 @@ impl Board68k for Sim68k {
     }
     fn load_board(&mut self, r: &mut Reader) -> Result<(), String> {
         if r.u8()? != 0 {
-            return Err("別の機械（Tiny68K）の状態".into());
+            return Err(tr!("別の機械（Tiny68K）の状態", "the state of another machine (Tiny68K)").into());
         }
         self.load_state(r)
     }
@@ -482,7 +483,7 @@ impl Board68k for Tiny68k {
     }
     fn load_board(&mut self, r: &mut Reader) -> Result<(), String> {
         if r.u8()? != 1 {
-            return Err("別の機械（RAM＋コンソール）の状態".into());
+            return Err(tr!("別の機械（RAM＋コンソール）の状態", "the state of another machine (RAM and console)").into());
         }
         self.load_state(r)
     }
@@ -779,7 +780,7 @@ impl<B: Board68k> Target for Mc68000<B> {
     }
     fn step(&mut self, watches: &[Watch]) -> Result<Option<WatchHit>, String> {
         if self.cpu.halted {
-            return Err("二重フォールトでCPUが停止した".into());
+            return Err(tr!("二重フォールトでCPUが停止した", "the CPU halted on a double fault").into());
         }
         let hit = if watches.is_empty() {
             self.run_one();
@@ -800,7 +801,7 @@ impl<B: Board68k> Target for Mc68000<B> {
             hit
         };
         if self.cpu.halted {
-            return Err("二重フォールトでCPUが停止した".into());
+            return Err(tr!("二重フォールトでCPUが停止した", "the CPU halted on a double fault").into());
         }
         Ok(hit)
     }

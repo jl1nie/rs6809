@@ -2,6 +2,7 @@
 //!
 //! The emulator thread owns the CPU and machine. The HTTP threads forward API
 //! requests over a channel, so inspection always sees a consistent state.
+use crate::tr;
 pub mod cdecl;
 pub mod dap;
 pub mod debuginfo;
@@ -9,6 +10,7 @@ pub mod disasm;
 pub mod frames;
 pub mod http;
 pub mod json;
+pub mod lang;
 pub mod microware;
 pub mod os9;
 pub mod osmon;
@@ -138,37 +140,51 @@ impl Stop {
     fn describe(&self, t: &Tracer, os: &dyn OsMonitor) -> String {
         let call = |id: &u64| {
             t.call(*id)
-                .map(|c| format!("{} (プロセス{})", os.service_name(c.code), c.pid))
+                .map(|c| tr!(format!("{} (プロセス{})", os.service_name(c.code), c.pid), format!("{} (process {})", os.service_name(c.code), c.pid)))
                 .unwrap_or_default()
         };
         match self {
-            Stop::Pause => "一時停止".into(),
-            Stop::Step => "ステップ完了".into(),
-            Stop::Breakpoint(a) => format!("ブレークポイント ${a:04X}"),
-            Stop::Watch { addr, write, value } => format!(
+            Stop::Pause => tr!("一時停止", "paused").into(),
+            Stop::Step => tr!("ステップ完了", "step done").into(),
+            Stop::Breakpoint(a) => tr!(format!("ブレークポイント ${a:04X}"), format!("breakpoint ${a:04X}")),
+            Stop::Watch { addr, write, value } => tr!(format!(
                 "ウォッチ ${addr:04X} {} ${value:02X}",
                 if *write {
-                    "書き込み"
+                    tr!("書き込み", "write")
                 } else {
-                    "読み出し"
+                    tr!("読み出し", "read")
                 }
-            ),
+            ), format!(
+                "watch ${addr:04X} {} ${value:02X}",
+                if *write {
+                    tr!("書き込み", "write")
+                } else {
+                    tr!("読み出し", "read")
+                }
+            )),
             Stop::SysCall { code, pid } => {
-                format!(
+                tr!(format!(
                     "システムコール呼び出し {} (プロセス{pid})",
                     os.service_name(*code)
-                )
+                ), format!(
+                    "system call {} (process {pid})",
+                    os.service_name(*code)
+                ))
             }
             Stop::SysReturn(id) => {
                 let err = t.call(*id).and_then(|c| c.error).map(|e| os.error_name(e));
-                format!(
+                tr!(format!(
                     "システムコール復帰 {}{}",
                     call(id),
                     err.map_or(String::new(), |e| format!(" → {e}"))
-                )
+                ), format!(
+                    "system call return {}{}",
+                    call(id),
+                    err.map_or(String::new(), |e| format!(" → {e}"))
+                ))
             }
-            Stop::Switch { from, to } => format!("プロセス切り替え {from} → {to}"),
-            Stop::Error(e) => format!("エラー: {e}"),
+            Stop::Switch { from, to } => tr!(format!("プロセス切り替え {from} → {to}"), format!("process switch {from} → {to}")),
+            Stop::Error(e) => tr!(format!("エラー: {e}"), format!("error: {e}")),
         }
     }
 }
@@ -863,6 +879,17 @@ impl<T: Target> Ice<T> {
                 }
                 ok()
             }
+            // The language of the ICE's text: new stop reasons, call
+            // descriptions and explanations (recorded ones stay as they are).
+            "/api/lang" => {
+                match p("lang") {
+                    Some("en") => lang::set_en(true),
+                    Some("ja") => lang::set_en(false),
+                    Some(_) => return bad("lang"),
+                    None => {}
+                }
+                http::Response::json(format!("{{\"lang\":\"{}\"}}", lang::code()))
+            }
             "/api/console/size" => {
                 let (Some(rows), Some(cols)) = (p("rows").and_then(parse_num), p("cols").and_then(parse_num)) else {
                     return bad("rows/cols");
@@ -1200,7 +1227,8 @@ impl<T: Target> Ice<T> {
             .unwrap_or_default();
         let _ = write!(
             o,
-            "{{\"cpu\":\"{}\",\"running\":{},\"stop\":{},\"cycles\":{},\"speed\":{},\"wait\":{},\"regs\":{},",
+            "{{\"lang\":\"{}\",\"cpu\":\"{}\",\"running\":{},\"stop\":{},\"cycles\":{},\"speed\":{},\"wait\":{},\"regs\":{},",
+            lang::code(),
             T::CPU,
             self.running,
             json_str(&stop),
@@ -1601,7 +1629,7 @@ impl<T: Target> Ice<T> {
     pub fn reset_machine(&mut self) {
         self.t.reset();
         self.actions = self.script.clone();
-        self.forget_run("リセット");
+        self.forget_run(tr!("リセット", "reset"));
     }
     /// Save the machine state to a file. The disk is included unless its
     /// writes already go to a file (`disk` overrides).
@@ -1615,7 +1643,7 @@ impl<T: Target> Ice<T> {
         let data = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
         self.t.load_state(&data)?;
         self.actions.clear();
-        self.forget_run(&format!("状態 {path} を読み込み"));
+        self.forget_run(&tr!(format!("状態 {path} を読み込み"), format!("state {path} loaded")));
         Ok(())
     }
     /// Keep the console's size in the OS: re-applied after the OS changes it

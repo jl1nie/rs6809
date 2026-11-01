@@ -2,6 +2,7 @@
 //! as the browser UI. Each TCP connection is one session; requests are
 //! handled on the emulator thread like HTTP requests, so both views always
 //! agree. Messages use `Content-Length` framing and JSON bodies.
+use crate::tr;
 use super::debuginfo::{Place, encode};
 use super::frames::VarRef;
 use super::json::{Json, base64, obj, unbase64};
@@ -319,28 +320,28 @@ impl<T: Target> Ice<T> {
                         Json::Arr(vec![
                             obj([
                                 ("filter", "oserror".into()),
-                                ("label", label("errorLabel", "エラー復帰").into()),
+                                ("label", label("errorLabel", tr!("エラー復帰", "error return")).into()),
                                 ("default", false.into()),
                             ]),
                             obj([
                                 ("filter", "osswitch".into()),
-                                ("label", label("switchLabel", "プロセス切り替え").into()),
+                                ("label", label("switchLabel", tr!("プロセス切り替え", "process switch")).into()),
                                 ("default", false.into()),
                             ]),
                             // Service names in the condition, comma-separated.
                             obj([
                                 ("filter", "oscall".into()),
-                                ("label", "システムコールの呼び出し".into()),
+                                ("label", tr!("システムコールの呼び出し", "system call").into()),
                                 ("default", false.into()),
                                 ("supportsCondition", true.into()),
-                                ("conditionDescription", format!("名前（例：{}）をカンマ区切りで", label("breakExample", "F$Fork")).into()),
+                                ("conditionDescription", tr!(format!("名前（例：{}）をカンマ区切りで", label("breakExample", "F$Fork")), format!("names (e.g. {}), comma-separated", label("breakExample", "F$Fork"))).into()),
                             ]),
                             obj([
                                 ("filter", "osreturn".into()),
-                                ("label", "システムコールの復帰".into()),
+                                ("label", tr!("システムコールの復帰", "system call return").into()),
                                 ("default", false.into()),
                                 ("supportsCondition", true.into()),
-                                ("conditionDescription", "名前をカンマ区切りで".into()),
+                                ("conditionDescription", tr!("名前をカンマ区切りで", "names, comma-separated").into()),
                             ]),
                         ])
                     },
@@ -371,7 +372,7 @@ impl<T: Target> Ice<T> {
             "restart" => {
                 self.reset_machine();
                 if !self.running {
-                    self.dap.stopped(&Stop::Pause, "リセット", Vec::new());
+                    self.dap.stopped(&Stop::Pause, tr!("リセット", "reset"), Vec::new());
                 }
                 Ok(Json::Null)
             }
@@ -475,7 +476,7 @@ impl<T: Target> Ice<T> {
                     }
                 }
                 if !unknown.is_empty() {
-                    return Err(format!("知らないシステムコール: {}", unknown.join(", ")));
+                    return Err(tr!(format!("知らないシステムコール: {}", unknown.join(", ")), format!("unknown system call: {}", unknown.join(", "))));
                 }
                 self.break_calls = calls;
                 self.break_returns = returns;
@@ -487,7 +488,7 @@ impl<T: Target> Ice<T> {
                     let cur = os.current(self.t.mem());
                     let osname = os.info().get("name").str().unwrap_or("OS").to_string();
                     if let Some(p) = os.processes(self.t.mem()).into_iter().find(|p| p.key == cur) {
-                        name = format!("{} ({osname} プロセス{} {})", T::CPU, p.id, p.name);
+                        name = tr!(format!("{} ({osname} プロセス{} {})", T::CPU, p.id, p.name), format!("{} ({osname} process {} {})", T::CPU, p.id, p.name));
                     }
                 }
                 Ok(obj([(
@@ -546,14 +547,14 @@ impl<T: Target> Ice<T> {
                 {
                     let r = self.var_ref(VarRef::Locals(frame));
                     scopes.push(obj([
-                        ("name", "ローカル".into()),
+                        ("name", tr!("ローカル", "Locals").into()),
                         ("variablesReference", r.into()),
                         ("expensive", false.into()),
                         ("presentationHint", "locals".into()),
                     ]));
                     let g = self.var_ref(VarRef::Globals(ti));
                     scopes.push(obj([
-                        ("name", "大域".into()),
+                        ("name", tr!("大域", "Globals").into()),
                         ("variablesReference", g.into()),
                         ("expensive", false.into()),
                     ]));
@@ -589,12 +590,12 @@ impl<T: Target> Ice<T> {
                     .dap_var_nodes(r)
                     .into_iter()
                     .find(|(n, ..)| *n == name)
-                    .ok_or("変数")?;
+                    .ok_or(tr!("変数", "variable"))?;
                 let (_, table, ty, place) = child;
                 let place = place.map_err(|e| e.to_string())?;
-                let info = self.symbols.tables[table].debug.as_ref().ok_or("変数")?;
+                let info = self.symbols.tables[table].debug.as_ref().ok_or(tr!("変数", "variable"))?;
                 let bytes = encode(info, &ty, &value)
-                    .ok_or("整数・文字・ポインタの値を指定してください")?;
+                    .ok_or(tr!("整数・文字・ポインタの値を指定してください", "give an integer, character or pointer value"))?;
                 match place {
                     Place::Mem(a) => {
                         for (i, b) in bytes.iter().enumerate() {
@@ -622,12 +623,12 @@ impl<T: Target> Ice<T> {
             }
             "setVariable" => {
                 if args.get("variablesReference").int() != Some(REGISTERS) {
-                    return Err("レジスタのみ変更できます".into());
+                    return Err(tr!("レジスタのみ変更できます", "only registers can be changed").into());
                 }
                 let name = args.get("name").str().unwrap_or("").to_ascii_lowercase();
-                let v = args.get("value").str().and_then(parse_value).ok_or("値")?;
+                let v = args.get("value").str().and_then(parse_value).ok_or(tr!("値", "value"))?;
                 if !self.t.set_reg(&name, v) {
-                    return Err("レジスタ名".into());
+                    return Err(tr!("レジスタ名", "register name").into());
                 }
                 let shown = self.dap_variables(REGISTERS).into_iter().find(|x| {
                     x.get("name").str().map(str::to_ascii_lowercase) == Some(name.clone())
@@ -665,7 +666,7 @@ impl<T: Target> Ice<T> {
                 if self.running {
                     self.halt(Stop::Pause);
                 } else {
-                    self.dap.stopped(&Stop::Pause, "一時停止", Vec::new());
+                    self.dap.stopped(&Stop::Pause, tr!("一時停止", "paused"), Vec::new());
                 }
                 Ok(Json::Null)
             }
@@ -837,13 +838,13 @@ impl<T: Target> Ice<T> {
             "scopes",
             Json::Arr(vec![
                 obj([
-                    ("name", "レジスタ".into()),
+                    ("name", tr!("レジスタ", "Registers").into()),
                     ("variablesReference", REGISTERS.into()),
                     ("expensive", false.into()),
                     ("presentationHint", "registers".into()),
                 ]),
                 obj([
-                    ("name", "スタック".into()),
+                    ("name", tr!("スタック", "Stack").into()),
                     ("variablesReference", STACK.into()),
                     ("expensive", false.into()),
                 ]),
@@ -938,7 +939,7 @@ impl<T: Target> Ice<T> {
                     };
                     (value, child, mem)
                 }
-                Err(why) => (format!("（{why}）"), 0, Json::Null),
+                Err(why) => (tr!(format!("（{why}）"), format!(" ({why})")), 0, Json::Null),
             };
             out.push(obj([
                 ("name", name.into()),
@@ -974,9 +975,9 @@ impl<T: Target> Ice<T> {
                 if verified {
                     Json::Null
                 } else if matches!(b.spec, BpSpec::Line { .. }) && b.line.is_none() {
-                    "この行に対応するコードがありません".into()
+                    tr!("この行に対応するコードがありません", "no code for this line").into()
                 } else {
-                    "モジュールがロードされると有効になります".into()
+                    tr!("モジュールがロードされると有効になります", "becomes active when the module is loaded").into()
                 },
             ),
         ])
@@ -1026,22 +1027,22 @@ impl<T: Target> Ice<T> {
             }
             PROCESS => {
                 let Some(os) = self.os() else {
-                    return vec![var("OS", "未検出".into(), None)];
+                    return vec![var("OS", tr!("未検出", "not found").into(), None)];
                 };
                 let show = |v: &Json| v.str().map_or_else(|| v.to_string(), str::to_string);
                 let mut out: Vec<Json> = os.summary(m).iter().map(|(k, v)| var(k, show(v), None)).collect();
                 let cur = os.current(m);
                 if let Some(p) = os.processes(m).into_iter().find(|p| p.key == cur) {
-                    out.push(var("プロセスID", p.id.to_string(), None));
-                    out.push(var("名前", p.name.clone(), None));
-                    out.push(var("親", p.parent.to_string(), None));
+                    out.push(var(tr!("プロセスID", "process ID"), p.id.to_string(), None));
+                    out.push(var(tr!("名前", "name"), p.name.clone(), None));
+                    out.push(var(tr!("親", "parent"), p.parent.to_string(), None));
                     for (k, v) in &p.fields {
                         out.push(var(k, show(v), None));
                     }
                 }
                 if let Some(c) = self.tracer.calls.values().rev().find(|c| !c.system) {
                     out.push(var(
-                        "直近のシステムコール",
+                        tr!("直近のシステムコール", "last system call"),
                         format!("{} {} → {}", os.service_name(c.code), c.args, c.result),
                         None,
                     ));
@@ -1063,7 +1064,7 @@ impl<T: Target> Ice<T> {
             return Ok(obj([
                 (
                     "result",
-                    format!("→ コンソール: {}", line.trim_start()).into(),
+                    tr!(format!("→ コンソール: {}", line.trim_start()), format!("→ console: {}", line.trim_start())).into(),
                 ),
                 ("variablesReference", 0.into()),
             ]));
@@ -1074,14 +1075,14 @@ impl<T: Target> Ice<T> {
         // `[expr]` reads the word at an address.
         let (value, indirect) =
             if let Some(inner) = e.strip_prefix('[').and_then(|x| x.strip_suffix(']')) {
-                let a = self.symbols.resolve(m, inner).ok_or("式を評価できません")?;
+                let a = self.symbols.resolve(m, inner).ok_or(tr!("式を評価できません", "cannot evaluate the expression"))?;
                 (self.read_ret(a), Some(a))
             } else if let Some(v) = reg {
                 (v, None)
             } else if let Some(v) = self.symbols.resolve(m, e) {
                 (v, None)
             } else {
-                return Err(format!("評価できません: {e}"));
+                return Err(tr!(format!("評価できません: {e}"), format!("cannot evaluate: {e}")));
             };
         let label = self
             .symbols

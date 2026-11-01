@@ -1,5 +1,6 @@
 //! NitrOS-9 awareness for the ICE: service names, kernel structures and a
 //! system-call tracer. Offsets follow `defs/os9.d` of the reference kit.
+use crate::tr;
 use super::json::{Json, obj};
 use super::osmon::{Call, CpuRegs, Image, Mem, OsMonitor, PathNames, Process as OsProcess, Regs, Service, Svc};
 use super::tables::{ERRORS, SERVICES, STATUS_CODES};
@@ -29,8 +30,69 @@ pub fn status_name(code: u8) -> String {
         .map_or_else(|| format!("${code:02X}"), |s| s.1.to_string())
 }
 
-/// What the kernel does for a primitive, in Japanese, for the explainer pane.
+/// What the kernel does for a primitive, for the explainer pane.
 pub fn explain(code: u8) -> &'static str {
+    if super::lang::en() { explain_en(code) } else { explain_ja(code) }
+}
+
+fn explain_en(code: u8) -> &'static str {
+    match code {
+        0x00 => "Finds the module with this name and type in the module directory, adds one to its link count and returns its execution address (Y) and header (U). On Level 2 the module's blocks are mapped into the caller's DAT image.",
+        0x01 => "Opens the file of the path list, loads its modules, checks their CRC, enters them in the module directory and links them like F$Link.",
+        0x02 => "Takes one from the module's link count. A module reaching 0 leaves the directory and its memory is freed.",
+        0x03 => "Allocates a new process descriptor (F$AllPrc), links the module, allocates the data area, sets the family links (P$PID/P$CID/P$SID), passes on paths 0-2 and puts the child in the active queue. The child starts at the next scheduling.",
+        0x04 => "Waits for a child to exit. Returns at once if one has; otherwise moves itself to the wait queue (D.WProcQ) and switches to another process. Woken by the child's F$Exit: A = the child's ID, B = its exit status.",
+        0x05 => "Replaces the program module and keeps the process (like exec). The old module is unlinked and the new one starts from its entry, so it does not return to the caller.",
+        0x06 => "Ends the process: closes all paths, unlinks the module, returns its memory and wakes the parent if it waits in F$Wait. The descriptor stays until the parent collects it. Does not return.",
+        0x07 => "Changes the size of the process's data area. D = the new size (0 asks for the current one).",
+        0x08 => "Sends signal B to process A. A sleeping process is woken and goes back to the active queue. Signal 0 (S$Kill) kills it.",
+        0x09 => "Sets the intercept routine (X) and its data area (U), called when a signal arrives.",
+        0x0A => "Sleeps for X ticks (0: until woken). The process goes to the sleep queue (D.SProcQ) and is woken by the clock or a signal. Drivers waiting for I/O use it too.",
+        0x0C => "Returns the current process ID (A) and user ID (Y).",
+        0x0D => "Sets the priority of process A to B. The scheduler chooses the next process by priority and age (P$Age).",
+        0x0F => "Prints the message of error number B on path A.",
+        0x10 => "Takes one element (a name) off a path list. B = its length, Y = the next element.",
+        0x15 => "Writes the current time (6 bytes: year, month, day, hours, minutes, seconds) to the buffer at X.",
+        0x16 => "Sets the system time. The Time ? answer at boot comes here.",
+        0x18 => "Copies the descriptor of process A to the buffer at X (used by procs and others).",
+        0x1B => "Copies Y bytes from X in another address space, given by DAT image D, to U.",
+        0x28 => "Allocates D bytes of system memory and returns its start in U (for the kernel and drivers).",
+        0x29 => "Returns system memory (U, D bytes) from F$SRqMem.",
+        0x2B => "Joins the I/O queue to wait for process A's I/O to finish; used while a device is busy.",
+        0x2C => "Puts the process (X) in the active queue. The queue is ordered by age, which rises while a process waits.",
+        0x2D => "Chooses the next process from the active queue, restores its registers and switches to it (dispatch). Does not return.",
+        0x2F => "Finds block A in a table of 64-byte blocks (X); used to reach process and path descriptors.",
+        0x30 => "Allocates a free block in a table of 64-byte blocks (X); used for path descriptors.",
+        0x31 => "Frees block A of a table of 64-byte blocks (X).",
+        0x34 => "Links a module for the system (Level 2): maps it into the space of DAT image Y.",
+        0x38 => "Moves Y bytes from X in task A's space to U in task B's space (Level 2 copy between address spaces).",
+        0x39 => "Allocates physical RAM blocks (the Level 2 block map).",
+        0x3A => "Gives the process's DAT image new RAM blocks.",
+        0x3F => "Allocates a hardware task number for the process and writes its DAT image to the MMU.",
+        0x4B => "Allocates a process descriptor (512 bytes on Level 2) and enters it in the process table D.PrcDBT.",
+        0x4C => "Frees a process descriptor.",
+        0x80 => "Enters the device (descriptor name X) in the device table and starts its driver and file manager.",
+        0x81 => "Takes one from the device's use count; at 0 the driver is stopped and the device leaves the table.",
+        0x82 => "Duplicates path A into the lowest free path number. The shell's redirection uses it to replace stdin/stdout.",
+        0x83 => "Creates a file and opens it; the file manager (RBF and others) adds it to the directory. A = the new path number.",
+        0x84 => "Opens path list X: IOMan attaches the device, allocates a path descriptor and calls the file manager's Open. A = the path number.",
+        0x85 => "Makes a directory.",
+        0x86 => "Changes the current (data or execution) directory; what chd and chx do.",
+        0x87 => "Deletes a file.",
+        0x88 => "Moves the file position of path A to X:U.",
+        0x89 => "Reads Y bytes from path A to X (raw). Y = the bytes read.",
+        0x8A => "Writes Y bytes at X to path A (raw).",
+        0x8B => "Reads a line (to CR, at most Y bytes) from path A to X. SCF edits and echoes the line.",
+        0x8C => "Writes a line (to CR, at most Y bytes) to path A. SCF adds LF after the CR.",
+        0x8D => "Gets the status of path A; B is the function code (SS.xxx).",
+        0x8E => "Sets the status of path A; B is the function code (SS.xxx).",
+        0x8F => "Closes path A: frees the path descriptor and detaches devices no longer used.",
+        0x90 => "Deletes a file relative to the execution directory.",
+        _ => "",
+    }
+}
+
+fn explain_ja(code: u8) -> &'static str {
     match code {
         0x00 => {
             "モジュールディレクトリから名前と種別が一致するモジュールを探し、リンク数を1増やして実行開始アドレス(Y)とヘッダ(U)を返す。Level 2では見つけたモジュールのブロックを呼び出し側のDATイメージへマップする。"
@@ -587,31 +649,36 @@ impl Describe<'_> {
     fn describe_entry(&self, m: &dyn Mem, pid: u8, code: u8, r: &Regs) -> String {
         let path = |p| self.path_label(pid, p);
         match code {
-            0x00 | 0x01 => format!("X→\"{}\" 種別A=${:02X}", path_string(m, r.x), r.a),
+            0x00 | 0x01 => tr!(format!("X→\"{}\" 種別A=${:02X}", path_string(m, r.x), r.a), format!("X→\"{}\" type A=${:02X}", path_string(m, r.x), r.a)),
             0x02 => format!("U=${:04X}", r.u),
-            0x03 | 0x05 => format!(
+            0x03 | 0x05 => tr!(format!(
                 "モジュール\"{}\" パラメータ\"{}\" データ{}ページ",
                 path_string(m, r.x),
                 preview(m, r.u, r.y),
                 r.b
-            ),
-            0x04 => "子プロセスの終了を待つ".into(),
-            0x06 => format!("終了ステータスB={}", r.b),
+            ), format!(
+                "module \"{}\" parameters \"{}\" data {} pages",
+                path_string(m, r.x),
+                preview(m, r.u, r.y),
+                r.b
+            )),
+            0x04 => tr!("子プロセスの終了を待つ", "waits for a child to exit").into(),
+            0x06 => tr!(format!("終了ステータスB={}", r.b), format!("exit status B={}", r.b)),
             0x0C => String::new(),
             0x10 | 0x11 => format!("\"{}\"", path_string(m, r.x)),
             0x15 => format!("→ X=${:04X}", r.x),
-            0x07 => format!("D={}バイト", r.d()),
-            0x08 => format!("プロセス{}へシグナル{}", r.a, r.b),
-            0x09 => format!("ハンドラX=${:04X} データU=${:04X}", r.x, r.u),
+            0x07 => tr!(format!("D={}バイト", r.d()), format!("D={} bytes", r.d())),
+            0x08 => tr!(format!("プロセス{}へシグナル{}", r.a, r.b), format!("signal {1} to process {0}", r.a, r.b)),
+            0x09 => tr!(format!("ハンドラX=${:04X} データU=${:04X}", r.x, r.u), format!("handler X=${:04X} data U=${:04X}", r.x, r.u)),
             0x0A => {
                 if r.x == 0 {
-                    "起こされるまで".into()
+                    tr!("起こされるまで", "until woken").into()
                 } else {
-                    format!("{}ティック", r.x)
+                    tr!(format!("{}ティック", r.x), format!("{} ticks", r.x))
                 }
             }
-            0x0D => format!("プロセス{} 優先度{}", r.a, r.b),
-            0x0F => format!("パス{} {}", path(r.a), error_name(r.b)),
+            0x0D => tr!(format!("プロセス{} 優先度{}", r.a, r.b), format!("process {} priority {}", r.a, r.b)),
+            0x0F => tr!(format!("パス{} {}", path(r.a), error_name(r.b)), format!("path {} {}", path(r.a), error_name(r.b))),
             0x16 => {
                 let t: Vec<u8> = (0..6).map(|i| m.peek(u32::from(r.x.wrapping_add(i)))).collect();
                 format!(
@@ -624,26 +691,34 @@ impl Describe<'_> {
                     t[5]
                 )
             }
-            0x18 => format!("プロセス{} → X=${:04X}", r.a, r.x),
-            0x28 | 0x29 => format!("D={}バイト U=${:04X}", r.d(), r.u),
-            0x38 => format!(
+            0x18 => tr!(format!("プロセス{} → X=${:04X}", r.a, r.x), format!("process {} → X=${:04X}", r.a, r.x)),
+            0x28 | 0x29 => tr!(format!("D={}バイト U=${:04X}", r.d(), r.u), format!("D={} bytes U=${:04X}", r.d(), r.u)),
+            0x38 => tr!(format!(
                 "タスク{}:${:04X} → タスク{}:${:04X} {}バイト",
                 r.a, r.x, r.b, r.u, r.y
-            ),
-            0x80 => format!("デバイス\"{}\" モードA=${:02X}", path_string(m, r.x), r.a),
-            0x82 | 0x8F => format!("パス{}", path(r.a)),
+            ), format!(
+                "task {}:${:04X} → task {}:${:04X} {} bytes",
+                r.a, r.x, r.b, r.u, r.y
+            )),
+            0x80 => tr!(format!("デバイス\"{}\" モードA=${:02X}", path_string(m, r.x), r.a), format!("device \"{}\" mode A=${:02X}", path_string(m, r.x), r.a)),
+            0x82 | 0x8F => tr!(format!("パス{}", path(r.a)), format!("path {}", path(r.a))),
             0x83 | 0x84 | 0x85 | 0x86 | 0x87 | 0x90 => {
-                format!("\"{}\" モードA=${:02X}", path_string(m, r.x), r.a)
+                tr!(format!("\"{}\" モードA=${:02X}", path_string(m, r.x), r.a), format!("\"{}\" mode A=${:02X}", path_string(m, r.x), r.a))
             }
-            0x88 => format!("パス{} 位置${:04X}{:04X}", path(r.a), r.x, r.u),
-            0x89 | 0x8B => format!("パス{} 最大{}バイト → X=${:04X}", path(r.a), r.y, r.x),
-            0x8A | 0x8C => format!(
+            0x88 => tr!(format!("パス{} 位置${:04X}{:04X}", path(r.a), r.x, r.u), format!("path {} position ${:04X}{:04X}", path(r.a), r.x, r.u)),
+            0x89 | 0x8B => tr!(format!("パス{} 最大{}バイト → X=${:04X}", path(r.a), r.y, r.x), format!("path {} up to {} bytes → X=${:04X}", path(r.a), r.y, r.x)),
+            0x8A | 0x8C => tr!(format!(
                 "パス{} {}バイト \"{}\"",
                 path(r.a),
                 r.y,
                 preview(m, r.x, r.y)
-            ),
-            0x8D | 0x8E => format!("パス{} {}", path(r.a), status_name(r.b)),
+            ), format!(
+                "path {} {} bytes \"{}\"",
+                path(r.a),
+                r.y,
+                preview(m, r.x, r.y)
+            )),
+            0x8D | 0x8E => tr!(format!("パス{} {}", path(r.a), status_name(r.b)), format!("path {} {}", path(r.a), status_name(r.b))),
             _ => format!(
                 "A=${:02X} B=${:02X} X=${:04X} Y=${:04X} U=${:04X}",
                 r.a, r.b, r.x, r.y, r.u
@@ -652,17 +727,17 @@ impl Describe<'_> {
     }
     fn describe_exit(&self, m: &dyn Mem, call: &Call, r: &Regs) -> String {
         if r.cc & 1 != 0 {
-            return format!("エラー {}", error_name(r.b));
+            return tr!(format!("エラー {}", error_name(r.b)), format!("error {}", error_name(r.b)));
         }
         let i = &call.inp.m6809();
         match call.code {
-            0x00 | 0x01 => format!("ヘッダU=${:04X} 実行Y=${:04X}", r.u, r.y),
-            0x03 => format!("子プロセスID={}", r.a),
-            0x04 => format!("子{}が終了 ステータス{}", r.a, r.b),
-            0x07 => format!("サイズ{} 上限Y=${:04X}", r.d(), r.y),
-            0x0A => format!("残りX={}", r.x),
-            0x0C => format!("ID={} ユーザー{}", r.a, r.y),
-            0x10 => format!("長さB={}", r.b),
+            0x00 | 0x01 => tr!(format!("ヘッダU=${:04X} 実行Y=${:04X}", r.u, r.y), format!("header U=${:04X} entry Y=${:04X}", r.u, r.y)),
+            0x03 => tr!(format!("子プロセスID={}", r.a), format!("child process ID={}", r.a)),
+            0x04 => tr!(format!("子{}が終了 ステータス{}", r.a, r.b), format!("child {} exited, status {}", r.a, r.b)),
+            0x07 => tr!(format!("サイズ{} 上限Y=${:04X}", r.d(), r.y), format!("size {} top Y=${:04X}", r.d(), r.y)),
+            0x0A => tr!(format!("残りX={}", r.x), format!("left X={}", r.x)),
+            0x0C => tr!(format!("ID={} ユーザー{}", r.a, r.y), format!("ID={} user {}", r.a, r.y)),
+            0x10 => tr!(format!("長さB={}", r.b), format!("length B={}", r.b)),
             0x15 => {
                 let t: Vec<u8> = (0..6).map(|k| m.peek(u32::from(i.x.wrapping_add(k)))).collect();
                 format!(
@@ -676,10 +751,10 @@ impl Describe<'_> {
                 )
             }
             0x28 => format!("U=${:04X}", r.u),
-            0x80 => format!("デバイステーブルU=${:04X}", r.u),
-            0x82..=0x84 => format!("パス番号A={}", r.a),
-            0x89 | 0x8B => format!("{}バイト \"{}\"", r.y, preview(m, i.x, r.y)),
-            0x8A | 0x8C => format!("{}バイト書いた", r.y),
+            0x80 => tr!(format!("デバイステーブルU=${:04X}", r.u), format!("device table U=${:04X}", r.u)),
+            0x82..=0x84 => tr!(format!("パス番号A={}", r.a), format!("path number A={}", r.a)),
+            0x89 | 0x8B => tr!(format!("{}バイト \"{}\"", r.y, preview(m, i.x, r.y)), format!("{} bytes \"{}\"", r.y, preview(m, i.x, r.y))),
+            0x8A | 0x8C => tr!(format!("{}バイト書いた", r.y), format!("wrote {} bytes", r.y)),
             _ => "OK".into(),
         }
     }
@@ -720,22 +795,22 @@ impl OsMonitor for Nitros9 {
             ("name", "OS-9".into()),
             ("title", if two { "NitrOS-9 Level 2" } else { "NitrOS-9 Level 1" }.into()),
             ("level", if two { 2 } else { 1 }.into()),
-            ("current", "実行中 D.Proc".into()),
+            ("current", tr!("実行中 D.Proc", "running D.Proc").into()),
             (
                 "queues",
                 Json::Arr(vec![
-                    q("active", "アクティブ D.AProcQ（実行待ち）"),
-                    q("waiting", "待機 D.WProcQ（F$Wait）"),
-                    q("sleeping", "睡眠 D.SProcQ（F$Sleep・I/O待ち）"),
+                    q("active", tr!("アクティブ D.AProcQ（実行待ち）", "active D.AProcQ (ready to run)")),
+                    q("waiting", tr!("待機 D.WProcQ（F$Wait）", "waiting D.WProcQ (F$Wait)")),
+                    q("sleeping", tr!("睡眠 D.SProcQ（F$Sleep・I/O待ち）", "sleeping D.SProcQ (F$Sleep, I/O)")),
                 ]),
             ),
-            ("image", "モジュール".into()),
+            ("image", tr!("モジュール", "modules").into()),
             ("memmap", if two { "blocks" } else { "pages" }.into()),
-            ("errorLabel", "OS-9 エラー復帰".into()),
-            ("switchLabel", "OS-9 プロセス切り替え".into()),
+            ("errorLabel", tr!("OS-9 エラー復帰", "OS-9 error return").into()),
+            ("switchLabel", tr!("OS-9 プロセス切り替え", "OS-9 process switch").into()),
             (
                 "spaces",
-                Json::Arr(vec![obj([("key", "sys".into()), ("label", "OS-9システム空間".into())])]),
+                Json::Arr(vec![obj([("key", "sys".into()), ("label", tr!("OS-9システム空間", "OS-9 system space").into())])]),
             ),
         ])
     }

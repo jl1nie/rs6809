@@ -5,6 +5,7 @@
 //! requests look and return, and how to read its processes, loaded images
 //! and memory map. The HTTP API, the browser UI and DAP only use this trait,
 //! so another OS is added by implementing it (see `os9.rs` for NitrOS-9).
+use crate::tr;
 use super::json::Json;
 use crate::{Cpu, Machine};
 use std::collections::{BTreeMap, HashMap, VecDeque};
@@ -412,7 +413,7 @@ impl Tracer {
             out: None,
             args,
             result: if no_return {
-                "(戻らない)".into()
+                tr!("(戻らない)", "(no return)").into()
             } else {
                 String::new()
             },
@@ -557,7 +558,7 @@ impl OsMonitor for NoOs {
         false
     }
     fn info(&self) -> Json {
-        super::json::obj([("os", "none".into()), ("name", "OSなし".into()), ("title", "OSなし".into())])
+        super::json::obj([("os", "none".into()), ("name", tr!("OSなし", "no OS").into()), ("title", tr!("OSなし", "no OS").into())])
     }
     fn summary(&self, _: &dyn Mem) -> Vec<(&'static str, Json)> {
         Vec::new()
