@@ -127,4 +127,29 @@ test("OSC titles and character set selections are skipped", () => {
   assert.strictEqual(t.text(), "ok");
 });
 
+test("resize keeps the content and the cursor line", () => {
+  const t = term("ansi", 20, 6);
+  t.write("one\r\ntwo\r\nthree\r\nfour");
+  // Fewer rows: the blank rows below the cursor go first.
+  t.resize(20, 4);
+  assert.strictEqual(t.text(), "one\ntwo\nthree\nfour");
+  assert.strictEqual(t.history.length, 0);
+  // Fewer again: the top row goes to the scrollback.
+  t.resize(20, 3);
+  assert.strictEqual(t.text(), "two\nthree\nfour");
+  assert.deepStrictEqual([t.y, t.history.length], [2, 1]);
+  // More rows: back from the scrollback.
+  t.resize(20, 5);
+  assert.strictEqual(t.text(), "one\ntwo\nthree\nfour");
+  assert.strictEqual(t.y, 3);
+  // Narrower: lines are cut; the cursor stays inside.
+  t.write("-and-more");
+  t.resize(10, 5);
+  assert.strictEqual(t.text(), "one\ntwo\nthree\nfour-and-m");
+  assert.ok(t.x <= 9);
+  // Writing after a resize uses the new size (wraps at 10).
+  t.write("\r\n123456789012");
+  assert.strictEqual(t.text().split("\n").slice(-2).join("|"), "1234567890|12");
+});
+
 console.log(`ok ${n} tests`);

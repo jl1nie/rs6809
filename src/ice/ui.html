@@ -343,6 +343,12 @@ canvas { width: 100%; display: block; }
     <div class="bar">
       <strong>コンソール /term</strong><span style="opacity:.6">（クリックしてキー入力）</span>
       <span style="flex:1"></span>
+      <span id="termSize" class="mono" title="端末の桁数×行数" style="opacity:.75"></span>
+      <select id="termFit" title="端末の大きさ：欄に合わせるか、80×24に固定（欄が狭ければ横にスクロール）" style="background:#ffffff12;color:inherit;border-color:#ffffff22">
+        <option value="fit">欄に合わせる</option>
+        <option value="80x24">80×24</option>
+      </select>
+      <button id="termTell" title="ゲストに今の大きさを設定するコマンドを送る（シリアルの端末は大きさを自動では伝えられないため）" style="background:#ffffff12;color:inherit;border-color:#ffffff22">大きさを伝える</button>
       <select id="termMode" title="端末の種類（ゲストのTERMに合わせる。FUZIXはvt52）" style="background:#ffffff12;color:inherit;border-color:#ffffff22">
         <option value="ansi">ANSI/xterm</option>
         <option value="vt52">VT52</option>
@@ -628,6 +634,49 @@ class Term {
     this.state = 0; // 0 text, 1 ESC, 2 CSI, 3 VT52 Y row, 4 VT52 Y col, 5 OSC, 6 ESC+intermediate
     this.params = "";
     this.dirty = true;
+  }
+  // New size, keeping the content: rows going off the top go to the
+  // scrollback (blank rows below the cursor are dropped first), and rows
+  // coming back are taken from it; lines are cut or padded to the width.
+  resize(cols, rows) {
+    cols = Math.max(10, cols | 0);
+    rows = Math.max(3, rows | 0);
+    if (cols === this.cols && rows === this.rows) return false;
+    const fit = (row) => {
+      row = row.slice(0, cols);
+      while (row.length < cols) row.push([" ", Term.DEF]);
+      return row;
+    };
+    const empty = (row) => row.every((c) => c[0] === " " && c[1] === Term.DEF);
+    while (this.screen.length > rows) {
+      const last = this.screen.length - 1;
+      if (last > this.y && empty(this.screen[last])) {
+        this.screen.pop();
+      } else {
+        this.history.push(this.screen.shift());
+        this.y--;
+      }
+    }
+    while (this.screen.length < rows) {
+      if (this.history.length) {
+        this.screen.unshift(this.history.pop());
+        this.y++;
+      } else {
+        this.screen.push([]);
+      }
+    }
+    if (this.history.length > this.maxHistory) this.history.splice(0, this.history.length - this.maxHistory);
+    this.cols = cols;
+    this.rows = rows;
+    this.screen = this.screen.map(fit);
+    this.top = 0;
+    this.bottom = rows - 1;
+    this.y = Math.max(0, Math.min(rows - 1, this.y));
+    this.x = Math.max(0, Math.min(cols - 1, this.x));
+    this.saved = [Math.min(this.saved[0], rows - 1), Math.min(this.saved[1], cols - 1), this.saved[2]];
+    this.wrapNext = false;
+    this.dirty = true;
+    return true;
   }
   // A cell is [char, attr]; attr = fg (0-15, 16 default) | bg << 5 (0-15, 16 default) | flags << 10.
   blank() {
@@ -941,6 +990,48 @@ function termMode(m, remember) {
   if (remember) try { localStorage.setItem("rs6809.term." + (osInfo?.os || "none"), m); } catch (e) { /* private mode */ }
 }
 $("termMode").onchange = () => termMode($("termMode").value, true);
+// The terminal's size: the console panel's, in character cells, or 80x24.
+let termFixed = false;
+try { termFixed = localStorage.getItem("rs6809.termFit") === "80x24"; } catch (e) { /* private mode */ }
+$("termFit").value = termFixed ? "80x24" : "fit";
+function cellSize() {
+  const probe = document.createElement("span");
+  probe.textContent = "M".repeat(20);
+  probe.style.visibility = "hidden";
+  term.appendChild(probe);
+  const r = probe.getBoundingClientRect();
+  probe.remove();
+  return [r.width / 20, r.height];
+}
+function termFit() {
+  let cols = 80, rows = 24;
+  if (!termFixed) {
+    const cs = getComputedStyle(term);
+    const w = term.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight);
+    const h = term.clientHeight - parseFloat(cs.paddingTop) - parseFloat(cs.paddingBottom);
+    const [cw, ch] = cellSize();
+    if (w <= 0 || h <= 0 || !cw || !ch) return; // the console is hidden
+    cols = Math.floor(w / cw);
+    rows = Math.floor(h / ch);
+  }
+  if (screen.resize(cols, rows)) termDraw();
+  $("termSize").textContent = `${screen.cols}×${screen.rows}`;
+}
+let fitTimer = 0;
+new ResizeObserver(() => { clearTimeout(fitTimer); fitTimer = setTimeout(termFit, 80); }).observe(term);
+$("termFit").onchange = () => {
+  termFixed = $("termFit").value === "80x24";
+  try { localStorage.setItem("rs6809.termFit", $("termFit").value); } catch (e) { /* private mode */ }
+  termFit();
+};
+// Tell the guest the size: FUZIX with stty, NitrOS-9 with tmode (page length).
+function tellCommand() {
+  const os = osInfo?.os;
+  if (os === "fuzix") return `stty rows ${screen.rows} cols ${screen.cols}\r`;
+  if (os === "nitros9") return `tmode pag=${screen.rows}\r`;
+  return null;
+}
+$("termTell").onclick = () => { const c = tellCommand(); if (c) { sendKeys(c); term.focus(); } };
 let keyQueue = "";
 function sendKeys(s) { keyQueue += s; }
 setInterval(() => { if (keyQueue) { const s = keyQueue; keyQueue = ""; api("console", s); } }, 40);
@@ -975,6 +1066,10 @@ async function loadOsInfo() {
   let m = null;
   try { m = localStorage.getItem("rs6809.term." + osInfo.os); } catch (e) { /* private mode */ }
   termMode(m || (osInfo.os === "fuzix" ? "vt52" : "ansi"), false);
+  $("termTell").style.display = tellCommand() ? "" : "none";
+  $("termTell").title = tellCommand()
+    ? `ゲストに今の大きさを設定するコマンド（${tellCommand().trim()}）を送る。シリアルの端末は大きさを自動では伝えられないため`
+    : "";
   $("osTab").textContent = `${osInfo.name} モニタ`;
   // A bare program (no OS) has no OS monitor tab.
   $("osTab").style.display = osInfo.os === "none" ? "none" : "";
