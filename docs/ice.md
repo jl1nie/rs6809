@@ -67,6 +67,8 @@ The input field below sends one line with a CR. Combined with Telnet mode (`--te
 | Step out | Shift+F11. Stops when S returns above the current value by `RTS`, `RTI` or `PULS PC` |
 | Run to line | Double-click a disassembly line |
 | Breakpoints | PC match. Checked with a 64 KB bit table; on resume the current PC is skipped once |
+| Conditions, hit counts, logpoints | Any breakpoint can carry a condition (`A==5 && [X].w!=0`), a hit count (`N` from the Nth time on, `=N` only the Nth, `%N` every Nth, counting the times the condition held) and a log message (`A={A} X={X}`: it logs and goes on). Set them in the fields under the breakpoint input or with ✎ on a listed breakpoint; DAP's `condition`, `hitCondition` and `logMessage` do the same. Conditions are evaluated only when the PC reaches the breakpoint. A condition that fails to evaluate stops and says why in the log |
+| Disassembly navigation | ▲▼ move 4 instructions, ⇞⇟ a page (also ↑↓ PageUp PageDown with the panel focused, and the wheel at either end). → after a branch or call goes to its target, ← returns. Scrolling up retraces the way down; otherwise instruction starts are found from the trace and the labels |
 | Watchpoints | Read, write or both on a range of CPU logical addresses. Stops after the instruction completes |
 | Register / memory editing | While stopped, click a register value or memory byte to change it |
 | Memory view | CPU logical space, OS-9 system space, first 64 KB of physical RAM |
@@ -378,8 +380,9 @@ Everything is JSON on `127.0.0.1`. Numbers default to decimal, addresses to hex 
 | `POST /api/machine/save?path=&disk=1\|0`, `POST /api/machine/load?path=` | Machine state file (path on the emulator side; `disk` defaults to 1 when disk writes are not kept in the file) |
 | `POST /api/reg?name=&val=` | Change a register |
 | `POST /api/bp?addr=&op=add\|del\|toggle\|clear` | Breakpoints |
+| `POST /api/bp?addr=\|sym=\|id=&cond=&hits=&log=` | Condition, hit count and log message of a new breakpoint, or of an existing one (`addr`, or `id` for symbolic ones). Empty fields clear them; a wrong condition is refused with 400. `state` has `bpConds`, the same fields in `symBreakpoints` (with `count`) and `bpLog` (the latest log lines) |
 | `POST /api/watch?addr=&len=&kind=r\|w\|rw`, `op=del&index=`, `op=clear` | Watchpoints |
-| `GET /api/disasm?addr=&n=&back=` | Disassembly (`back` starts from an earlier instruction boundary) |
+| `GET /api/disasm?addr=&n=&back=` | Disassembly (`back` starts from an earlier instruction boundary). Branches and calls have `target` |
 | `GET /api/mem?addr=&len=&space=cpu\|sys\|phys\|pidN`, `POST ...&val=hex` | Memory |
 | `GET /api/trace?n=` | Execution trace |
 | `GET /api/console?since=`, `POST /api/console` (body to ACIA 1) | Console |

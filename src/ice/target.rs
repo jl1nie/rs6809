@@ -113,6 +113,10 @@ pub trait Target: Send {
     }
     /// Let `n` cycles pass while idle (devices advance, nothing executes).
     fn skip_idle(&mut self, _n: u64) {}
+    /// The machine's name for the UI.
+    fn machine_name(&self) -> &'static str {
+        ""
+    }
     /// Nominal clock, for turning idle cycles into host time.
     fn clock_hz(&self) -> u64 {
         1_000_000
@@ -380,6 +384,9 @@ impl Target for Mc6809 {
     fn multicomp(&mut self) -> Option<&mut Machine> {
         Some(&mut self.machine)
     }
+    fn machine_name(&self) -> &'static str {
+        if self.machine.acia_base == 0xffd0 { "Multicomp" } else { "6809" }
+    }
 }
 
 /// Registers of a 68000 trace entry or service request.
@@ -397,6 +404,8 @@ pub fn regs68k_json(d: &[u32; 8], a: &[u32; 8], sr: u16, pc: u32, usp: u32, ssp:
 
 /// A 68000 machine: memory, devices and the console.
 pub trait Board68k: Bus68k + Mem + Send {
+    /// The machine's name for the UI.
+    const NAME: &'static str;
     /// Write RAM only (no device side effects).
     fn poke(&mut self, addr: u32, v: u8);
     /// Advance the devices by CPU cycles.
@@ -427,6 +436,7 @@ pub trait Board68k: Bus68k + Mem + Send {
 }
 
 impl Board68k for Sim68k {
+    const NAME: &'static str = "";
     fn poke(&mut self, addr: u32, v: u8) {
         Sim68k::poke(self, addr, v)
     }
@@ -468,6 +478,7 @@ impl Mem for Tiny68k {
 }
 
 impl Board68k for Tiny68k {
+    const NAME: &'static str = "Tiny68K";
     fn poke(&mut self, addr: u32, v: u8) {
         Tiny68k::poke(self, addr, v)
     }
@@ -849,6 +860,9 @@ impl<B: Board68k> Target for Mc68000<B> {
     }
     fn clock_hz(&self) -> u64 {
         crate::m68k::tiny68k::CPU_HZ
+    }
+    fn machine_name(&self) -> &'static str {
+        B::NAME
     }
     fn ram_len(&self) -> usize {
         self.machine.ram().len()

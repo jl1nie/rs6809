@@ -242,6 +242,31 @@ fn vscode_style_session() {
         frames.get("stackFrames").arr()[0].get("name").str(),
         Some("count")
     );
+
+    // A logpoint on count and a hit count on line 6: the third time there
+    // it stops, after the log has shown X (twice: it starts at count).
+    d.request(
+        "setFunctionBreakpoints",
+        r#"{"breakpoints":[{"name":"count","logMessage":"x={x}"}]}"#,
+    );
+    let set = d.request(
+        "setBreakpoints",
+        &format!(r#"{{"source":{{"path":{path}}},"breakpoints":[{{"line":6,"hitCondition":"=3"}},{{"line":7,"condition":"x =="}}]}}"#),
+    );
+    assert_eq!(set.get("breakpoints").arr()[1].get("verified").bool(), Some(false), "{set}");
+    d.request("continue", r#"{"threadId":1}"#);
+    let stop = d.event("stopped");
+    assert_eq!(stop.get("reason").str(), Some("breakpoint"));
+    let frames = d.request("stackTrace", r#"{"threadId":1}"#);
+    assert_eq!(frames.get("stackFrames").arr()[0].get("line").int(), Some(6));
+    let mut logs = Vec::new();
+    while logs.len() < 2 {
+        let o = d.event("output");
+        if o.get("category").str() == Some("console") {
+            logs.push(o.get("output").str().unwrap_or("").to_string());
+        }
+    }
+    assert!(logs.iter().all(|l| l.starts_with("x=$20")), "{logs:?}");
     d.request("disconnect", "{}");
     std::fs::remove_dir_all(&dir).unwrap();
 }

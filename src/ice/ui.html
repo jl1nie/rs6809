@@ -9,21 +9,24 @@
   --bg: #f6f7f9; --panel: #ffffff; --ink: #1d2330; --mute: #687083; --line: #dfe3ea;
   --accent: #2463eb; --accent-soft: #e4ecfd; --pc: #fff2c2; --bp: #d93636; --ok: #1d8a4e;
   --warn: #b26b00; --err: #c62828; --chip: #eef1f5; --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  --term-bg: #10141c; --term-ink: #d7e0ea;
+  --term-bg: #fbfcfd; --term-ink: #1d2330; --term-line: #0000001a; --term-in: #00000008;
+  --t0: #1d2330; --t1: #c62828; --t2: #2e7d32; --t3: #9a6700; --t4: #1f5fd1; --t5: #8e3fb5; --t6: #0a7f8a; --t7: #c9ced6; --t8: #687083; --t9: #e0464f; --t10: #3d9a3f; --t11: #b8860b; --t12: #3b7be8; --t13: #a855c7; --t14: #1595a3; --t15: #a0a7b3;
   --cat-proc: #7c4dff; --cat-mem: #0a8f9c; --cat-io: #2e7d32; --cat-sys: #8d6e63;
 }
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
     --bg: #0f131a; --panel: #171c25; --ink: #e2e7ef; --mute: #8c96a8; --line: #2a3140;
     --accent: #6d9bff; --accent-soft: #1d2a45; --pc: #4a4120; --bp: #ff6b6b; --ok: #4cc38a;
-    --warn: #f0b44c; --err: #ff6b6b; --chip: #232a36; --term-bg: #0a0d12;
+    --warn: #f0b44c; --err: #ff6b6b; --chip: #232a36; --term-bg: #0a0d12; --term-ink: #d7e0ea; --term-line: #ffffff1a; --term-in: #ffffff10;
+    --t0: #3b4252; --t1: #e06c75; --t2: #98c379; --t3: #e5c07b; --t4: #61afef; --t5: #c678dd; --t6: #56b6c2; --t7: #d7e0ea; --t8: #7f848e; --t9: #ff7b86; --t10: #b5e890; --t11: #ffd88a; --t12: #7cc4ff; --t13: #de9bf5; --t14: #7fe0eb; --t15: #ffffff;
     --cat-proc: #b39dff; --cat-mem: #4fd1db; --cat-io: #7bd389; --cat-sys: #c9a99a;
   }
 }
 :root[data-theme="dark"] {
   --bg: #0f131a; --panel: #171c25; --ink: #e2e7ef; --mute: #8c96a8; --line: #2a3140;
   --accent: #6d9bff; --accent-soft: #1d2a45; --pc: #4a4120; --bp: #ff6b6b; --ok: #4cc38a;
-  --warn: #f0b44c; --err: #ff6b6b; --chip: #232a36; --term-bg: #0a0d12;
+  --warn: #f0b44c; --err: #ff6b6b; --chip: #232a36; --term-bg: #0a0d12; --term-ink: #d7e0ea; --term-line: #ffffff1a; --term-in: #ffffff10;
+    --t0: #3b4252; --t1: #e06c75; --t2: #98c379; --t3: #e5c07b; --t4: #61afef; --t5: #c678dd; --t6: #56b6c2; --t7: #d7e0ea; --t8: #7f848e; --t9: #ff7b86; --t10: #b5e890; --t11: #ffd88a; --t12: #7cc4ff; --t13: #de9bf5; --t14: #7fe0eb; --t15: #ffffff;
   --cat-proc: #b39dff; --cat-mem: #4fd1db; --cat-io: #7bd389; --cat-sys: #c9a99a;
 }
 * { box-sizing: border-box; }
@@ -38,6 +41,10 @@ input, select { background: var(--panel); border: 1px solid var(--line); border-
 input.addr { width: 6em; font-family: var(--mono); }
 header { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-bottom: 1px solid var(--line); background: var(--panel); flex-wrap: wrap; }
 header h1 { font-size: 15px; margin: 0 8px 0 0; letter-spacing: .02em; }
+header .sysname { font-family: var(--mono); font-weight: 600; padding: 2px 8px; border: 1px solid var(--accent); color: var(--accent); border-radius: 6px; margin-right: 6px; }
+.cogwrap { position: relative; }
+.cogmenu { position: absolute; right: 0; top: calc(100% + 6px); z-index: 50; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px; display: flex; flex-direction: column; gap: 8px; min-width: 200px; box-shadow: 0 4px 16px rgba(0,0,0,.2); font-family: var(--sans, inherit); }
+.cogmenu.hide { display: none; }
 header .status { margin-left: auto; display: flex; gap: 10px; align-items: center; font-family: var(--mono); }
 .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; background: var(--mute); }
 .dot.run { background: var(--ok); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 25%, transparent); }
@@ -75,6 +82,8 @@ th { color: var(--mute); font-weight: 500; font-size: 12px; border-bottom: 1px s
 .dis tr.os9 td.t { color: var(--cat-proc); font-weight: 600; }
 .dis tr:hover td { background: var(--accent-soft); }
 .dis tr.lbl td { color: var(--accent); font-weight: 600; padding-top: 5px; }
+.dis .jump { color: var(--accent); cursor: pointer; padding: 0 3px; }
+.dis .jump:hover { text-decoration: underline; }
 .dis tr.src td { color: var(--ok); font-style: italic; white-space: pre; }
 .dis td .sym { color: var(--accent); }
 .dis tr.ret td { color: var(--accent); }
@@ -96,6 +105,10 @@ th { color: var(--mute); font-weight: 500; font-size: 12px; border-bottom: 1px s
 .list { display: flex; flex-direction: column; gap: 3px; }
 .item { display: flex; align-items: center; gap: 6px; font-family: var(--mono); }
 .item button { padding: 0 6px; }
+.item .grow { flex: 1; }
+.bpcond input { flex: 1; min-width: 0; }
+.item .cond { color: var(--accent); }
+.hide { display: none !important; }
 .row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .mmu { display: grid; grid-template-columns: auto repeat(8, 1fr); gap: 2px; font-family: var(--mono); font-size: 12px; }
 .mmu div { text-align: center; padding: 1px 0; border-radius: 3px; }
@@ -103,7 +116,7 @@ th { color: var(--mute); font-weight: 500; font-size: 12px; border-bottom: 1px s
 .mmu .cur { background: var(--accent-soft); }
 .mmu .wp { text-decoration: underline; }
 #console { width: 34%; min-width: 320px; max-width: 720px; display: flex; flex-direction: column; border-left: 1px solid var(--line); background: var(--term-bg); }
-#console .bar { display: flex; gap: 6px; align-items: center; padding: 6px 8px; color: var(--term-ink); font-size: 12px; border-bottom: 1px solid #ffffff1a; }
+#console .bar { display: flex; gap: 6px; align-items: center; padding: 6px 8px; color: var(--term-ink); font-size: 12px; border-bottom: 1px solid var(--term-line); }
 /* The box takes the panel's free space; the terminal inside is exactly the
    screen's rows high, so only the screen shows and the scrollback is above it. */
 #termBox { flex: 1; min-height: 0; overflow: hidden; padding: 8px 0; box-sizing: border-box; }
@@ -115,20 +128,20 @@ th { color: var(--mute); font-weight: 500; font-size: 12px; border-bottom: 1px s
    the screen is sized to the panel, so there is no horizontal scrolling. */
 #term { overflow-x: hidden; }
 /* Terminal colours: 0-7 normal, 8-15 bright; 17/18 are the default background/ink (reverse video). */
-#term .f0 { color: #3b4252; } #term .f1 { color: #e06c75; } #term .f2 { color: #98c379; } #term .f3 { color: #e5c07b; }
-#term .f4 { color: #61afef; } #term .f5 { color: #c678dd; } #term .f6 { color: #56b6c2; } #term .f7 { color: #d7e0ea; }
-#term .f8 { color: #7f848e; } #term .f9 { color: #ff7b86; } #term .f10 { color: #b5e890; } #term .f11 { color: #ffd88a; }
-#term .f12 { color: #7cc4ff; } #term .f13 { color: #de9bf5; } #term .f14 { color: #7fe0eb; } #term .f15 { color: #ffffff; }
-#term .b0 { background: #3b4252; } #term .b1 { background: #e06c75; } #term .b2 { background: #98c379; } #term .b3 { background: #e5c07b; }
-#term .b4 { background: #61afef; } #term .b5 { background: #c678dd; } #term .b6 { background: #56b6c2; } #term .b7 { background: #d7e0ea; }
-#term .b8 { background: #7f848e; } #term .b9 { background: #ff7b86; } #term .b10 { background: #b5e890; } #term .b11 { background: #ffd88a; }
-#term .b12 { background: #7cc4ff; } #term .b13 { background: #de9bf5; } #term .b14 { background: #7fe0eb; } #term .b15 { background: #ffffff; }
+#term .f0 { color: var(--t0); } #term .f1 { color: var(--t1); } #term .f2 { color: var(--t2); } #term .f3 { color: var(--t3); }
+#term .f4 { color: var(--t4); } #term .f5 { color: var(--t5); } #term .f6 { color: var(--t6); } #term .f7 { color: var(--t7); }
+#term .f8 { color: var(--t8); } #term .f9 { color: var(--t9); } #term .f10 { color: var(--t10); } #term .f11 { color: var(--t11); }
+#term .f12 { color: var(--t12); } #term .f13 { color: var(--t13); } #term .f14 { color: var(--t14); } #term .f15 { color: var(--t15); }
+#term .b0 { background: var(--t0); } #term .b1 { background: var(--t1); } #term .b2 { background: var(--t2); } #term .b3 { background: var(--t3); }
+#term .b4 { background: var(--t4); } #term .b5 { background: var(--t5); } #term .b6 { background: var(--t6); } #term .b7 { background: var(--t7); }
+#term .b8 { background: var(--t8); } #term .b9 { background: var(--t9); } #term .b10 { background: var(--t10); } #term .b11 { background: var(--t11); }
+#term .b12 { background: var(--t12); } #term .b13 { background: var(--t13); } #term .b14 { background: var(--t14); } #term .b15 { background: var(--t15); }
 #term .f17 { color: var(--term-bg); } #term .b18 { background: var(--term-ink); }
 #term .tb { font-weight: 700; } #term .tu { text-decoration: underline; }
 #term:focus { box-shadow: inset 0 0 0 2px #6d9bff66; }
 #term .cursor { background: var(--term-ink); color: var(--term-bg); animation: blink 1s steps(1) infinite; }
 @keyframes blink { 50% { background: transparent; color: var(--term-ink); } }
-#console input { flex: 1; background: #ffffff10; color: var(--term-ink); border-color: #ffffff22; font-family: var(--mono); }
+#console input { flex: 1; background: var(--term-in); color: var(--term-ink); border-color: var(--term-line); font-family: var(--mono); }
 .chip { display: inline-flex; align-items: center; gap: 4px; padding: 0 7px; border-radius: 10px; background: var(--chip); font-family: var(--mono); font-size: 12px; line-height: 18px; }
 .pid { color: #fff; font-weight: 600; min-width: 22px; justify-content: center; }
 .queues { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
@@ -176,7 +189,7 @@ canvas { width: 100%; display: block; }
 <body>
 <header>
   <h1>rs6809 ICE</h1>
-  <select id="lang" title="言語" style="width:auto"><option value="ja">日本語</option><option value="en">English</option></select>
+  <span id="sysName" class="sysname" title="CPU・機械・OS"></span>
   <button id="bRun" class="primary" title="実行 (F5)">▶ 実行</button>
   <button id="bPause" title="一時停止 (F6)">⏸ 停止</button>
   <button id="bStep" title="ステップイン (F11)">ステップ</button>
@@ -186,22 +199,22 @@ canvas { width: 100%; display: block; }
   <button id="bSave" title="機械の状態をファイルに保存（--load-state や「読込」で、そこから再開できます）">保存</button>
   <button id="bLoad" title="保存した状態から再開">読込</button>
   <label class="row" title="実行速度の上限（仮想サイクル/秒）。遅くするとOS-9の動きを目で追えます">速度
-    <select id="speed">
-      <option value="0">最大</option>
-      <option value="10000000">10 MHz</option>
-      <option value="2000000">2 MHz</option>
-      <option value="1000000">1 MHz（実機相当）</option>
-      <option value="100000">100 kHz</option>
-      <option value="10000">10 kHz</option>
-      <option value="1000">1 kHz</option>
-    </select>
+    <select id="speed" class="dyn"></select>
   </label>
   <div class="status">
     <span id="dot" class="dot"></span>
     <span id="stopText"></span>
     <span class="mute" id="cycles"></span>
-    <button id="consoleToggle" title="コンソールの表示/非表示">コンソール</button>
-    <button id="theme" title="表示テーマ切り替え">◐</button>
+    <span class="cogwrap">
+      <button id="cog" title="表示の設定">⚙</button>
+      <div id="cogMenu" class="cogmenu hide">
+        <label class="row">言語
+          <select id="lang" style="width:auto"><option value="ja">日本語</option><option value="en">English</option></select>
+        </label>
+        <label class="row"><input type="checkbox" id="consoleToggle" checked> コンソールを表示</label>
+        <button id="theme">◐ テーマ切り替え</button>
+      </div>
+    </span>
   </div>
 </header>
 <nav class="tabs">
@@ -226,7 +239,17 @@ canvas { width: 100%; display: block; }
         <h2>ブレークポイント</h2>
         <div class="body">
           <div class="row"><input id="bpAddr" class="addr" style="width:11em" placeholder="C000 / sum / hello.c:19" title="アドレス(16進)、シンボル名、またはファイル名:行"><button id="bpAdd">追加</button><button id="bpClear">全削除</button></div>
+          <div class="row bpcond" style="margin-top:4px">
+            <input id="bpCond" class="mono" placeholder="条件 例: A==5 && [X].w!=0" title="止める条件（式）。レジスタ名、[番地]（.b .w .l）、シンボル、pid、$16進、+ - * / & | ^ << >> == != < > && || ! が使えます">
+            <input id="bpHits" class="mono" style="width:5em" placeholder="回数" title="N：N回目以降、=N：N回目だけ、%N：N回ごと（条件が成り立った回数）">
+          </div>
+          <div class="row bpcond" style="margin-top:4px">
+            <input id="bpLogMsg" class="mono" placeholder="ログ 例: A={A} X={X}" title="書くと止まらずにログを出します（ログポイント）。{式} は値に置き換わります">
+            <button id="bpEditCancel" class="hide">取消</button>
+          </div>
+          <div class="mute" id="bpErr" style="font-size:12px"></div>
           <div class="list" id="bpList" style="margin-top:6px"></div>
+          <div class="list mono" id="bpLogList" style="margin-top:6px;font-size:12px;max-height:120px;overflow:auto"></div>
         </div>
       </div>
       <div class="panel">
@@ -261,14 +284,19 @@ canvas { width: 100%; display: block; }
     <div class="panel">
       <h2>逆アセンブル
         <span class="grow"></span>
+        <button id="disBack" title="分岐先へ移る前の位置に戻る (Alt+←)" disabled>←</button>
+        <button id="disPgUp" title="1ページ前 (PageUp)">⇞</button>
+        <button id="disUp" title="4命令前 (↑ / ホイール)">▲</button>
+        <button id="disDown" title="4命令後 (↓ / ホイール)">▼</button>
+        <button id="disPgDn" title="1ページ後 (PageDown)">⇟</button>
         <input id="disAddr" class="addr" placeholder="PC">
         <button id="disGo">移動</button>
         <label class="row"><input type="checkbox" id="follow" checked>PC追従</label>
       </h2>
-      <div class="scroll" style="max-height: calc(100vh - 170px)">
+      <div class="scroll" id="disScroll" tabindex="0" style="max-height: calc(100vh - 170px); outline: none">
         <table class="dis"><tbody id="dis"></tbody></table>
       </div>
-      <div class="body mute" style="font-size:12px">行頭クリックでブレークポイント、ダブルクリックでその行まで実行。<code>OS9</code> 行にカーソルを置くと処理内容を表示します。</div>
+      <div class="body mute" style="font-size:12px">行頭クリックでブレークポイント、ダブルクリックでその行まで実行。→ で分岐先へ移動（← で戻る）。端でホイールを回すと前後の命令を読みます。<code>OS9</code> 行にカーソルを置くと処理内容を表示します。</div>
     </div>
     <div class="list" style="gap:10px">
       <div class="panel">
@@ -354,15 +382,15 @@ canvas { width: 100%; display: block; }
       <strong>コンソール /term</strong><span style="opacity:.6">（クリックしてキー入力）</span>
       <span style="flex:1"></span>
       <span id="termSize" class="mono" title="端末の桁数×行数" style="opacity:.75"></span>
-      <select id="termFit" title="端末の大きさ。80×24は文字の大きさを欄に合わせる。「欄に合わせる」は欄に収まる桁数・行数にする。どちらもゲストの端末の大きさに反映する（FUZIX）" style="background:#ffffff12;color:inherit;border-color:#ffffff22">
+      <select id="termFit" title="端末の大きさ。80×24は文字の大きさを欄に合わせる。「欄に合わせる」は欄に収まる桁数・行数にする。どちらもゲストの端末の大きさに反映する（FUZIX）" style="background:var(--term-in);color:inherit;border-color:var(--term-line)">
         <option value="80x24">80×24</option>
         <option value="fit">欄に合わせる</option>
       </select>
-      <select id="termMode" title="端末の種類（ゲストのTERMに合わせる。FUZIXはvt52）" style="background:#ffffff12;color:inherit;border-color:#ffffff22">
+      <select id="termMode" title="端末の種類（ゲストのTERMに合わせる。FUZIXはvt52）" style="background:var(--term-in);color:inherit;border-color:var(--term-line)">
         <option value="ansi">ANSI/xterm</option>
         <option value="vt52">VT52</option>
       </select>
-      <button id="termClear" style="background:#ffffff12;color:inherit;border-color:#ffffff22">消去</button>
+      <button id="termClear" style="background:var(--term-in);color:inherit;border-color:var(--term-line)">消去</button>
     </div>
     <div id="termBox"><pre id="term" tabindex="0"></pre></div>
     <div class="bar"><input id="line" placeholder="1行入力して Enter（CRを付けて送信）"></div>
@@ -374,7 +402,30 @@ canvas { width: 100%; display: block; }
 // Japanese is written in place; EN maps it to English. The ICE's language
 // (state.lang, /api/lang) is the UI's: one switch for both.
 const EN = {
-"1 MHz（実機相当）": "1 MHz (real 6809)",
+"分岐先へ移る前の位置に戻る (Alt+←)": "Back to where you were before jumping to a branch target (Alt+←)",
+"1ページ前 (PageUp)": "One page earlier (PageUp)",
+"4命令前 (↑ / ホイール)": "4 instructions earlier (↑ / wheel)",
+"4命令後 (↓ / ホイール)": "4 instructions later (↓ / wheel)",
+"1ページ後 (PageDown)": "One page later (PageDown)",
+"分岐先へ移動": "Go to the branch target",
+"行頭クリックでブレークポイント、ダブルクリックでその行まで実行。→ で分岐先へ移動（← で戻る）。端でホイールを回すと前後の命令を読みます。": "Click the line start for a breakpoint, double-click to run to the line. → goes to a branch target (← comes back). The wheel at either end reads earlier or later instructions.",
+"条件 例: A==5 && [X].w!=0": "condition, e.g. A==5 && [X].w!=0",
+"止める条件（式）。レジスタ名、[番地]（.b .w .l）、シンボル、pid、$16進、+ - * / & | ^ << >> == != < > && || ! が使えます": "Stop condition (an expression): register names, [address] (.b .w .l), symbols, pid, $hex, + - * / & | ^ << >> == != < > && || !",
+"回数": "hits",
+"N：N回目以降、=N：N回目だけ、%N：N回ごと（条件が成り立った回数）": "N: from the Nth time on, =N: only the Nth, %N: every Nth (counting times the condition held)",
+"ログ 例: A={A} X={X}": "log, e.g. A={A} X={X}",
+"書くと止まらずにログを出します（ログポイント）。{式} は値に置き換わります": "With a message it logs instead of stopping (a logpoint); {expr} is replaced by its value",
+"取消": "Cancel",
+"ログ": "log",
+"条件が成り立った回数": "times the condition held",
+"条件を編集": "Edit the condition",
+"更新": "Update",
+"条件のエラー: ": "condition error: ",
+"（実機相当）": " (real machine)",
+"表示の設定": "Display settings",
+"コンソールを表示": "Show the console",
+"◐ テーマ切り替え": "◐ Switch the theme",
+"CPU・機械・OS": "CPU, machine, OS",
 "1行入力して Enter（CRを付けて送信）": "Type a line and press Enter (sent with CR)",
 "CPU論理": "CPU logical",
 "LWASM/RMAのリスト、LWLINK/c.linkのマップ、またはそのディレクトリ（ホスト上のパス）": "LWASM/RMA listing, LWLINK/c.link map, GNU as listing, nm output, or a directory of them (path on the host)",
@@ -647,7 +698,10 @@ $("bLoad").onclick = () => stateFile("load");
 $("bStep").onclick = () => act("step");
 $("bOver").onclick = () => act("over");
 $("bOut").onclick = () => act("out");
-$("consoleToggle").onclick = () => { $("console").classList.toggle("hide"); drawTimeline(); };
+$("consoleToggle").onchange = (e) => { $("console").classList.toggle("hide", !e.target.checked); drawTimeline(); };
+$("cog").onclick = (e) => { e.stopPropagation(); $("cogMenu").classList.toggle("hide"); };
+$("cogMenu").onclick = (e) => e.stopPropagation();
+document.addEventListener("click", () => $("cogMenu").classList.add("hide"));
 $("speed").onchange = (e) => act("speed?hz=" + e.target.value);
 $("theme").onclick = () => {
   const r = document.documentElement;
@@ -706,39 +760,82 @@ function renderRegs() {
   const m = st.mmu;
   $("mmuInfo").textContent = m.enabled ? `${t("有効・タスク")}${m.task}${m.frt ? t("・FRT") : ""}${m.romdis ? "" : t("・ROM")}` : t("無効");
   let h = '<div class="hd"></div>' + [0, 1, 2, 3, 4, 5, 6, 7].map((i) => `<div class="hd">${hex(i * 0x20, 2)}</div>`).join("");
-  for (const t of [0, 1]) {
-    h += `<div class="hd">T${t}</div>`;
+  for (const tk of [0, 1]) {
+    h += `<div class="hd">T${tk}</div>`;
     for (let i = 0; i < 8; i++) {
-      const e = m.maps[t * 8 + i];
-      h += `<div class="${m.enabled && m.task === t ? "cur" : ""} ${e & 0x80 ? "wp" : ""}${t("\" title=\"論理 $")}${hex(i * 0x2000, 4)}–$${hex(i * 0x2000 + 0x1fff, 4)}${t(" → 物理 $")}${hex((e & 0x7f) * 0x2000, 5)}${e & 0x80 ? t("（書込禁止）") : ""}">${hex(e & 0x7f, 2)}</div>`;
+      const e = m.maps[tk * 8 + i];
+      h += `<div class="${m.enabled && m.task === tk ? "cur" : ""} ${e & 0x80 ? "wp" : ""}${t("\" title=\"論理 $")}${hex(i * 0x2000, 4)}–$${hex(i * 0x2000 + 0x1fff, 4)}${t(" → 物理 $")}${hex((e & 0x7f) * 0x2000, 5)}${e & 0x80 ? t("（書込禁止）") : ""}">${hex(e & 0x7f, 2)}</div>`;
     }
   }
   $("mmu").innerHTML = h;
 }
 
 // ---------- breakpoints ----------
+// The condition, hit count and log of a breakpoint, as shown in the list.
+function condText(c) {
+  if (!c) return "";
+  const parts = [];
+  if (c.cond) parts.push(`if ${c.cond}`);
+  if (c.hits) parts.push(`${t("回数")} ${c.hits}`);
+  if (c.log) parts.push(`${t("ログ")} "${c.log}"`);
+  if (!parts.length) return "";
+  return ` <span class="cond" title="${t("条件が成り立った回数")}: ${c.count}">[${esc(parts.join(", "))}] ×${c.count}</span>`;
+}
+let bpEdit = null; // the breakpoint being edited: {addr} or {id}
 function renderBps() {
-  const plain = st.breakpoints.map((a) => `<div class="item">● $${hex(a, AW())}<button data-a="${a}">×</button></div>`);
+  const conds = new Map((st.bpConds || []).map((c) => [c.addr, c]));
+  const icon = (c) => c && c.log ? "◆" : "●";
+  const plain = st.breakpoints.map((a) => `<div class="item">${icon(conds.get(a))} $${hex(a, AW())}${condText(conds.get(a))}<span class="grow"></span><button data-ea="${a}" title="${t("条件を編集")}">✎</button><button data-a="${a}">×</button></div>`);
   // Symbolic breakpoints follow their module; unresolved ones wait for it to load.
-  const sym = (st.symBreakpoints || []).map((b) => `<div class="item ${b.resolved ? "" : "mute"}" title="${b.owner ? t("エディタ(DAP)から設定") : ""}">${b.resolved ? "●" : "○"} ${esc(b.text)}` +
-    `<span class="mute mono">${b.addrs.map((a) => " $" + hex(a, AW())).join("") || (b.resolved ? t(" 別空間") : t(" 未ロード"))}</span>${b.owner ? "" : `<button data-s="${b.id}">×</button>`}</div>`);
+  const sym = (st.symBreakpoints || []).map((b) => `<div class="item ${b.resolved ? "" : "mute"}" title="${b.owner ? t("エディタ(DAP)から設定") : ""}">${b.resolved ? icon(b) : "○"} ${esc(b.text)}` +
+    `<span class="mute mono">${b.addrs.map((a) => " $" + hex(a, AW())).join("") || (b.resolved ? t(" 別空間") : t(" 未ロード"))}</span>${condText(b)}<span class="grow"></span>${b.owner ? "" : `<button data-es="${b.id}" title="${t("条件を編集")}">✎</button><button data-s="${b.id}">×</button>`}</div>`);
+  $("bpLogList").innerHTML = (st.bpLog || []).map((l) => `<div>${esc(l.text)}</div>`).join("");
   $("bpList").innerHTML = plain.length + sym.length ? plain.concat(sym).join("") : t('<span class="mute">なし</span>');
   $("bpList").querySelectorAll("button[data-a]").forEach((b) => b.onclick = async () => { await api(`bp?op=del&addr=${hex(+b.dataset.a, AW())}`, ""); poll(true); });
   $("bpList").querySelectorAll("button[data-s]").forEach((b) => b.onclick = async () => { await api(`bp?symdel=${b.dataset.s}`, ""); poll(true); });
+  const edit = (key, c, label) => {
+    bpEdit = key;
+    $("bpAddr").value = label;
+    $("bpAddr").disabled = true;
+    $("bpCond").value = c?.cond || "";
+    $("bpHits").value = c?.hits || "";
+    $("bpLogMsg").value = c?.log || "";
+    $("bpAdd").textContent = t("更新");
+    $("bpEditCancel").classList.remove("hide");
+    $("bpCond").focus();
+  };
+  $("bpList").querySelectorAll("button[data-ea]").forEach((b) => b.onclick = () => { const a = +b.dataset.ea; edit({ addr: a }, conds.get(a), "$" + hex(a, AW())); });
+  $("bpList").querySelectorAll("button[data-es]").forEach((b) => b.onclick = () => { const x = st.symBreakpoints.find((y) => y.id === +b.dataset.es); edit({ id: x.id }, x, x.text); });
   $("wList").innerHTML = st.watches.length ? st.watches.map((w, i) => `<div class="item">${{ r: t("読"), w: t("書"), rw: t("読書") }[w.kind]} $${hex(w.start, AW())}${w.end > w.start ? "–$" + hex(w.end, AW()) : ""}<button data-i="${i}">×</button></div>`).join("") : t('<span class="mute">なし</span>');
   $("wList").querySelectorAll("button").forEach((b) => b.onclick = async () => { await api(`watch?op=del&index=${b.dataset.i}`, ""); poll(true); });
 }
+function bpEditEnd() {
+  bpEdit = null;
+  $("bpAddr").disabled = false;
+  for (const k of ["bpAddr", "bpCond", "bpHits", "bpLogMsg"]) $(k).value = "";
+  $("bpAdd").textContent = t("追加");
+  $("bpEditCancel").classList.add("hide");
+}
+$("bpEditCancel").onclick = bpEditEnd;
 $("bpAdd").onclick = async () => {
   const v = $("bpAddr").value.trim();
+  const c = `&cond=${encodeURIComponent($("bpCond").value)}&hits=${encodeURIComponent($("bpHits").value)}&log=${encodeURIComponent($("bpLogMsg").value)}`;
+  let q;
+  if (bpEdit) q = bpEdit.id !== undefined ? `bp?id=${bpEdit.id}${c}` : `bp?addr=${hex(bpEdit.addr, AW())}${c}`;
+  else if (!v) return;
   // Hex addresses stay plain breakpoints; names and FILE:LINE follow the symbols.
-  const q = /^(\$|0x)?[0-9a-f]{1,6}$/i.test(v) ? `bp?addr=${encodeURIComponent(v)}` : `bp?sym=${encodeURIComponent(v)}`;
-  await api(q, ""); $("bpAddr").value = ""; poll(true);
+  else q = /^(\$|0x)?[0-9a-f]{1,6}$/i.test(v) ? `bp?addr=${encodeURIComponent(v)}${c}` : `bp?sym=${encodeURIComponent(v)}${c}`;
+  const r = await api(q, "");
+  $("bpErr").textContent = r.error ? t("条件のエラー: ") + r.error : "";
+  if (!r.error) bpEditEnd();
+  poll(true);
 };
+for (const k of ["bpCond", "bpHits", "bpLogMsg"]) $(k).onkeydown = (e) => { if (e.key === "Enter") $("bpAdd").onclick(); };
 $("bpAddr").onkeydown = (e) => { if (e.key === "Enter") $("bpAdd").onclick(); };
 async function renderSymbols() {
   const d = await api("symbols");
-  $("symList").innerHTML = d.tables.length ? d.tables.map((t) => `<div class="item" title="${esc(t.path)}"><span class="mono">${esc(t.path.split("/").pop())}</span>` +
-    `<span class="mute">${t.kind} ${t.symbols}${t("シンボル ")}${t.lines}${t("行")}${t.module ? `${t(" / モジュール ")}${esc(t.module)}${t.placed ? "" : t("（未ロード）")}` : ""}</span></div>`).join("") : t('<span class="mute">なし</span>');
+  $("symList").innerHTML = d.tables.length ? d.tables.map((tb) => `<div class="item" title="${esc(tb.path)}"><span class="mono">${esc(tb.path.split("/").pop())}</span>` +
+    `<span class="mute">${tb.kind} ${tb.symbols}${t("シンボル ")}${tb.lines}${t("行")}${tb.module ? `${t(" / モジュール ")}${esc(tb.module)}${tb.placed ? "" : t("（未ロード）")}` : ""}</span></div>`).join("") : t('<span class="mute">なし</span>');
 }
 $("symLoad").onclick = async () => {
   const r = await fetch(`/api/symbols?path=${encodeURIComponent($("symPath").value.trim())}`, { method: "POST" });
@@ -775,10 +872,22 @@ $("bpClear").onclick = async () => { await api("bp?op=clear", ""); poll(true); }
 $("wAdd").onclick = async () => { await api(`watch?addr=${encodeURIComponent($("wAddr").value)}&len=${$("wLen").value}&kind=${$("wKind").value}`, ""); poll(true); };
 
 // ---------- disassembly ----------
+// The disassembly window: its first address (when not following PC), how
+// many instructions to start before it (for scrolling up), and where jumps
+// to branch targets came from.
+let disLines = [], disBack = 0, disHistory = [];
+// Tops passed while scrolling down, so scrolling up returns exactly there
+// (going back from an address has to guess where instructions start).
+let disTops = [];
+const DIS_N = 48;
 async function renderDis() {
   const follow = $("follow").checked;
   const addr = follow || viewAddr === null ? st.regs.pc : viewAddr;
-  const d = await api(`disasm?addr=${hex(addr, AW())}&back=${follow ? 8 : 0}&n=48`);
+  const back = follow ? 8 : disBack;
+  const d = await api(`disasm?addr=${hex(addr, AW())}&back=${back}&n=${DIS_N}`);
+  disLines = d.lines;
+  if (!follow && d.lines.length) { viewAddr = d.lines[0].addr; disBack = 0; }
+  $("disBack").disabled = !disHistory.length;
   $("dis").innerHTML = d.lines.map((l) => {
     const os9 = l.svc;
     const title = os9 ? (services[l.text.split(" ")[1]]?.desc || "") + (l.note ? "\n" + l.note : "") : "";
@@ -786,19 +895,80 @@ async function renderDis() {
     const src = l.src ? `<tr class="src"><td></td><td colspan="4">${esc(l.src.file.split("/").pop())}:${l.src.line}  ${esc(l.src.text.trim())}</td></tr>` : "";
     const lbl = l.label ? `<tr class="lbl"><td></td><td colspan="4">${esc(l.label)}:</td></tr>` : "";
     return lbl + src + `<tr class="${l.addr === st.regs.pc ? "pc" : ""} ${l.bp ? "bp" : ""} ${os9 ? "os9" : ""}" data-a="${l.addr}" title="${esc(title)}">` +
-      `<td class="g"></td><td>${hex(l.addr, AW())}</td><td class="b">${l.bytes}</td><td class="t">${esc(l.text)}${l.tsym ? ` <span class="sym">&lt;${esc(l.tsym)}&gt;</span>` : ""}</td>` +
+      `<td class="g"></td><td>${hex(l.addr, AW())}</td><td class="b">${l.bytes}</td><td class="t">${esc(l.text)}${l.tsym ? ` <span class="sym">&lt;${esc(l.tsym)}&gt;</span>` : ""}${l.target !== null && l.target !== undefined ? `<span class="jump" data-t="${l.target}" title="${t("分岐先へ移動")} $${hex(l.target, AW())}">→</span>` : ""}</td>` +
       `<td class="mute">${l.phys >= 0 ? (is68k() ? "RAM" : t("物理 ") + hex(l.phys, 5)) : (is68k() ? "I/O" : "ROM/IO")}</td></tr>`;
   }).join("");
   $("dis").querySelectorAll("tr[data-a]").forEach((tr) => {
     tr.querySelector(".g").onclick = async () => { await api(`bp?op=toggle&addr=${hex(+tr.dataset.a, AW())}`, ""); poll(true); };
     tr.ondblclick = () => act(`runto?addr=${hex(+tr.dataset.a, AW())}`);
   });
+  $("dis").querySelectorAll(".jump").forEach((j) => {
+    j.onclick = (e) => { e.stopPropagation(); disJump(+j.dataset.t); };
+    j.ondblclick = (e) => e.stopPropagation();
+  });
 }
+// Show the window from another address (follow PC off), keeping where we were.
+function disJump(a) {
+  disHistory.push(disLines.length ? disLines[0].addr : st.regs.pc);
+  if (disHistory.length > 50) disHistory.shift();
+  viewAddr = a; disBack = 0; disTops = []; $("follow").checked = false;
+  renderDis();
+  $("disScroll").scrollTop = 0;
+}
+// Move by n instructions (negative: earlier).
+function disScroll(n) {
+  if (!disLines.length) return;
+  $("follow").checked = false;
+  if (n > 0) {
+    disTops.push(disLines.slice(0, Math.min(n, disLines.length - 1)).map((l) => l.addr));
+    viewAddr = disLines[Math.min(n, disLines.length - 1)].addr; disBack = 0;
+  } else {
+    // Retrace the way down when possible.
+    let need = -n, top = disLines[0].addr;
+    while (need > 0 && disTops.length) {
+      const seg = disTops[disTops.length - 1];
+      const take = Math.min(need, seg.length);
+      top = seg[seg.length - take];
+      if (take === seg.length) disTops.pop(); else seg.length -= take;
+      need -= take;
+    }
+    viewAddr = top; disBack = need;
+  }
+  return renderDis();
+}
+$("follow").onchange = () => { disBack = 0; disTops = []; renderDis(); };
+$("disBack").onclick = () => {
+  if (!disHistory.length) return;
+  viewAddr = disHistory.pop(); disBack = 0; disTops = []; $("follow").checked = false;
+  renderDis();
+};
+$("disUp").onclick = () => disScroll(-4);
+$("disDown").onclick = () => disScroll(4);
+$("disPgUp").onclick = () => disScroll(-(DIS_N - 8));
+$("disPgDn").onclick = () => disScroll(DIS_N - 8);
+// At the ends of the panel the wheel reads earlier or later instructions.
+let disWheelAt = 0;
+$("disScroll").addEventListener("wheel", (e) => {
+  const el = $("disScroll");
+  const up = e.deltaY < 0;
+  const atTop = el.scrollTop <= 0, atBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 1;
+  if ((up && !atTop) || (!up && !atBottom)) return;
+  e.preventDefault();
+  const now = Date.now();
+  if (now - disWheelAt < 120) return;
+  disWheelAt = now;
+  disScroll(up ? -4 : 4);
+}, { passive: false });
+$("disScroll").onkeydown = (e) => {
+  const k = { ArrowUp: -1, ArrowDown: 1, PageUp: -(DIS_N - 8), PageDown: DIS_N - 8 }[e.key];
+  if (k) { e.preventDefault(); disScroll(k); }
+  else if (e.key === "ArrowLeft" && e.altKey) { e.preventDefault(); $("disBack").onclick(); }
+};
 $("disGo").onclick = async () => {
   // Accepts a hex address or a symbol name.
   const r = await fetch(`/api/resolve?expr=${encodeURIComponent($("disAddr").value)}`);
   const j = await r.json();
-  if (j.addr !== undefined) { viewAddr = j.addr; $("follow").checked = false; renderDis(); }
+  if (j.addr !== undefined) disJump(j.addr);
 };
 $("disAddr").onkeydown = (e) => { if (e.key === "Enter") $("disGo").onclick(); };
 
@@ -1640,7 +1810,22 @@ function renderHeader() {
   $("bRun").disabled = st.running;
   $("bPause").disabled = !st.running;
   for (const b of ["bStep", "bOver", "bOut"]) $(b).disabled = st.running;
+  $("sysName").textContent = [st.cpu, st.machine, st.osName].filter((x) => x).join(" · ");
+  renderSpeeds();
   if (document.activeElement !== $("speed")) $("speed").value = String(st.speed);
+}
+// Speed choices around the CPU's nominal clock (6809 1 MHz, 68000 10 MHz).
+let speedsFor = "";
+function renderSpeeds() {
+  const c = st.clock || 1000000;
+  const key = c + LANG;
+  if (speedsFor === key) return;
+  speedsFor = key;
+  const hz = (v) => v >= 1e6 ? v / 1e6 + " MHz" : v >= 1e3 ? v / 1e3 + " kHz" : v + " Hz";
+  const opts = [[0, t("最大")]];
+  for (const v of [c * 10, c * 2, c, c / 10, c / 100, c / 1000]) opts.push([v, hz(v) + (v === c ? t("（実機相当）") : "")]);
+  if (st.speed && !opts.some(([v]) => v === st.speed)) opts.push([st.speed, hz(st.speed)]);
+  $("speed").innerHTML = opts.map(([v, n]) => `<option value="${v}">${esc(n)}</option>`).join("");
 }
 async function refreshAll() {
   if (!st) return;
@@ -1651,6 +1836,7 @@ async function refreshAll() {
   if (tab === "dbg") await Promise.all([renderDis(), renderMem(), renderTrace(), renderStack(), renderSymbols(), renderVars()]);
   else await renderOs9();
 }
+let bpLogKey = "";
 let busy = false, lastSlow = 0, shownCycles = -1, baseRegs = null;
 async function poll(force) {
   if (busy && !force) return;
@@ -1667,6 +1853,9 @@ async function poll(force) {
     } else if (st.running) {
       renderHeader();
       renderRegs();
+      // Logpoints and hit counts change while running.
+      const logKey = JSON.stringify([st.bpLog?.[0]?.n, (st.bpConds || []).map((c) => c.count), (st.symBreakpoints || []).map((b) => b.count)]);
+      if (logKey !== bpLogKey) { bpLogKey = logKey; renderBps(); }
       const now = Date.now();
       if (tab === "os9" && now - lastSlow > 700) { lastSlow = now; await renderOs9(); }
       else if (tab === "dbg" && now - lastSlow > 1000) { lastSlow = now; await Promise.all([renderDis(), renderTrace()]); }
@@ -1675,6 +1864,7 @@ async function poll(force) {
     }
     await pollConsole();
   } catch (e) {
+    console.error(e);
     $("stopText").textContent = t("接続できません");
     $("dot").className = "dot";
   } finally {

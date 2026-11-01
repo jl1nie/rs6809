@@ -8,7 +8,7 @@ use super::frames::VarRef;
 use super::json::{Json, base64, obj, unbase64};
 use super::symbols::Target as BpTarget;
 use super::target::Target;
-use super::{BpSpec, Goal, Ice, Inbox, Stop};
+use super::{BpCond, BpSpec, Goal, Ice, Inbox, Stop};
 use std::collections::HashMap;
 use std::io::{self, BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
@@ -97,6 +97,10 @@ impl Hub {
         if !self.sessions.is_empty() {
             self.output.extend_from_slice(bytes);
         }
+    }
+    /// A logpoint's message (or a condition error) for the debug console.
+    pub fn log(&mut self, text: &str) {
+        self.event(None, "output", obj([("category", "console".into()), ("output", text.into())]));
     }
     fn flush_output_into_pending(&mut self) {
         if self.output.is_empty() {
@@ -308,6 +312,9 @@ impl<T: Target> Ice<T> {
                 ("supportsSteppingGranularity", true.into()),
                 ("supportsSetVariable", true.into()),
                 ("supportsEvaluateForHovers", true.into()),
+                ("supportsConditionalBreakpoints", true.into()),
+                ("supportsHitConditionalBreakpoints", true.into()),
+                ("supportsLogPoints", true.into()),
                 ("supportsLoadedSourcesRequest", true.into()),
                 ("supportsExceptionFilterOptions", true.into()),
                 ("supportsRestartRequest", true.into()),
@@ -388,19 +395,18 @@ impl<T: Target> Ice<T> {
                     .or_else(|| source.get("name").str())
                     .ok_or("source")?
                     .to_string();
-                let lines: Vec<u32> = if args.get("breakpoints").arr().is_empty() {
+                let lines: Vec<(u32, &Json)> = if args.get("breakpoints").arr().is_empty() {
                     args.get("lines")
                         .arr()
                         .iter()
                         .filter_map(Json::int)
-                        .map(|l| l as u32)
+                        .map(|l| (l as u32, &Json::Null))
                         .collect()
                 } else {
                     args.get("breakpoints")
                         .arr()
                         .iter()
-                        .filter_map(|b| b.get("line").int())
-                        .map(|l| l as u32)
+                        .filter_map(|b| b.get("line").int().map(|l| (l as u32, b)))
                         .collect()
                 };
                 self.remove_sym_bps(|b| {
@@ -408,7 +414,7 @@ impl<T: Target> Ice<T> {
                         && matches!(&b.spec, BpSpec::Line { file: f, .. } if *f == file))
                 });
                 let mut out = Vec::new();
-                for line in lines {
+                for (line, b) in lines {
                     let bid = self.add_sym_bp(
                         id,
                         BpSpec::Line {
@@ -416,21 +422,17 @@ impl<T: Target> Ice<T> {
                             line,
                         },
                     );
-                    out.push(self.dap_bp(bid, Some(line)));
+                    out.push(self.dap_cond(bid, b, Some(line)));
                 }
                 Ok(obj([("breakpoints", Json::Arr(out))]))
             }
             "setFunctionBreakpoints" => {
                 self.remove_sym_bps(|b| !(b.owner == id && matches!(b.spec, BpSpec::Symbol(_))));
                 let mut out = Vec::new();
-                for name in args
-                    .get("breakpoints")
-                    .arr()
-                    .iter()
-                    .filter_map(|b| b.get("name").str())
-                {
+                for b in args.get("breakpoints").arr() {
+                    let Some(name) = b.get("name").str() else { continue };
                     let bid = self.add_sym_bp(id, BpSpec::Symbol(name.trim().to_string()));
-                    out.push(self.dap_bp(bid, None));
+                    out.push(self.dap_cond(bid, b, None));
                 }
                 Ok(obj([("breakpoints", Json::Arr(out))]))
             }
@@ -443,7 +445,7 @@ impl<T: Target> Ice<T> {
                     };
                     let a = a.wrapping_add(b.get("offset").int().unwrap_or(0) as u32);
                     let bid = self.add_sym_bp(id, BpSpec::Addr(a));
-                    out.push(self.dap_bp(bid, None));
+                    out.push(self.dap_cond(bid, b, None));
                 }
                 Ok(obj([("breakpoints", Json::Arr(out))]))
             }
@@ -953,6 +955,26 @@ impl<T: Target> Ice<T> {
         out
     }
 
+    /// Apply a DAP breakpoint's condition, hitCondition and logMessage.
+    fn dap_cond(&mut self, id: u32, b: &Json, requested: Option<u32>) -> Json {
+        let f = |k: &str| b.get(k).str().unwrap_or("").to_string();
+        match BpCond::new(&f("condition"), &f("hitCondition"), &f("logMessage")) {
+            Ok(c) => {
+                self.set_sym_cond(id, c);
+                self.dap_bp(id, requested)
+            }
+            Err(e) => {
+                // A breakpoint whose condition is wrong is not placed.
+                let mut j = self.dap_bp(id, requested);
+                self.remove_sym_bps(|b| b.id != id);
+                if let Json::Obj(m) = &mut j {
+                    m.insert("verified".into(), false.into());
+                    m.insert("message".into(), e.into());
+                }
+                j
+            }
+        }
+    }
     fn dap_bp(&self, id: u32, requested: Option<u32>) -> Json {
         let Some(b) = self.sym_bps.iter().find(|b| b.id == id) else {
             return obj([("verified", false.into())]);

@@ -7,6 +7,7 @@ pub mod cdecl;
 pub mod dap;
 pub mod debuginfo;
 pub mod disasm;
+pub mod expr;
 pub mod frames;
 pub mod http;
 pub mod json;
@@ -114,6 +115,69 @@ pub struct SymBp {
     /// The line actually used (the next line with code).
     pub line: Option<u32>,
     pub targets: Vec<BpTarget>,
+    pub cond: BpCond,
+}
+/// When a breakpoint stops: a condition, a hit count, and a log message
+/// (a logpoint logs and goes on). `count` is the number of times reached
+/// with the condition true.
+#[derive(Debug, Clone, Default)]
+pub struct BpCond {
+    pub cond: Option<(String, expr::Expr)>,
+    pub hits: Option<(String, expr::Hits)>,
+    pub log: Option<String>,
+    pub count: u64,
+}
+impl BpCond {
+    /// From the text fields (empty ones are not set).
+    pub fn new(cond: &str, hits: &str, log: &str) -> Result<Self, String> {
+        let cond = cond.trim();
+        let hits = hits.trim();
+        Ok(Self {
+            cond: if cond.is_empty() { None } else { Some((cond.to_string(), expr::Expr::parse(cond)?)) },
+            hits: if hits.is_empty() { None } else { Some((hits.to_string(), expr::Hits::parse(hits)?)) },
+            log: Some(log.to_string()).filter(|l| !l.is_empty()),
+            count: 0,
+        })
+    }
+    pub fn is_plain(&self) -> bool {
+        self.cond.is_none() && self.hits.is_none() && self.log.is_none()
+    }
+    fn json(&self) -> String {
+        format!(
+            "\"cond\":{},\"hits\":{},\"log\":{},\"count\":{}",
+            json_str(self.cond.as_ref().map_or("", |c| &c.0)),
+            json_str(self.hits.as_ref().map_or("", |c| &c.0)),
+            json_str(self.log.as_deref().unwrap_or("")),
+            self.count
+        )
+    }
+}
+/// Registers, memory, symbols and the OS process, for conditions.
+struct CondEnv<'a, T: Target> {
+    ice: &'a Ice<T>,
+}
+impl<T: Target> expr::Env for CondEnv<'_, T> {
+    fn reg(&self, name: &str) -> Option<i64> {
+        if name.eq_ignore_ascii_case("pid") {
+            return self.ice.current_proc().map(i64::from);
+        }
+        self.ice.t.reg(name).map(i64::from)
+    }
+    fn sym(&self, name: &str) -> Option<i64> {
+        let m = self.ice.t.mem();
+        self.ice.symbols.symbol_targets(name).into_iter().find_map(|t| self.ice.symbols.logical(m, t)).map(i64::from)
+    }
+    fn mem(&self, addr: u32, size: u8) -> i64 {
+        let m = self.ice.t.mem();
+        (0..u32::from(size)).fold(0, |v, i| v << 8 | i64::from(m.peek(addr.wrapping_add(i))))
+    }
+}
+/// What a reached breakpoint does.
+enum BpAction {
+    Go,
+    Stop,
+    Log(String),
+    Error(String),
 }
 impl SymBp {
     pub fn text(&self) -> String {
@@ -238,6 +302,11 @@ pub struct Ice<T: Target = Mc6809> {
     /// The CPU and machine (for the 6809: `t.cpu`, `t.machine`).
     pub t: T,
     pub breakpoints: BTreeSet<u32>,
+    /// Conditions of the address breakpoints (`breakpoints`) that have one.
+    pub bp_conds: std::collections::BTreeMap<u32, BpCond>,
+    /// Logpoint output and condition errors, numbered.
+    bp_log: VecDeque<(u64, String)>,
+    bp_log_seq: u64,
     bp_bits: Vec<u64>,
     pub watches: Vec<Watch>,
     pub break_calls: BTreeSet<u8>,
@@ -316,6 +385,9 @@ impl<T: Target> Ice<T> {
             os_slot: None,
             t,
             breakpoints: BTreeSet::new(),
+            bp_conds: Default::default(),
+            bp_log: VecDeque::new(),
+            bp_log_seq: 0,
             bp_bits: vec![0; bits.div_ceil(64)],
             watches: Vec::new(),
             break_calls: BTreeSet::new(),
@@ -368,6 +440,7 @@ impl<T: Target> Ice<T> {
             self.breakpoints.insert(a);
         } else {
             self.breakpoints.remove(&a);
+            self.bp_conds.remove(&a);
         }
         self.rebuild_bps();
     }
@@ -440,9 +513,97 @@ impl<T: Target> Ice<T> {
             spec,
             line,
             targets,
+            cond: BpCond::default(),
         });
         self.rebuild_bps();
         id
+    }
+    /// Set the condition of a symbolic breakpoint.
+    pub fn set_sym_cond(&mut self, id: u32, cond: BpCond) {
+        if let Some(b) = self.sym_bps.iter_mut().find(|b| b.id == id) {
+            b.cond = cond;
+        }
+    }
+    /// A breakpoint was reached at `pc`: evaluate the conditions of every
+    /// breakpoint there. It stops if any of them says so.
+    fn bp_check(&mut self, pc: u32) -> bool {
+        let phys = self.t.mem().translate(pc);
+        let mut conds: Vec<BpCond> = Vec::new();
+        let mut keys: Vec<Option<u32>> = Vec::new();
+        if self.breakpoints.contains(&pc) {
+            conds.push(self.bp_conds.get(&pc).cloned().unwrap_or_default());
+            keys.push(None);
+        }
+        for b in &self.sym_bps {
+            if b.targets.iter().any(|t| match *t {
+                BpTarget::Logical(a) => a == pc,
+                BpTarget::Phys(p) => Some(p) == phys,
+            }) {
+                conds.push(b.cond.clone());
+                keys.push(Some(b.id));
+            }
+        }
+        if conds.is_empty() {
+            return true;
+        }
+        let mut stop = false;
+        for (c, key) in conds.iter_mut().zip(&keys) {
+            let action = self.bp_action(c);
+            match key {
+                None => {
+                    if let Some(x) = self.bp_conds.get_mut(&pc) {
+                        x.count = c.count;
+                    }
+                }
+                Some(id) => {
+                    if let Some(b) = self.sym_bps.iter_mut().find(|b| b.id == *id) {
+                        b.cond.count = c.count;
+                    }
+                }
+            }
+            match action {
+                BpAction::Go => {}
+                BpAction::Stop => stop = true,
+                BpAction::Log(t) => self.bp_log_line(t),
+                BpAction::Error(e) => {
+                    self.bp_log_line(tr!(format!("${pc:X} 条件のエラー: {e}"), format!("${pc:X} condition error: {e}")));
+                    stop = true;
+                }
+            }
+        }
+        stop
+    }
+    fn bp_action(&self, c: &mut BpCond) -> BpAction {
+        if c.is_plain() {
+            c.count += 1;
+            return BpAction::Stop;
+        }
+        let env = CondEnv { ice: self };
+        if let Some((_, e)) = &c.cond {
+            match e.eval(&env) {
+                Ok(0) => return BpAction::Go,
+                Ok(_) => {}
+                Err(err) => return BpAction::Error(err),
+            }
+        }
+        c.count += 1;
+        if let Some((_, h)) = c.hits
+            && !h.stops(c.count)
+        {
+            return BpAction::Go;
+        }
+        match &c.log {
+            Some(m) => BpAction::Log(expr::log_text(m, &env)),
+            None => BpAction::Stop,
+        }
+    }
+    fn bp_log_line(&mut self, text: String) {
+        self.dap.log(&format!("{text}\n"));
+        self.bp_log.push_back((self.bp_log_seq, text));
+        self.bp_log_seq += 1;
+        while self.bp_log.len() > 200 {
+            self.bp_log.pop_front();
+        }
     }
     pub fn remove_sym_bps(&mut self, keep: impl Fn(&SymBp) -> bool) {
         self.sym_bps.retain(keep);
@@ -550,7 +711,7 @@ impl<T: Target> Ice<T> {
         let executes = self.t.executes();
         let pc = self.t.pc();
         let skip = std::mem::take(&mut self.skip_checks);
-        if !skip && (self.bp_at(pc) || self.phys_bp_at(pc)) {
+        if !skip && (self.bp_at(pc) || self.phys_bp_at(pc)) && self.bp_check(pc) {
             return Some(Stop::Breakpoint(pc));
         }
         let tracing = self.trace_os9 && self.os_ready;
@@ -974,6 +1135,15 @@ impl<T: Target> Ice<T> {
                 ok()
             }
             "/api/bp" => {
+                // Condition, hit count and log message (cond=, hits=, log=).
+                let cond = if p("cond").is_some() || p("hits").is_some() || p("log").is_some() {
+                    match BpCond::new(p("cond").unwrap_or(""), p("hits").unwrap_or(""), p("log").unwrap_or("")) {
+                        Ok(c) => Some(c),
+                        Err(e) => return bad(&e),
+                    }
+                } else {
+                    None
+                };
                 if let Some(a) = p("addr").and_then(parse_addr) {
                     let on = match p("op") {
                         Some("del") => false,
@@ -981,6 +1151,18 @@ impl<T: Target> Ice<T> {
                         _ => true,
                     };
                     self.set_bp(a, on);
+                    let a = a & self.amask();
+                    if on && let Some(c) = cond.clone() {
+                        if c.is_plain() {
+                            self.bp_conds.remove(&a);
+                        } else {
+                            self.bp_conds.insert(a, c);
+                        }
+                    }
+                }
+                // Change the condition of a symbolic breakpoint.
+                if let (Some(id), Some(c)) = (p("id").and_then(parse_num), cond.clone()) {
+                    self.set_sym_cond(id, c);
                 }
                 // A symbol or FILE:LINE, placed wherever the module is loaded.
                 if let Some(t) = p("sym").map(str::trim).filter(|t| !t.is_empty()) {
@@ -991,13 +1173,17 @@ impl<T: Target> Ice<T> {
                         },
                         _ => BpSpec::Symbol(t.to_string()),
                     };
-                    self.add_sym_bp(0, spec);
+                    let id = self.add_sym_bp(0, spec);
+                    if let Some(c) = cond {
+                        self.set_sym_cond(id, c);
+                    }
                 }
                 if let Some(id) = p("symdel").and_then(parse_num) {
                     self.remove_sym_bps(|b| b.id != id);
                 }
                 if p("op") == Some("clear") {
                     self.breakpoints.clear();
+                    self.bp_conds.clear();
                     self.remove_sym_bps(|b| b.owner != 0);
                 }
                 http::Response::json(self.state_json())
@@ -1191,7 +1377,32 @@ impl<T: Target> Ice<T> {
         if back == 0 {
             return addr;
         }
-        // Try start points and keep one whose decode lands exactly on addr.
+        // Instructions that ran (in the trace) are certain starts: decode on
+        // from the earliest one in range that lands exactly on addr.
+        let span = back * 4 * T::MAX_INSN as u32 / 2;
+        let mut known: Vec<u32> = self
+            .trace
+            .iter()
+            .map(|e| T::snap_pc(&e.regs))
+            .filter(|&p| p != addr && addr.wrapping_sub(p) & mask <= span)
+            .collect();
+        // Labels usually start code too.
+        let m = self.t.mem();
+        known.extend((1..=span).map(|d| addr.wrapping_sub(d) & mask).filter(|&a| self.symbols.exact(m, a).is_some()));
+        known.sort_by_key(|&p| std::cmp::Reverse(addr.wrapping_sub(p) & mask));
+        known.dedup();
+        for k in known {
+            let mut starts = vec![k];
+            let mut a = k;
+            while a != addr && addr.wrapping_sub(a) & mask <= span {
+                a = a.wrapping_add(self.dis(a).len.max(1)) & mask;
+                starts.push(a);
+            }
+            if a == addr && starts.len() > back as usize {
+                return starts[starts.len() - 1 - back as usize];
+            }
+        }
+        // Otherwise try start points and keep one whose decode lands exactly on addr.
         for dist in (back..=back * 4).rev() {
             let mut a = addr.wrapping_sub(dist) & mask;
             let mut count = 0;
@@ -1227,9 +1438,12 @@ impl<T: Target> Ice<T> {
             .unwrap_or_default();
         let _ = write!(
             o,
-            "{{\"lang\":\"{}\",\"cpu\":\"{}\",\"running\":{},\"stop\":{},\"cycles\":{},\"speed\":{},\"wait\":{},\"regs\":{},",
+            "{{\"lang\":\"{}\",\"cpu\":\"{}\",\"machine\":{},\"clock\":{},\"osName\":{},\"running\":{},\"stop\":{},\"cycles\":{},\"speed\":{},\"wait\":{},\"regs\":{},",
             lang::code(),
             T::CPU,
+            json_str(self.t.machine_name()),
+            self.t.clock_hz(),
+            json_str(self.os().and_then(|os| os.info().get("name").str().map(str::to_string)).as_deref().unwrap_or("")),
             self.running,
             json_str(&stop),
             self.t.cycles(),
@@ -1250,16 +1464,26 @@ impl<T: Target> Ice<T> {
                     .map(|a| a.to_string())
                     .collect();
                 format!(
-                    "{{\"id\":{},\"owner\":{},\"text\":{},\"resolved\":{},\"addrs\":[{}]}}",
+                    "{{\"id\":{},\"owner\":{},\"text\":{},\"resolved\":{},\"addrs\":[{}],{}}}",
                     b.id,
                     b.owner,
                     json_str(&b.text()),
                     b.targets.len(),
-                    at.join(",")
+                    at.join(","),
+                    b.cond.json()
                 )
             })
             .collect();
         let _ = write!(o, "\"symBreakpoints\":[{}],\"symbols\":{},", sym_bps.join(","), self.symbols.tables.len());
+        let conds: Vec<String> = self.bp_conds.iter().map(|(a, c)| format!("{{\"addr\":{a},{}}}", c.json())).collect();
+        let log: Vec<String> = self
+            .bp_log
+            .iter()
+            .rev()
+            .take(50)
+            .map(|(n, t)| format!("{{\"n\":{n},\"text\":{}}}", json_str(t)))
+            .collect();
+        let _ = write!(o, "\"bpConds\":[{}],\"bpLog\":[{}],", conds.join(","), log.join(","));
         let ws: Vec<String> = self
             .watches
             .iter()
@@ -1353,7 +1577,7 @@ impl<T: Target> Ice<T> {
                 _ => "null".into(),
             };
             items.push(format!(
-                "{{\"addr\":{},\"bytes\":\"{}\",\"text\":{},\"bp\":{},\"phys\":{},\"note\":{},\"label\":{},\"tsym\":{},\"src\":{},\"svc\":{}}}",
+                "{{\"addr\":{},\"bytes\":\"{}\",\"text\":{},\"bp\":{},\"phys\":{},\"note\":{},\"label\":{},\"tsym\":{},\"target\":{},\"src\":{},\"svc\":{}}}",
                 a,
                 bytes.join(" "),
                 json_str(&l.text),
@@ -1362,6 +1586,7 @@ impl<T: Target> Ice<T> {
                 json_str(explain),
                 label,
                 target.map_or("null".into(), |t| json_str(&t)),
+                l.target.filter(|_| !l.svc && matches!(l.flow, target::Flow::Call | target::Flow::Jump | target::Flow::Branch)).map_or("null".into(), |t| t.to_string()),
                 src,
                 l.svc
             ));

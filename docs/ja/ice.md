@@ -66,6 +66,8 @@ sh examples/nitros9-ice.sh 127.0.0.1:8080  # 待ち受けアドレスを変更
 | ステップアウト | Shift+F11。`RTS`・`RTI`・`PULS PC` でSが現在より上に戻った時点で停止 |
 | その行まで実行 | 逆アセンブルの行をダブルクリック |
 | ブレークポイント | PC一致。64KBのビット表で判定し、再開時は現在PCを1回だけ飛ばします |
+| 条件・回数・ログポイント | どのブレークポイントにも、条件（`A==5 && [X].w!=0`）、回数（`N` はN回目以降、`=N` はN回目だけ、`%N` はN回ごと。条件が成り立った回数で数える）、ログ（`A={A} X={X}`。書くと止まらずにログを出す）を付けられます。ブレークポイントの入力欄の下の欄か、一覧の ✎ で設定します。DAPの `condition`・`hitCondition`・`logMessage` も同じです。条件はPCがその番地に来たときだけ評価します。評価できない条件は止まり、ログに理由を出します |
+| 逆アセンブルの移動 | ▲▼で4命令、⇞⇟で1ページ（欄を選んで↑↓・PageUp・PageDown、端でのホイールでも）。分岐・呼び出しの → で分岐先へ、← で戻ります。上へ戻るときは下りてきた道をたどり、それ以外はトレースとラベルから命令の先頭を求めます |
 | ウォッチポイント | CPU論理アドレスの範囲に対する読み・書き・両方。該当命令の実行完了後に停止します |
 | レジスタ・メモリ編集 | 停止中にレジスタ値やメモリのバイトをクリックして変更 |
 | メモリ表示 | CPU論理空間、OS-9システム空間、物理RAM先頭64KB |
@@ -377,8 +379,9 @@ P2 F$Wait     → 子3が終了 ステータス0
 | `POST /api/machine/save?path=&disk=1\|0`、`POST /api/machine/load?path=` | 機械の状態のファイル（パスはエミュレータ側。`disk` の既定は、ディスクの書き込みをファイルに残さないとき1） |
 | `POST /api/reg?name=&val=` | レジスタ変更 |
 | `POST /api/bp?addr=&op=add\|del\|toggle\|clear` | ブレークポイント |
+| `POST /api/bp?addr=\|sym=\|id=&cond=&hits=&log=` | 新しいブレークポイントか、既存のもの（`addr`、シンボルは `id`）の条件・回数・ログ。空なら消します。誤った条件は400で断ります。`state` に `bpConds`、`symBreakpoints` の同じ項目（`count` 付き）、`bpLog`（最近のログ）があります |
 | `POST /api/watch?addr=&len=&kind=r\|w\|rw`、`op=del&index=`、`op=clear` | ウォッチポイント |
-| `GET /api/disasm?addr=&n=&back=` | 逆アセンブル（`back` で手前の命令境界から） |
+| `GET /api/disasm?addr=&n=&back=` | 逆アセンブル（`back` で手前の命令境界から）。分岐と呼び出しには `target` |
 | `GET /api/mem?addr=&len=&space=cpu\|sys\|phys\|pidN`、`POST ...&val=16進` | メモリ |
 | `GET /api/trace?n=` | 実行トレース |
 | `GET /api/console?since=`、`POST /api/console`（本文をACIA 1へ） | コンソール |

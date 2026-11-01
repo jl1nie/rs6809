@@ -645,3 +645,48 @@ fn reset_reboots_nitros9() {
     assert_eq!(con.matches("CamelForth").count(), 2, "booted twice: {con}");
     assert!(con.contains("[rs6809: リセット]"));
 }
+
+#[test]
+fn conditional_breakpoints_hit_counts_and_logpoints() {
+    // 1000 LDA #0; 1002 INCA; 1003 BRA $1002
+    let code = [0x86, 0x00, 0x4c, 0x20, 0xfd];
+    let state = |d: &mut Ice| d.command("GET", "/api/state", b"").1;
+
+    // Condition: stops at $1002 only when A is 5.
+    let mut d = ice(&code, 0x1000, |_| ());
+    ok(&mut d, "/api/bp?addr=1002&cond=A%3D%3D5");
+    ok(&mut d, "/api/run");
+    d.run_steps(1000);
+    assert_eq!((d.running, d.t.cpu.pc, d.t.cpu.a), (false, 0x1002, 5));
+    assert!(state(&mut d).contains(r#""cond":"A==5","hits":"","log":"","count":1"#));
+
+    // Hit count: every third time.
+    let mut d = ice(&code, 0x1000, |_| ());
+    ok(&mut d, "/api/bp?addr=1002&hits=%253");
+    ok(&mut d, "/api/run");
+    d.run_steps(1000);
+    assert_eq!((d.running, d.t.cpu.a), (false, 2));
+    ok(&mut d, "/api/run");
+    d.run_steps(1000);
+    assert_eq!((d.running, d.t.cpu.a), (false, 5));
+
+    // Logpoint: logs with the value of A and does not stop.
+    let mut d = ice(&code, 0x1000, |_| ());
+    ok(&mut d, "/api/bp?addr=1002&log=A%3D%7Ba%7D");
+    ok(&mut d, "/api/run");
+    d.run_steps(20);
+    assert!(d.running);
+    let s = state(&mut d);
+    assert!(s.contains(r#""text":"A=$0""#) && s.contains(r#""text":"A=$3""#), "{s}");
+
+    // A condition that cannot be parsed is refused; one that fails to
+    // evaluate stops and says why.
+    let mut d = ice(&code, 0x1000, |_| ());
+    let (status, _) = d.command("POST", "/api/bp?addr=1002&cond=A%3D%3D", b"");
+    assert_eq!(status, 400);
+    ok(&mut d, "/api/bp?sym=$1002&cond=nosuch%3D%3D1");
+    ok(&mut d, "/api/run");
+    d.run_steps(100);
+    assert_eq!((d.running, d.t.cpu.pc), (false, 0x1002));
+    assert!(state(&mut d).contains("nosuch"));
+}
