@@ -6,6 +6,7 @@
 同じ画面でNitrOS-9のシステムコール（プリミティブ）、プロセス、スケジューラ、モジュール、メモリを観察できます。
 外部crateは使わず、標準ライブラリのHTTP・DAPサーバーと1枚のHTML（`src/ice/ui.html`）で構成しています。
 LWASM・Microware RMAのリストとリンクマップを読み込むと、逆アセンブルとスタックにシンボルを付け、Cやアセンブリのソース行単位でブレーク・ステップできます。
+ブレークポイントには条件・回数・ログを付けられ、ウォッチ式は止まるたびに評価し、記録を入れれば逆にステップ・実行できます。
 
 ## 起動
 
@@ -47,6 +48,8 @@ sh examples/nitros9-ice.sh 127.0.0.1:8080  # 待ち受けアドレスを変更
                           ├ osmon.rs    OSの差し替え口（OsMonitor）とシステムコールの記録
                           ├ os9.rs      NitrOS-9の実装（構造の読み取り・説明文）
                           ├ symbols.rs  リスト・マップの読み込み、モジュール位置への配置
+                          ├ expr.rs     ブレークポイントの条件・ログポイント・ウォッチ式の式
+                          ├ lang.rs     メッセージの言語（日本語か英語、tr!）
                           └ dap.rs      DAPの要求処理とイベント（停止・出力）
 ```
 
@@ -197,7 +200,7 @@ rs6809 ... --dap 127.0.0.1:7000
 VS Codeでは `editors/vscode` の最小限の拡張（依存パッケージなし）を使います。
 
 ```sh
-ln -s "$PWD/editors/vscode" ~/.vscode/extensions/rs6809.rs6809-debug-0.2.0   # VS Codeを再起動
+ln -s "$PWD/editors/vscode" ~/.vscode/extensions/rs6809.rs6809-debug-0.3.0   # VS Codeを再起動
 ```
 
 `.vscode/launch.json`：
@@ -225,7 +228,7 @@ ln -s "$PWD/editors/vscode" ~/.vscode/extensions/rs6809.rs6809-debug-0.2.0   # V
   "symbols": ["${workspaceFolder}/examples/cpm68k/bios.lst", "${workspaceFolder}/artifacts/cpm68k/dist/DISK8/CPM15000.MAP"],
   "sourceDirs": ["${workspaceFolder}/examples/cpm68k"] }
 { "type": "rs6809", "request": "attach", "name": "rs6809: FUZIX", "port": 6810,
-  "symbols": ["${workspaceFolder}/artifacts/fuzix68k/fuzix.sym"] }
+  "symbols": ["${workspaceFolder}/artifacts/fuzix68k/fuzix.sym", "${workspaceFolder}/artifacts/fuzix68k/usersyms"] }
 ```
 
 | DAP | 内容 |

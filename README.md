@@ -7,7 +7,7 @@ A Motorola 6809 and 68000 emulator in pure Rust. It uses no external crates, no 
 - **6809**: boots NitrOS-9 Level 1 / BASIC09 and Level 2 on a Multicomp-compatible machine. Level 2 supports several simultaneous users over Telnet, and there is a demo of the C compiler running on the guest.
 - **68000**: a core that implements every instruction, exception and interrupt, verified against the public instruction tests (SingleStepTests, about one million cases).
   On a Tiny68K-compatible machine it runs CP/M-68K 1.3 (including compiling with Alcyon C) and the Unix-like FUZIX 0.5 (two terminals).
-- **ICE**: from a browser debugger and from VS Code (DAP) you can use breakpoints, stepping, source lines and C variables.
+- **ICE**: from a browser debugger and from VS Code (DAP) you can use breakpoints (with conditions, hit counts and logpoints), stepping, stepping back, source lines, C variables and watch expressions.
   The OS monitor follows NitrOS-9, CP/M-68K and FUZIX system calls from call to return, and shows the process table, scheduler and memory with explanations.
   It can also reset the machine and save and load its state.
 
@@ -438,6 +438,11 @@ sh examples/nitros9-level2.sh --ice   # Level 2 (after building the disk)
 
 - **Debugger**: run, stop, step, step over / out, run to line, breakpoints, watchpoints,
   disassembly (in `OS9 F$Fork` form), memory (CPU logical, OS-9 system space, physical), register editing, MMU map, execution trace, speed limit.
+  - Breakpoints take a condition (`A==5 && [X].w!=0`: registers, memory, symbols, `pid`), a hit count (`=3`, `%10`) or a log message (a logpoint: `A={A}`).
+  - The disassembly scrolls by instruction and page, and jumps to branch targets (→) and back (←).
+  - Watch expressions are evaluated at every stop; memory shows bytes, words or longs and finds bytes or a `"string"`.
+  - With "Record" on, "◀ Back" and "◀◀ Reverse" step and run backwards over the last 200,000 instructions (CPU and RAM; devices are not undone).
+  - At full speed, NitrOS-9 waiting for the next tick runs at its nominal clock (every instruction still runs), so an idle guest does not take a whole host core.
 - **OS-9 monitor**: traces every `OS9` system call from call to return, showing arguments, results and cycles taken.
   It shows an explanation of each primitive, the tree of calls made inside the kernel, the scheduler queues and timeline, the process table,
   the module directory and the memory map, and lets you set ICE break conditions such as "stop on a call to F$Fork" or "stop on an error return".
@@ -447,10 +452,11 @@ sh examples/nitros9-level2.sh --ice   # Level 2 (after building the disk)
   and arguments, local variables and globals can be shown and changed according to their type (expanding structs, arrays and pointers, expressions such as `p->next->val`).
 - **CP/M-68K and FUZIX monitors**: show BDOS and BIOS calls, FUZIX system calls such as `fork`, `execve` and `waitpid`, the process table,
   the timeline and memory regions on the same screen ([CP/M-68K](docs/cpm68k.md), [FUZIX/68000](docs/fuzix68k.md)).
+  FUZIX programs carry their own symbols (`usersyms/`, kept at link time), placed on the processes running them: a breakpoint on `listfiles` stops inside `ls`.
 - **Reset and state**: "↺ Reset" returns to the state at startup, and on the 68000 "Save", "Load" and `--load-state` let you resume from a saved state.
 - **Editor integration**: `--dap` provides the Debug Adapter Protocol, so VS Code (`editors/vscode`) and others can drive the same ICE.
 
-The UI language is English by default, and Japanese when the locale (LC_ALL / LC_MESSAGES / LANG) starts with `ja`; `--lang ja|en` overrides it, and the language selector in the header switches it while running.
+The header shows the CPU, machine and OS (`68000 · Tiny68K · FUZIX`). The UI language is English by default, and Japanese when the locale (LC_ALL / LC_MESSAGES / LANG) starts with `ja`; `--lang ja|en` overrides it, and the ⚙ menu (language, theme, console) switches it while running.
 
 For details, internals and the API, see [ICE and OS-9 monitor](docs/ice.md).
 

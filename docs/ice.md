@@ -6,6 +6,7 @@ The emulator has ICE-style debugging built in, driven from a browser GUI and fro
 The same screen shows NitrOS-9 system calls (primitives), processes, the scheduler, modules and memory.
 It uses no external crates: a standard-library HTTP and DAP server plus a single HTML file (`src/ice/ui.html`).
 Loading LWASM and Microware RMA listings and link maps adds symbols to the disassembly and the stack, and lets you break and step by C or assembly source line.
+Breakpoints take conditions, hit counts and log messages; watch expressions are evaluated at every stop; with recording on you can step and run backwards.
 
 ## Starting
 
@@ -48,6 +49,8 @@ The input field below sends one line with a CR. Combined with Telnet mode (`--te
                           ├ osmon.rs    OS plug-in point (OsMonitor) and system call recording
                           ├ os9.rs      NitrOS-9 implementation (reading structures, descriptions)
                           ├ symbols.rs  loading listings and maps, placing them at module locations
+                          ├ expr.rs     expressions for breakpoint conditions, logpoints and watch expressions
+                          ├ lang.rs     the language of messages (Japanese or English, tr!)
                           └ dap.rs      DAP request handling and events (stopped, output)
 ```
 
@@ -198,7 +201,7 @@ Stopping in the browser notifies the editor, and vice versa.
 In VS Code, use the minimal extension in `editors/vscode` (no dependencies).
 
 ```sh
-ln -s "$PWD/editors/vscode" ~/.vscode/extensions/rs6809.rs6809-debug-0.2.0   # restart VS Code
+ln -s "$PWD/editors/vscode" ~/.vscode/extensions/rs6809.rs6809-debug-0.3.0   # restart VS Code
 ```
 
 `.vscode/launch.json`:
@@ -226,7 +229,7 @@ For the 68000, these can be created from the extension's configuration snippets 
   "symbols": ["${workspaceFolder}/examples/cpm68k/bios.lst", "${workspaceFolder}/artifacts/cpm68k/dist/DISK8/CPM15000.MAP"],
   "sourceDirs": ["${workspaceFolder}/examples/cpm68k"] }
 { "type": "rs6809", "request": "attach", "name": "rs6809: FUZIX", "port": 6810,
-  "symbols": ["${workspaceFolder}/artifacts/fuzix68k/fuzix.sym"] }
+  "symbols": ["${workspaceFolder}/artifacts/fuzix68k/fuzix.sym", "${workspaceFolder}/artifacts/fuzix68k/usersyms"] }
 ```
 
 | DAP | Description |

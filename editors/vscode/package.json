@@ -2,7 +2,7 @@
   "name": "rs6809-debug",
   "displayName": "rs6809 ICE",
   "description": "Debug programs in the rs6809 emulator through its ICE (Debug Adapter Protocol over TCP): 6809 / NitrOS-9, and the 68000 with CP/M-68K or FUZIX.",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "publisher": "rs6809",
   "license": "MIT",
   "engines": {
@@ -52,7 +52,7 @@
                 "items": {
                   "type": "string"
                 },
-                "description": "Symbols to load, on the emulator host: LWASM .lst, RMA .lst + .map + .m, LWLINK/c.link .map, GNU as listings (.lst with the nm .map beside it), nm output, CP/M-68K NM68 maps, or directories of them."
+                "description": "Symbols to load, on the emulator host: LWASM .lst, RMA .lst + .map + .m, LWLINK/c.link .map, GNU as listings (.lst with the nm .map beside it), nm output, CP/M-68K NM68 maps, or directories of them (a directory of NAME.sym nm outputs places each on the FUZIX processes running NAME)."
               },
               "sourceDirs": {
                 "type": "array",
@@ -60,6 +60,11 @@
                   "type": "string"
                 },
                 "description": "Directories searched for the source files named in the listings"
+              },
+              "record": {
+                "type": "boolean",
+                "default": false,
+                "description": "Record each instruction (CPU and RAM writes, the last 200,000) so Step Back and Reverse work. Running is slower"
               },
               "stopOnEntry": {
                 "type": "boolean",
@@ -114,7 +119,7 @@
             }
           },
           {
-            "label": "rs6809: FUZIX/68000 (kernel symbols)",
+            "label": "rs6809: FUZIX/68000 (kernel and program symbols)",
             "description": "sh examples/fuzix68k.sh --dap",
             "body": {
               "type": "rs6809",
@@ -122,7 +127,8 @@
               "name": "rs6809: FUZIX",
               "port": 6810,
               "symbols": [
-                "^\"\\${workspaceFolder}/artifacts/fuzix68k/fuzix.sym\""
+                "^\"\\${workspaceFolder}/artifacts/fuzix68k/fuzix.sym\"",
+                "^\"\\${workspaceFolder}/artifacts/fuzix68k/usersyms\""
               ],
               "sourceDirs": []
             }
