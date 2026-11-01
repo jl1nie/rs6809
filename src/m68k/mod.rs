@@ -6,6 +6,8 @@
 //! Prefetch is not modelled: the PC points at the next unread word.
 pub mod disasm;
 pub mod machine;
+pub mod serial;
+pub mod state;
 pub mod tiny68k;
 mod exec;
 
@@ -147,6 +149,36 @@ impl Default for M68k {
 }
 
 impl M68k {
+    /// Registers and run state, between instructions (see `state`).
+    pub fn save(&self, w: &mut state::Writer) {
+        for v in self.d.iter().chain(&self.a) {
+            w.u32(*v);
+        }
+        w.u32(self.other_sp);
+        w.u16(self.sr);
+        w.u32(self.pc);
+        w.u64(self.cycles);
+        w.bool(self.stopped);
+        w.bool(self.halted);
+    }
+    pub fn load(&mut self, r: &mut state::Reader) -> Result<(), String> {
+        for i in 0..8 {
+            self.d[i] = r.u32()?;
+        }
+        for i in 0..8 {
+            self.a[i] = r.u32()?;
+        }
+        self.other_sp = r.u32()?;
+        self.sr = r.u16()?;
+        self.pc = r.u32()?;
+        self.cycles = r.u64()?;
+        self.stopped = r.bool()?;
+        self.halted = r.bool()?;
+        self.irq = 0;
+        self.irq_vector = None;
+        self.reset_out = false;
+        Ok(())
+    }
     pub fn supervisor(&self) -> bool {
         self.sr & S != 0
     }

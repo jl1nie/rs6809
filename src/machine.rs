@@ -239,6 +239,27 @@ impl Machine {
             self.extra_acias.get_mut(index - 1)
         }
     }
+    /// The reset button: the MMU, the boot ROM mapping, the timer and the
+    /// SD controller go back to their power-on state, and serial input is
+    /// dropped. RAM and the disk keep their contents, as on the board.
+    pub fn reset_hardware(&mut self) {
+        self.rom_disabled = false;
+        self.mapper = 0;
+        self.maps = [0; 16];
+        self.fixed_top = false;
+        self.refresh_mapping();
+        self.timer = 0;
+        self.elapsed = 0;
+        self.acia.rx.clear();
+        for a in &mut self.extra_acias {
+            a.rx.clear();
+        }
+        if let Some(d) = &mut self.disk {
+            d.lba = 0;
+            d.state = 0;
+            d.index = 0;
+        }
+    }
     /// Persist completed SD sectors to a read/write backing file. Enable before
     /// running the CPU; an existing volatile overlay cannot be converted.
     pub fn persist_disk_writes(&mut self) -> io::Result<()> {

@@ -255,5 +255,64 @@ fn dap_session() {
     assert_eq!(mem.get("data").str(), Some("QQ=="), "'A' written by the program: {mem}");
     let out = d.event("output");
     assert!(out.get("output").str().unwrap().contains('A'), "{out}");
+    // restart: the program from its start, stopped as it was.
+    assert_eq!(caps_restart(&mut d), Some(true));
+    d.request("restart", "{}");
+    d.event("stopped");
+    let frames = d.request("stackTrace", r#"{"threadId":1}"#);
+    assert_eq!(
+        frames.get("stackFrames").arr()[0].get("instructionPointerReference").str(),
+        Some("0x1000")
+    );
     d.request("disconnect", "{}");
+}
+
+fn caps_restart(d: &mut Client) -> Option<bool> {
+    d.request("initialize", r#"{"adapterID":"rs6809"}"#).get("supportsRestartRequest").bool()
+}
+
+#[test]
+fn reset_and_state_files() {
+    let mut d = ice();
+    ok(&mut d, "/api/run");
+    d.run_steps(100);
+    assert_eq!((d.t.cpu.d[0], d.t.machine.ram[0x3000]), (0x42, 0x42));
+    // Save, change, load: back to the saved state.
+    let path = std::env::temp_dir().join(format!("rs6809-m68k-{}.state", std::process::id()));
+    let p = path.to_string_lossy().into_owned();
+    ok(&mut d, &format!("/api/machine/save?path={p}"));
+    d.t.cpu.d[0] = 7;
+    d.t.machine.ram[0x3000] = 0;
+    ok(&mut d, &format!("/api/machine/load?path={p}"));
+    assert_eq!((d.t.cpu.d[0], d.t.machine.ram[0x3000], d.t.cpu.pc), (0x42, 0x42, 0x1010));
+    // Reset: the program as loaded, from its start.
+    ok(&mut d, "/api/reset");
+    assert_eq!((d.t.cpu.pc, d.t.cpu.d[0], d.t.machine.ram[0x3000], d.t.cpu.a[7]), (0x1000, 0, 0, 0x8000));
+    assert!(String::from_utf8_lossy(&d.console).contains("[rs6809: リセット]"));
+    d.run_steps(100);
+    assert_eq!(d.t.machine.ram[0x3000], 0x42, "runs again after the reset");
+    // A file that is not a state is refused.
+    std::fs::write(&path, b"junk").unwrap();
+    let (status, body) = d.command("POST", &format!("/api/machine/load?path={p}"), b"");
+    assert_eq!(status, 400, "{body}");
+    std::fs::remove_file(&path).ok();
+}
+
+#[test]
+fn optional_script_prompts_are_answered_when_they_show() {
+    // 2000 MOVE.B #'Q',$FF0001.L ; 2008 BTST #0,$FF0000.L ; BEQ.S 2008
+    // 2012 MOVE.B $FF0001.L,$3000.L ; 201C BRA.S *
+    let code: &[u8] = &[
+        0x13, 0xfc, 0x00, 0x51, 0x00, 0xff, 0x00, 0x01, 0x08, 0x39, 0x00, 0x00, 0x00, 0xff, 0x00, 0x00, 0x67, 0xf6,
+        0x13, 0xf9, 0x00, 0xff, 0x00, 0x01, 0x00, 0x00, 0x30, 0x00, 0x60, 0xfe,
+    ];
+    let mut m = Sim68k::default();
+    m.set_vectors(0x8000, 0x2000);
+    m.load(0x2000, code).unwrap();
+    // A mandatory prompt that never shows does not hold up the optional one.
+    let actions = VecDeque::from([("never:".to_string(), "x".to_string()), ("?Q".to_string(), "y".to_string())]);
+    let mut d = Ice::m68000(Mc68000::new(m), Options { actions, echo_console: false });
+    ok(&mut d, "/api/run");
+    d.run_steps(200_000);
+    assert_eq!(d.t.machine.ram[0x3000], b'y');
 }

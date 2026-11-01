@@ -1,16 +1,35 @@
 {
   "name": "rs6809-debug",
   "displayName": "rs6809 ICE",
-  "description": "Debug 6809 / NitrOS-9 programs in the rs6809 emulator through its ICE (Debug Adapter Protocol over TCP).",
-  "version": "0.1.0",
+  "description": "Debug programs in the rs6809 emulator through its ICE (Debug Adapter Protocol over TCP): 6809 / NitrOS-9, and the 68000 with CP/M-68K or FUZIX.",
+  "version": "0.2.0",
   "publisher": "rs6809",
   "license": "MIT",
-  "engines": { "vscode": "^1.75.0" },
-  "categories": ["Debuggers"],
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": [
+    "Debuggers"
+  ],
   "main": "./extension.js",
-  "activationEvents": ["onDebugResolve:rs6809"],
+  "activationEvents": [
+    "onDebugResolve:rs6809"
+  ],
   "contributes": {
-    "breakpoints": [{ "language": "c" }, { "language": "asm" }, { "language": "plaintext" }],
+    "breakpoints": [
+      {
+        "language": "c"
+      },
+      {
+        "language": "asm"
+      },
+      {
+        "language": "m68k"
+      },
+      {
+        "language": "plaintext"
+      }
+    ],
     "debuggers": [
       {
         "type": "rs6809",
@@ -18,11 +37,35 @@
         "configurationAttributes": {
           "attach": {
             "properties": {
-              "host": { "type": "string", "default": "127.0.0.1", "description": "Host running rs6809 --dap" },
-              "port": { "type": "number", "default": 6810, "description": "DAP port (rs6809 --dap 127.0.0.1:6810)" },
-              "symbols": { "type": "array", "items": { "type": "string" }, "description": "Listings/maps or directories to load (LWASM .lst, RMA .lst + .map + .m, LWLINK/c.link .map). Paths are on the emulator host." },
-              "sourceDirs": { "type": "array", "items": { "type": "string" }, "description": "Directories searched for the source files named in the listings" },
-              "stopOnEntry": { "type": "boolean", "default": false, "description": "Pause the emulator when attaching" }
+              "host": {
+                "type": "string",
+                "default": "127.0.0.1",
+                "description": "Host running rs6809 --dap"
+              },
+              "port": {
+                "type": "number",
+                "default": 6810,
+                "description": "DAP port (rs6809 --dap 127.0.0.1:6810)"
+              },
+              "symbols": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Symbols to load, on the emulator host: LWASM .lst, RMA .lst + .map + .m, LWLINK/c.link .map, GNU as listings (.lst with the nm .map beside it), nm output, CP/M-68K NM68 maps, or directories of them."
+              },
+              "sourceDirs": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Directories searched for the source files named in the listings"
+              },
+              "stopOnEntry": {
+                "type": "boolean",
+                "default": false,
+                "description": "Pause the emulator when attaching"
+              }
             }
           }
         },
@@ -32,14 +75,57 @@
             "request": "attach",
             "name": "rs6809: attach",
             "port": 6810,
-            "symbols": ["${workspaceFolder}/artifacts/cdebug/hello"],
-            "sourceDirs": ["${workspaceFolder}/examples"]
+            "symbols": [
+              "${workspaceFolder}/artifacts/cdebug/hello"
+            ],
+            "sourceDirs": [
+              "${workspaceFolder}/examples"
+            ]
           }
         ],
         "configurationSnippets": [
           {
             "label": "rs6809: attach to the ICE",
-            "body": { "type": "rs6809", "request": "attach", "name": "rs6809: attach", "port": 6810, "symbols": [], "sourceDirs": [] }
+            "description": "Any machine started with --dap",
+            "body": {
+              "type": "rs6809",
+              "request": "attach",
+              "name": "rs6809: attach",
+              "port": 6810,
+              "symbols": [],
+              "sourceDirs": []
+            }
+          },
+          {
+            "label": "rs6809: CP/M-68K (BIOS source, CCP/BDOS names)",
+            "description": "sh examples/cpm68k.sh --dap",
+            "body": {
+              "type": "rs6809",
+              "request": "attach",
+              "name": "rs6809: CP/M-68K",
+              "port": 6810,
+              "symbols": [
+                "^\"\\${workspaceFolder}/examples/cpm68k/bios.lst\"",
+                "^\"\\${workspaceFolder}/artifacts/cpm68k/dist/DISK8/CPM15000.MAP\""
+              ],
+              "sourceDirs": [
+                "^\"\\${workspaceFolder}/examples/cpm68k\""
+              ]
+            }
+          },
+          {
+            "label": "rs6809: FUZIX/68000 (kernel symbols)",
+            "description": "sh examples/fuzix68k.sh --dap",
+            "body": {
+              "type": "rs6809",
+              "request": "attach",
+              "name": "rs6809: FUZIX",
+              "port": 6810,
+              "symbols": [
+                "^\"\\${workspaceFolder}/artifacts/fuzix68k/fuzix.sym\""
+              ],
+              "sourceDirs": []
+            }
           }
         ]
       }

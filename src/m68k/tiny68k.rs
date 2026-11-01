@@ -11,6 +11,7 @@
 //! register is 16 bits wide with the bytes swapped (the first byte of a
 //! sector is the low byte of the word), as on the board.
 use super::Bus68k;
+use super::state::{Reader, Writer};
 use std::collections::VecDeque;
 use std::fs::File;
 use std::io::{self, Seek, SeekFrom, Write};
@@ -29,6 +30,8 @@ pub struct Tiny68k {
     pub ram: Vec<u8>,
     pub duart: Duart,
     pub ide: Ide,
+    /// DUART channel B over TCP (a second terminal), if enabled.
+    pub tty2: Option<super::serial::TcpPort>,
 }
 
 impl Default for Tiny68k {
@@ -37,6 +40,7 @@ impl Default for Tiny68k {
             ram: vec![0; RAM_END as usize],
             duart: Duart::default(),
             ide: Ide::default(),
+            tty2: None,
         }
     }
 }
@@ -72,6 +76,28 @@ impl Tiny68k {
     /// Advance the devices by CPU cycles.
     pub fn tick(&mut self, cycles: u64) {
         self.duart.tick(cycles);
+    }
+    /// Exchange channel B with its TCP client (call now and then).
+    pub fn poll_io(&mut self) {
+        if let Some(p) = &mut self.tty2 {
+            p.poll(&mut self.duart.b.rx, &mut self.duart.b.tx);
+        }
+    }
+    /// RAM, the DUART, the IDE registers and, with `disk`, the disk.
+    pub fn save_state(&self, w: &mut Writer, disk: bool) {
+        w.bytes(&self.ram);
+        self.duart.save(w);
+        self.ide.save(w, disk);
+    }
+    /// Restore a `save_state`; without a saved disk, the current one stays.
+    pub fn load_state(&mut self, r: &mut Reader) -> Result<(), String> {
+        let ram = r.bytes()?;
+        if ram.len() != self.ram.len() {
+            return Err("RAMの大きさが違う".into());
+        }
+        self.ram.copy_from_slice(ram);
+        self.duart.load(r)?;
+        self.ide.load(r)
     }
     /// The interrupt request: (level, vector).
     pub fn irq(&self) -> (u8, Option<u8>) {
@@ -145,6 +171,23 @@ pub struct Channel {
 }
 
 impl Channel {
+    fn save(&self, w: &mut Writer) {
+        w.u8(self.mr[0]);
+        w.u8(self.mr[1]);
+        w.u8(self.mr_ptr as u8);
+        w.bytes(&self.rx.iter().copied().collect::<Vec<u8>>());
+        w.bool(self.rx_on);
+        w.bool(self.tx_on);
+    }
+    fn load(&mut self, r: &mut Reader) -> Result<(), String> {
+        self.mr = [r.u8()?, r.u8()?];
+        self.mr_ptr = usize::from(r.u8()? & 1);
+        self.rx = r.bytes()?.iter().copied().collect();
+        self.rx_on = r.bool()?;
+        self.tx_on = r.bool()?;
+        self.tx.clear();
+        Ok(())
+    }
     fn status(&self) -> u8 {
         // RxRDY, (FIFO full), TxRDY and TxEMT: transmission is instant.
         u8::from(!self.rx.is_empty()) | if self.tx_on { 0x0c } else { 0 }
@@ -209,6 +252,29 @@ impl Default for Duart {
 }
 
 impl Duart {
+    fn save(&self, w: &mut Writer) {
+        self.a.save(w);
+        self.b.save(w);
+        for v in [self.acr, self.imr, u8::from(self.isr_ct), self.ivr, self.opr] {
+            w.u8(v);
+        }
+        w.u16(self.ct_preload);
+        w.u64(self.ct_left);
+        w.bool(self.ct_running);
+    }
+    fn load(&mut self, r: &mut Reader) -> Result<(), String> {
+        self.a.load(r)?;
+        self.b.load(r)?;
+        self.acr = r.u8()?;
+        self.imr = r.u8()?;
+        self.isr_ct = r.bool()?;
+        self.ivr = r.u8()?;
+        self.opr = r.u8()?;
+        self.ct_preload = r.u16()?;
+        self.ct_left = r.u64()?;
+        self.ct_running = r.bool()?;
+        Ok(())
+    }
     pub fn isr(&self) -> u8 {
         let a = self.a.status();
         let b = self.b.status();
@@ -237,6 +303,12 @@ impl Duart {
     fn restart_counter(&mut self) {
         self.ct_running = true;
         self.ct_left = self.ct_period();
+    }
+    /// CPU cycles until the counter/timer interrupts, when it can.
+    pub fn next_event(&self) -> Option<u64> {
+        let timer = self.acr & 0x40 != 0;
+        let enabled = self.imr & 0x08 != 0 && !self.isr_ct;
+        (enabled && (self.ct_running || timer)).then(|| if self.ct_left == 0 { self.ct_period() } else { self.ct_left })
     }
     pub fn tick(&mut self, cycles: u64) {
         let timer = self.acr & 0x40 != 0;
@@ -364,6 +436,36 @@ pub struct Ide {
 }
 
 impl Ide {
+    fn save(&self, w: &mut Writer, disk: bool) {
+        w.bytes(&self.regs);
+        w.u8(self.status);
+        w.bytes(&self.buf);
+        w.u64(self.pos as u64);
+        w.u32(self.left);
+        w.bool(self.writing);
+        w.u32(self.lba);
+        w.bool(disk);
+        if disk {
+            w.bytes(&self.disk);
+        }
+    }
+    fn load(&mut self, r: &mut Reader) -> Result<(), String> {
+        self.regs.copy_from_slice(r.bytes()?.get(..8).ok_or("IDEのレジスタが足りない")?);
+        self.status = r.u8()?;
+        self.buf = r.bytes()?.to_vec();
+        self.pos = r.u64()? as usize;
+        self.left = r.u32()?;
+        self.writing = r.bool()?;
+        self.lba = r.u32()?;
+        if r.bool()? {
+            let d = r.bytes()?;
+            if self.file.is_some() && d != self.disk.as_slice() {
+                return Err("書き込みを残すディスク（--persist-disk）には、ディスクを含む状態を読み込めない".into());
+            }
+            self.disk = d.to_vec();
+        }
+        Ok(())
+    }
     pub fn attach(&mut self, disk: Vec<u8>, file: Option<File>) {
         self.disk = disk;
         self.file = file;

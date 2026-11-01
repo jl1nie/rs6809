@@ -8,6 +8,7 @@ use super::{Watch, WatchKind};
 use crate::cpu::I;
 use crate::m68k::machine::Sim68k;
 use crate::m68k::tiny68k::Tiny68k;
+use crate::m68k::state::{MAGIC, Reader, Writer};
 use crate::m68k::{Bus68k, M68k};
 use crate::{Bus, Cpu, Machine};
 use std::io;
@@ -103,12 +104,44 @@ pub trait Target: Send {
     fn multicomp(&mut self) -> Option<&mut Machine> {
         None
     }
+    /// The CPU is waiting for an interrupt that has not come (68000 `STOP`):
+    /// the cycles until a device may raise one (`u64::MAX` for none), so
+    /// the wait can be skipped instead of executed.
+    fn idle_cycles(&self) -> Option<u64> {
+        None
+    }
+    /// Let `n` cycles pass while idle (devices advance, nothing executes).
+    fn skip_idle(&mut self, _n: u64) {}
+    /// Nominal clock, for turning idle cycles into host time.
+    fn clock_hz(&self) -> u64 {
+        1_000_000
+    }
+    /// Network-backed devices of the machine (not the console), now and then.
+    fn poll_io(&mut self) {}
+    /// Remember the state to come back to on reset (called at startup).
+    fn mark_start(&mut self);
+    /// Reset: back to the state at startup. Disk contents are kept.
+    fn reset(&mut self);
+    /// Disk writes go through to a file (the file holds the disk, so a
+    /// saved state leaves it out by default).
+    fn disk_persistent(&self) -> bool {
+        false
+    }
+    /// The whole machine state (with `disk`, the disk too), for a file.
+    fn save_state(&self, _disk: bool) -> Result<Vec<u8>, String> {
+        Err(format!("{}では状態の保存に対応していない", Self::CPU))
+    }
+    fn load_state(&mut self, _data: &[u8]) -> Result<(), String> {
+        Err(format!("{}では状態の読み込みに対応していない", Self::CPU))
+    }
 }
 
 /// The 6809 and its (Multicomp or plain) machine.
 pub struct Mc6809 {
     pub cpu: Cpu,
     pub machine: Machine,
+    /// The CPU, and RAM of a machine without a boot ROM, at startup.
+    pub start: Option<(Cpu, Option<Box<[u8]>>)>,
 }
 
 struct Probe<'a> {
@@ -320,6 +353,29 @@ impl Target for Mc6809 {
     fn ram_len(&self) -> usize {
         self.machine.ram.len()
     }
+    fn mark_start(&mut self) {
+        // With a boot ROM the reset vector restarts it; a loaded program
+        // needs its RAM back.
+        let ram = (!self.machine.has_rom()).then(|| self.machine.ram.clone());
+        self.start = Some((self.cpu.clone(), ram));
+    }
+    fn reset(&mut self) {
+        self.machine.reset_hardware();
+        match &self.start {
+            Some((_, None)) | None if self.machine.has_rom() => {
+                let mut cpu = Cpu::default();
+                cpu.reset(&mut self.machine);
+                self.cpu = cpu;
+            }
+            Some((cpu, ram)) => {
+                if let Some(ram) = ram {
+                    self.machine.ram.copy_from_slice(ram);
+                }
+                self.cpu = cpu.clone();
+            }
+            None => {}
+        }
+    }
     fn multicomp(&mut self) -> Option<&mut Machine> {
         Some(&mut self.machine)
     }
@@ -354,11 +410,34 @@ pub trait Board68k: Bus68k + Mem + Send {
     fn disk_error(&mut self) -> Option<io::Error> {
         None
     }
+    /// Memory and devices (and, with `disk`, the disk), for `state`.
+    fn save_board(&self, w: &mut Writer, disk: bool);
+    fn disk_persistent(&self) -> bool {
+        false
+    }
+    /// Network-backed devices (a TCP serial port), now and then.
+    fn poll_io(&mut self) {}
+    fn load_board(&mut self, r: &mut Reader) -> Result<(), String>;
+    /// CPU cycles until a device may interrupt by itself (a timer); `None`
+    /// when only outside input can.
+    fn next_event(&self) -> Option<u64> {
+        None
+    }
 }
 
 impl Board68k for Sim68k {
     fn poke(&mut self, addr: u32, v: u8) {
         Sim68k::poke(self, addr, v)
+    }
+    fn save_board(&self, w: &mut Writer, _disk: bool) {
+        w.u8(0);
+        self.save_state(w)
+    }
+    fn load_board(&mut self, r: &mut Reader) -> Result<(), String> {
+        if r.u8()? != 0 {
+            return Err("別の機械（Tiny68K）の状態".into());
+        }
+        self.load_state(r)
     }
     fn console_take(&mut self) -> Vec<u8> {
         std::mem::take(&mut self.tx)
@@ -391,6 +470,22 @@ impl Board68k for Tiny68k {
     fn poke(&mut self, addr: u32, v: u8) {
         Tiny68k::poke(self, addr, v)
     }
+    fn save_board(&self, w: &mut Writer, disk: bool) {
+        w.u8(1);
+        self.save_state(w, disk)
+    }
+    fn disk_persistent(&self) -> bool {
+        self.ide.file.is_some()
+    }
+    fn poll_io(&mut self) {
+        Tiny68k::poll_io(self)
+    }
+    fn load_board(&mut self, r: &mut Reader) -> Result<(), String> {
+        if r.u8()? != 1 {
+            return Err("別の機械（RAM＋コンソール）の状態".into());
+        }
+        self.load_state(r)
+    }
     fn tick(&mut self, cycles: u64) {
         Tiny68k::tick(self, cycles)
     }
@@ -409,12 +504,17 @@ impl Board68k for Tiny68k {
     fn disk_error(&mut self) -> Option<io::Error> {
         self.ide.error.take()
     }
+    fn next_event(&self) -> Option<u64> {
+        self.duart.next_event()
+    }
 }
 
 /// The 68000 and its machine (by default the plain RAM + console one).
 pub struct Mc68000<B: Board68k = Sim68k> {
     pub cpu: M68k,
     pub machine: B,
+    /// The CPU, memory and devices at startup, for reset.
+    start: Option<Vec<u8>>,
 }
 
 impl<B: Board68k> Mc68000<B> {
@@ -422,7 +522,7 @@ impl<B: Board68k> Mc68000<B> {
     pub fn new(mut machine: B) -> Self {
         let mut cpu = M68k::default();
         cpu.reset(&mut machine);
-        Self { cpu, machine }
+        Self { cpu, machine, start: None }
     }
     /// Start at `pc` in supervisor state with the stack at `ssp`, without
     /// reading the reset vectors (a program loaded without a ROM).
@@ -431,7 +531,37 @@ impl<B: Board68k> Mc68000<B> {
         cpu.sr = crate::m68k::S | 0x0700;
         cpu.a[7] = ssp;
         cpu.pc = pc;
-        Self { cpu, machine }
+        Self { cpu, machine, start: None }
+    }
+    /// The state as bytes: magic, CPU, board.
+    fn state(&self, disk: bool) -> Vec<u8> {
+        let mut w = Writer::default();
+        w.out.extend_from_slice(MAGIC);
+        self.cpu.save(&mut w);
+        self.machine.save_board(&mut w, disk);
+        w.out
+    }
+    fn restore(&mut self, data: &[u8]) -> Result<(), String> {
+        let mut r = Reader::new(data);
+        r.magic(MAGIC)?;
+        let mut cpu = self.cpu.clone();
+        cpu.load(&mut r)?;
+        self.machine.load_board(&mut r)?;
+        self.cpu = cpu;
+        Ok(())
+    }
+    /// Waiting in `STOP` with no interrupt pending: the cycles until a
+    /// device may raise one (`u64::MAX` when only input can).
+    pub fn idle(&self) -> Option<u64> {
+        let c = &self.cpu;
+        let (level, _) = self.machine.irq();
+        let wakes = level > 0 && (level == 7 || level > ((c.sr >> 8) & 7) as u8);
+        (c.stopped && !c.halted && !wakes).then(|| self.machine.next_event().unwrap_or(u64::MAX))
+    }
+    /// Let `n` cycles pass in `STOP`.
+    pub fn skip(&mut self, n: u64) {
+        self.cpu.cycles += n;
+        self.machine.tick(n);
     }
     /// One instruction or interrupt entry on the machine, with its devices.
     pub fn run_one(&mut self) {
@@ -688,6 +818,36 @@ impl<B: Board68k> Target for Mc68000<B> {
     }
     fn mmu_json(&self) -> String {
         "null".into()
+    }
+    fn idle_cycles(&self) -> Option<u64> {
+        self.idle()
+    }
+    fn mark_start(&mut self) {
+        self.start = Some(self.state(false));
+    }
+    fn poll_io(&mut self) {
+        self.machine.poll_io()
+    }
+    fn reset(&mut self) {
+        if let Some(s) = self.start.take() {
+            let _ = self.restore(&s);
+            self.start = Some(s);
+        }
+    }
+    fn save_state(&self, disk: bool) -> Result<Vec<u8>, String> {
+        Ok(self.state(disk))
+    }
+    fn disk_persistent(&self) -> bool {
+        self.machine.disk_persistent()
+    }
+    fn load_state(&mut self, data: &[u8]) -> Result<(), String> {
+        self.restore(data)
+    }
+    fn skip_idle(&mut self, n: u64) {
+        self.skip(n)
+    }
+    fn clock_hz(&self) -> u64 {
+        crate::m68k::tiny68k::CPU_HZ
     }
     fn ram_len(&self) -> usize {
         self.machine.ram().len()

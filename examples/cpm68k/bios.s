@@ -4,7 +4,8 @@
 | $1B000 on a cold start; BDOS calls the other functions through TRAP #3
 | with the function number in D0.W and parameters in D1/D2.
 |
-|   console   MC68681 DUART channel A ($FFF000, odd addresses), polled
+|   console   MC68681 DUART channel A ($FFF000, odd addresses); input is
+|             waited for with STOP and the receive interrupt (level 2)
 |   list/aux  DUART channel B
 |   disk A:   IDE (CompactFlash) at $FFE000, LBA, 512-byte sectors
 |
@@ -29,6 +30,9 @@
 	.equ	THRA, 0x07
 	.equ	ACR, 0x09
 	.equ	IMR, 0x0b
+	.equ	IVR, 0x19
+	.equ	RXVEC, 64		| vector number of the DUART interrupt
+	.equ	RXINT_A, 0x02		| IMR: channel A receiver ready
 	.equ	SRB, 0x13
 	.equ	CRB, 0x15
 	.equ	RHRB, 0x17
@@ -58,7 +62,9 @@
 _init:
 	move.l	#entry,TRAP3
 	lea	DUART,a0
-	move.b	#0x00,IMR(a0)		| no interrupts
+	move.b	#0x00,IMR(a0)		| no interrupts until conin waits
+	move.b	#RXVEC,IVR(a0)
+	move.l	#rxint,RXVEC*4
 	move.b	#0x10,CRA(a0)		| reset the MR pointer
 	move.b	#0x13,MRA(a0)		| 8 bits, no parity
 	move.b	#0x07,MRA(a0)		| 1 stop bit
@@ -107,11 +113,23 @@ const:	clr.l	d0
 	move.l	#0xff,d0
 1:	rts
 
+| Wait for a key without spinning: enable the receive interrupt and STOP
+| until it comes (rxint masks it again, as the request stays asserted
+| until the byte is read).
 conin:	btst	#RXRDY,DUART+SRA
-	beq.s	conin
-	clr.l	d0
+	bne.s	2f
+	move.w	sr,-(sp)
+1:	move.b	#RXINT_A,DUART+IMR
+	stop	#0x2000
+	btst	#RXRDY,DUART+SRA
+	beq.s	1b
+	move.w	(sp)+,sr
+2:	clr.l	d0
 	move.b	DUART+RHRA,d0
 	rts
+
+rxint:	move.b	#0,DUART+IMR
+	rte
 
 conout:	btst	#TXRDY,DUART+SRA
 	beq.s	conout

@@ -250,6 +250,10 @@ pub struct Ice<T: Target = Mc6809> {
     /// Guest cycles per host second; 0 runs at full speed.
     pub speed: u64,
     actions: VecDeque<(String, String)>,
+    /// The script as given, replayed after a reset.
+    script: VecDeque<(String, String)>,
+    /// Prompts answered whenever they show (`?PROMPT` lines).
+    optional: Vec<(String, String)>,
     seen: String,
     pending_input: VecDeque<u8>,
     next_input: u64,
@@ -274,7 +278,7 @@ impl Ice<Mc6809> {
         Self::with_os(cpu, machine, options, Box::new(os9::Nitros9::default()))
     }
     pub fn with_os(cpu: Cpu, machine: Machine, options: Options, os: Box<dyn OsMonitor>) -> Self {
-        Ice::for_target(Mc6809 { cpu, machine }, options, os)
+        Ice::for_target(Mc6809 { cpu, machine, start: None }, options, os)
     }
 }
 
@@ -286,7 +290,8 @@ impl<B: target::Board68k> Ice<Mc68000<B>> {
 }
 
 impl<T: Target> Ice<T> {
-    pub fn for_target(t: T, options: Options, os: Box<dyn OsMonitor>) -> Self {
+    pub fn for_target(mut t: T, options: Options, os: Box<dyn OsMonitor>) -> Self {
+        t.mark_start();
         let bits = 1usize << t.addr_bits();
         Self {
             svc_prefix: os.svc_prefix(),
@@ -313,7 +318,13 @@ impl<T: Target> Ice<T> {
             os_ready: false,
             detect_at: 0,
             speed: 0,
-            actions: options.actions,
+            optional: options
+                .actions
+                .iter()
+                .filter_map(|(p, r)| p.strip_prefix('?').map(|p| (p.to_string(), r.clone())))
+                .collect(),
+            script: options.actions.iter().filter(|(p, _)| !p.starts_with('?')).cloned().collect(),
+            actions: options.actions.into_iter().filter(|(p, _)| !p.starts_with('?')).collect(),
             seen: String::new(),
             pending_input: VecDeque::new(),
             next_input: 0,
@@ -684,6 +695,14 @@ impl<T: Target> Ice<T> {
                 self.pending_input.push_back(13);
                 self.seen.clear();
                 self.next_input = self.t.cycles() + 100_000;
+            } else if let Some((_, response)) = self.optional.iter().find(|(p, _)| self.seen.contains(p.as_str())) {
+                // An optional prompt (`?PROMPT` in a script): answered
+                // whenever it shows, without holding up the others.
+                let response = response.clone();
+                self.pending_input.extend(response.bytes());
+                self.pending_input.push_back(13);
+                self.seen.clear();
+                self.next_input = self.t.cycles() + 100_000;
             }
             if self.seen.len() > 4096 {
                 let cut = self.seen.len() - 2048;
@@ -761,6 +780,27 @@ impl<T: Target> Ice<T> {
         self.refresh_symbols();
         let mut n = 0u32;
         while self.running {
+            // Waiting for an interrupt (68000 STOP): let the time pass in
+            // real time instead of executing the wait, until a device or
+            // scripted input can wake the CPU.
+            if let Some(idle) = self.t.idle_cycles() {
+                let hz = self.t.clock_hz().max(1);
+                let mut cycles = idle;
+                if !self.pending_input.is_empty() {
+                    cycles = cycles.min(self.next_input.saturating_sub(self.t.cycles()).max(1));
+                }
+                let left = budget.saturating_sub(start.elapsed());
+                let room = (left.as_secs_f64() * hz as f64) as u64;
+                if room == 0 {
+                    break;
+                }
+                let cycles = cycles.min(room);
+                self.t.poll_io();
+                self.t.skip_idle(cycles);
+                std::thread::sleep(Duration::from_secs_f64(cycles as f64 / hz as f64));
+                self.pump_console();
+                continue;
+            }
             if let Some(s) = self.step_one() {
                 self.halt(s);
                 break;
@@ -780,6 +820,7 @@ impl<T: Target> Ice<T> {
         }
     }
     fn poll_telnet(&mut self) {
+        self.t.poll_io();
         if let Some(t) = &mut self.telnet
             && let Some(m) = self.t.multicomp()
         {
@@ -817,6 +858,25 @@ impl<T: Target> Ice<T> {
                     self.resume(Goal::None);
                 }
                 ok()
+            }
+            "/api/reset" => {
+                self.reset_machine();
+                ok()
+            }
+            "/api/machine/save" => {
+                let path = p("path").unwrap_or("rs6809.state");
+                let disk = p("disk").map(|d| d == "1");
+                match self.save_machine(path, disk) {
+                    Ok(n) => http::Response::json(format!("{{\"ok\":true,\"path\":{},\"bytes\":{n}}}", json_str(path))),
+                    Err(e) => bad(&e),
+                }
+            }
+            "/api/machine/load" => {
+                let path = p("path").unwrap_or("rs6809.state");
+                match self.load_machine(path) {
+                    Ok(()) => ok(),
+                    Err(e) => bad(&e),
+                }
             }
             "/api/pause" => {
                 if self.running {
@@ -1523,6 +1583,49 @@ impl<T: Target> Ice<T> {
         };
         let r = self.handle(&req);
         (r.status, String::from_utf8_lossy(&r.body).into_owned())
+    }
+    /// Reset the machine to its startup state (disk contents stay) and
+    /// start the boot script over. Breakpoints and symbols stay.
+    pub fn reset_machine(&mut self) {
+        self.t.reset();
+        self.actions = self.script.clone();
+        self.forget_run("リセット");
+    }
+    /// Save the machine state to a file. The disk is included unless its
+    /// writes already go to a file (`disk` overrides).
+    pub fn save_machine(&self, path: &str, disk: Option<bool>) -> Result<usize, String> {
+        let data = self.t.save_state(disk.unwrap_or(!self.t.disk_persistent()))?;
+        std::fs::write(path, &data).map_err(|e| format!("{path}: {e}"))?;
+        Ok(data.len())
+    }
+    /// Continue from a saved state; the boot script is not replayed.
+    pub fn load_machine(&mut self, path: &str) -> Result<(), String> {
+        let data = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
+        self.t.load_state(&data)?;
+        self.actions.clear();
+        self.forget_run(&format!("状態 {path} を読み込み"));
+        Ok(())
+    }
+    /// What was learned from the previous run no longer holds.
+    fn forget_run(&mut self, why: &str) {
+        self.tracer = Tracer::default();
+        self.trace.clear();
+        self.goal = Goal::None;
+        self.os_ready = false;
+        self.os_slot = None;
+        self.os.forget();
+        self.detect_at = 0;
+        self.pending_input.clear();
+        self.seen.clear();
+        self.next_input = 0;
+        self.var_refs.clear();
+        let _ = self.t.console_take();
+        let note = format!("\r\n[rs6809: {why}]\r\n");
+        self.console.extend_from_slice(note.as_bytes());
+        self.refresh_symbols();
+        if !self.running {
+            self.stop = Some(Stop::Pause);
+        }
     }
     /// Keep executing while `running`, at most `max_steps` instructions.
     pub fn run_steps(&mut self, max_steps: u64) {

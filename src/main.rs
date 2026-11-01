@@ -45,6 +45,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut machine_kind: Option<String> = None;
     let mut boot_sector = false;
     let mut os_kind: Option<String> = None;
+    let mut load_state: Option<String> = None;
+    let mut tty2: Option<String> = None;
     let mut max = 0;
     let mut script = None;
     let mut until = None;
@@ -87,6 +89,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             "--machine" => machine_kind = Some(args.next().ok_or("missing machine")?),
             "--boot-sector" => boot_sector = true,
             "--os" => os_kind = Some(args.next().ok_or("missing OS")?),
+            "--load-state" => load_state = Some(args.next().ok_or("missing state file")?),
+            "--tty2" => {
+                tty2 = Some(if args.peek().is_some_and(|next| !next.starts_with("--")) {
+                    args.next().unwrap()
+                } else {
+                    "127.0.0.1:6812".to_string()
+                })
+            }
             "--load" => addr = number(&args.next().ok_or("missing load address")?)?,
             "--pc" => pc = Some(number(&args.next().ok_or("missing PC")?)?),
             "--cpu" => cpu_kind = args.next().ok_or("missing CPU")?,
@@ -118,7 +128,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
             "--help" | "-h" => {
                 println!(
-                    "rs6809 [--cpu 6809|68000] [--bin FILE --load 0x1000 --pc 0x1000]\n       [--rom FILE --disk FILE --boot] [--ram-kb N] [--script FILE]\n       [--acia-count N] [--telnet [127.0.0.1:0]] [--persist-disk|--volatile-disk]\n       [--until TEXT] [--max-cycles N] [--stats] [--measure-from TEXT]\n       [--ice [127.0.0.1:6809]] [--ice-halt] [--dap [127.0.0.1:6810]]\n       [--symbols FILE|DIR[@MODULE]]... [--source-dir DIR]...\n\nDefault: 64 KiB RAM, ACIA $8018/$8019, timer $8010.\nROM+disk: 512 KiB RAM (select 64/128/256/512/1024 with --ram-kb).\nMulticomp console $FFD0/$FFD1, SD $FFD8-$FFDC, timer $FFDD.\n--acia-count selects 1..4 Multicomp ACIAs (default 1, or 4 with --telnet).\n--telnet binds localhost on a free TCP port by default; OS-9 opens the available ACIAs.\nOne client per active ACIA; host stdin is disabled. Use the multi-user Level 2 disk.\n--boot types NITROS9 at the CamelForth prompt.\nScripts: lines PROMPT<TAB>RESPONSE, matched sequentially; response ends with CR.\n  Lines starting with # are comments (68000: \\# starts a prompt with #).\nTelnet disk writes persist by default; --persist-disk also enables this without Telnet.\n--volatile-disk keeps writes in RAM. Cycle limit without --until exits successfully.\n--stats reports guest cycles and host elapsed seconds to stderr.\n--measure-from starts an output-marker interval, ending at --until.\n--ice serves the debugger UI (registers, disassembly, breakpoints, OS-9 views)\n  over HTTP; open the printed URL. ACIA 1 becomes the browser console.\n--ice-halt starts the CPU stopped at the reset vector.\n--dap also serves the Debug Adapter Protocol (VS Code etc.); implies --ice.\n--symbols loads LWASM/RMA listings, LWLINK/c.link maps, GNU as listings,\n  nm output and CP/M-68K NM68 maps (repeatable).\n--source-dir adds a directory searched for source files.\n\n--cpu 68000 [--machine plain|tiny68k] (docs/m68k.md, docs/cpm68k.md):\n  plain: RAM from $000000 (1 MiB, --ram-kb up to 16320), console status $FF0000\n  (bit 0 input ready), data $FF0001. SSP = top of RAM.\n  tiny68k: 16 MiB RAM less 32 KiB, 68681 DUART $FFF000, IDE $FFE000 (--disk,\n  --persist-disk); starts in supervisor state at --pc without a monitor ROM;\n  --boot-sector loads disk LBA 1 at $15000 and starts there (FUZIX loader);\n  --os cpm68k|fuzix|none picks the OS monitor (default cpm68k); FUZIX needs\n  the kernel symbols (--symbols fuzix.sym).\n  --bin (repeatable) loads a raw binary at --load, or Motorola S-records.\n  Without --pc the start is the S-record entry, else the load address\n  (a raw image loaded at 0 keeps its own reset vectors).\n  Works with --ice, --ice-halt, --dap, --symbols, --script, --until, --max-cycles, --stats."
+                    "rs6809 [--cpu 6809|68000] [--bin FILE --load 0x1000 --pc 0x1000]\n       [--rom FILE --disk FILE --boot] [--ram-kb N] [--script FILE]\n       [--acia-count N] [--telnet [127.0.0.1:0]] [--persist-disk|--volatile-disk]\n       [--until TEXT] [--max-cycles N] [--stats] [--measure-from TEXT]\n       [--ice [127.0.0.1:6809]] [--ice-halt] [--dap [127.0.0.1:6810]]\n       [--symbols FILE|DIR[@MODULE]]... [--source-dir DIR]...\n\nDefault: 64 KiB RAM, ACIA $8018/$8019, timer $8010.\nROM+disk: 512 KiB RAM (select 64/128/256/512/1024 with --ram-kb).\nMulticomp console $FFD0/$FFD1, SD $FFD8-$FFDC, timer $FFDD.\n--acia-count selects 1..4 Multicomp ACIAs (default 1, or 4 with --telnet).\n--telnet binds localhost on a free TCP port by default; OS-9 opens the available ACIAs.\nOne client per active ACIA; host stdin is disabled. Use the multi-user Level 2 disk.\n--boot types NITROS9 at the CamelForth prompt.\nScripts: lines PROMPT<TAB>RESPONSE, matched sequentially; response ends with CR.\n  Lines starting with # are comments (68000: \\# starts a prompt with #,\n  and a ?PROMPT line is answered whenever PROMPT shows, out of order).\nTelnet disk writes persist by default; --persist-disk also enables this without Telnet.\n--volatile-disk keeps writes in RAM. Cycle limit without --until exits successfully.\n--stats reports guest cycles and host elapsed seconds to stderr.\n--measure-from starts an output-marker interval, ending at --until.\n--ice serves the debugger UI (registers, disassembly, breakpoints, OS-9 views)\n  over HTTP; open the printed URL. ACIA 1 becomes the browser console.\n--ice-halt starts the CPU stopped at the reset vector.\n--dap also serves the Debug Adapter Protocol (VS Code etc.); implies --ice.\n--symbols loads LWASM/RMA listings, LWLINK/c.link maps, GNU as listings,\n  nm output and CP/M-68K NM68 maps (repeatable).\n--source-dir adds a directory searched for source files.\n\n--cpu 68000 [--machine plain|tiny68k] (docs/m68k.md, docs/cpm68k.md):\n  plain: RAM from $000000 (1 MiB, --ram-kb up to 16320), console status $FF0000\n  (bit 0 input ready), data $FF0001. SSP = top of RAM.\n  tiny68k: 16 MiB RAM less 32 KiB, 68681 DUART $FFF000, IDE $FFE000 (--disk,\n  --persist-disk); starts in supervisor state at --pc without a monitor ROM;\n  --boot-sector loads disk LBA 1 at $15000 and starts there (FUZIX loader);\n  --os cpm68k|fuzix|none picks the OS monitor (default cpm68k); FUZIX needs\n  the kernel symbols (--symbols fuzix.sym).\n  --tty2 [127.0.0.1:6812] puts DUART channel B (FUZIX /dev/tty2) on TCP.\n  --load-state FILE continues from a state saved in the ICE (button or\n  /api/machine/save); the ICE's reset still returns to the boot.\n  --bin (repeatable) loads a raw binary at --load, or Motorola S-records.\n  Without --pc the start is the S-record entry, else the load address\n  (a raw image loaded at 0 keeps its own reset vectors).\n  Works with --ice, --ice-halt, --dap, --symbols, --script, --until, --max-cycles, --stats."
                 );
                 return Ok(());
             }
@@ -135,6 +145,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 machine: machine_kind.unwrap_or_else(|| "plain".into()),
                 boot_sector,
                 os: os_kind,
+                load_state,
+                tty2,
                 bins,
                 disk,
                 persist_disk,
@@ -209,7 +221,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     } else if let Some(pc) = pc {
         cpu.pc = pc
     }
-    if machine_kind.is_some() || bins.len() > 1 || boot_sector || os_kind.is_some() {
+    if machine_kind.is_some() || bins.len() > 1 || boot_sector || os_kind.is_some() || load_state.is_some() || tty2.is_some() {
         return Err("--machine and several --bin are for --cpu 68000".into());
     }
     let mut actions = std::collections::VecDeque::<(String, String)>::new();
@@ -397,6 +409,8 @@ struct M68kArgs {
     machine: String,
     boot_sector: bool,
     os: Option<String>,
+    load_state: Option<String>,
+    tty2: Option<String>,
     bins: Vec<String>,
     disk: Option<String>,
     persist_disk: bool,
@@ -473,8 +487,8 @@ fn run68k(a: M68kArgs) -> Result<(), Box<dyn std::error::Error>> {
     let pc = a.pc.map(u32::try_from).transpose()?;
     match a.machine.as_str() {
         "plain" => {
-            if a.disk.is_some() {
-                return Err("--disk needs --machine tiny68k".into());
+            if a.disk.is_some() || a.tty2.is_some() {
+                return Err("--disk and --tty2 need --machine tiny68k".into());
             }
             let kb = a.ram_kb.unwrap_or(1024);
             if kb == 0 || kb > 0xff_0000 / 1024 {
@@ -498,6 +512,11 @@ fn run68k(a: M68kArgs) -> Result<(), Box<dyn std::error::Error>> {
                 return Err("--persist-disk and --volatile-disk conflict".into());
             }
             let mut m = Tiny68k::default();
+            if let Some(addr) = &a.tty2 {
+                let port = rs6809::m68k::serial::TcpPort::bind(addr.as_str())?;
+                eprintln!("rs6809: tty2 (DUART channel B) on {} (telnet or nc)", port.local_addr()?);
+                m.tty2 = Some(port);
+            }
             if let Some(path) = &a.disk {
                 let data = fs::read(path)?;
                 let file = if a.persist_disk {
@@ -543,6 +562,16 @@ fn run_board<B: ice::Board68k + 'static>(
     a: M68kArgs,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut actions = script_actions(&a.script)?;
+    // `?PROMPT` lines are answered whenever the prompt shows (the ICE splits
+    // them itself).
+    let optional: Vec<(String, String)> = actions
+        .iter()
+        .filter_map(|(p, r)| p.strip_prefix('?').map(|p| (p.to_string(), r.clone())))
+        .collect();
+    if let (Some(path), true) = (&a.load_state, a.ice_addr.is_none() && a.dap_addr.is_none() && a.symbol_specs.is_empty()) {
+        use rs6809::ice::target::Target;
+        t.load_state(&fs::read(path).map_err(|e| format!("{path}: {e}"))?)?;
+    }
     let mut ice_addr = a.ice_addr;
     if ice_addr.is_none() && (a.dap_addr.is_some() || !a.symbol_specs.is_empty()) {
         ice_addr = Some("127.0.0.1:6809".to_string());
@@ -560,6 +589,9 @@ fn run_board<B: ice::Board68k + 'static>(
             },
             os,
         );
+        if let Some(path) = &a.load_state {
+            debugger.load_machine(path)?;
+        }
         for dir in a.source_dirs {
             debugger.symbols.add_source_dir(dir.into());
         }
@@ -577,6 +609,7 @@ fn run_board<B: ice::Board68k + 'static>(
         };
         return Ok(debugger.serve(listener, dap, !a.ice_halt)?);
     }
+    actions.retain(|(p, _)| !p.starts_with('?'));
     let (tx, rx) = mpsc::sync_channel(1024);
     thread::spawn(move || {
         for byte in io::stdin().lock().bytes() {
@@ -589,11 +622,44 @@ fn run_board<B: ice::Board68k + 'static>(
     let mut out = io::stdout().lock();
     let mut seen = String::new();
     let mut pending = std::collections::VecDeque::new();
-    let mut next_input = 0;
+    let mut next_input = 0u64;
     let started = Instant::now();
     let mut blocks = 0u32;
+    // Batch runs (--until, --max-cycles) skip waits at full speed; an
+    // interactive console lets them pass in real time.
+    let batch = a.until.is_some() || a.max != 0;
+    let hz = rs6809::m68k::tiny68k::CPU_HZ;
     loop {
-        t.run_one();
+        if let Some(idle) = t.idle() {
+            // STOP with nothing pending: jump to the next device event or
+            // scripted input, and in real time take host input meanwhile.
+            let mut n = idle;
+            if !pending.is_empty() {
+                n = n.min(next_input.saturating_sub(t.cpu.cycles).max(1));
+            }
+            if !batch {
+                n = n.min(hz / 200); // 5 ms slices, to notice typing
+                t.machine.poll_io();
+                if pending.is_empty() && actions.is_empty() {
+                    while let Ok(b) = rx.try_recv() {
+                        t.machine.console_put(if b == 10 { 13 } else { b });
+                    }
+                }
+                if t.idle().is_some() {
+                    thread::sleep(std::time::Duration::from_secs_f64(n as f64 / hz as f64));
+                }
+            }
+            if t.idle().is_some() {
+                // At most a second of guest time per jump (no event: wait).
+                n = n.min(hz);
+                if a.max != 0 {
+                    n = n.min(a.max.saturating_sub(t.cpu.cycles).max(1));
+                }
+                t.skip(n);
+            }
+        } else {
+            t.run_one();
+        }
         if t.cpu.halted {
             return Err(format!("double fault: CPU halted at ${:06X}", t.cpu.pc).into());
         }
@@ -619,6 +685,11 @@ fn run_board<B: ice::Board68k + 'static>(
                 pending.push_back(13);
                 seen.clear();
                 next_input = t.cpu.cycles + 100_000;
+            } else if let Some((_, response)) = optional.iter().find(|(p, _)| seen.contains(p.as_str())) {
+                pending.extend(response.bytes());
+                pending.push_back(13);
+                seen.clear();
+                next_input = t.cpu.cycles + 100_000;
             }
             if seen.len() > 65536 {
                 let cut = seen.char_indices().nth(32768).map_or(0, |(i, _)| i);
@@ -635,6 +706,7 @@ fn run_board<B: ice::Board68k + 'static>(
         blocks += 1;
         if blocks == 1024 {
             blocks = 0;
+            t.machine.poll_io();
             if pending.is_empty() && actions.is_empty() {
                 while let Ok(b) = rx.try_recv() {
                     t.machine.console_put(if b == 10 { 13 } else { b });

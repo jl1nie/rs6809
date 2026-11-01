@@ -590,3 +590,58 @@ fn c_variables_level1() {
 fn c_variables_level2() {
     debug_cvars("artifacts/level2/multicomp09-level2.img", "artifacts/cdebug/level2-cvars", true);
 }
+
+#[test]
+fn reset_returns_to_the_loaded_program() {
+    let mut d = ice(PROGRAM, 0x1000, |_| ());
+    ok(&mut d, "/api/run");
+    d.run_steps(100);
+    assert_eq!(d.t.machine.peek(0x3000), 0x42);
+    ok(&mut d, "/api/reset");
+    // No boot ROM: RAM and registers as loaded.
+    assert_eq!((d.t.cpu.pc, d.t.cpu.s, d.t.machine.peek(0x3000)), (0x1000, 0x7000, 0));
+    let (status, body) = d.command("POST", "/api/machine/save?path=/nonexistent/x", b"");
+    assert_eq!(status, 400, "the 6809 has no state files: {body}");
+    assert!(body.contains("6809"), "{body}");
+}
+
+/// The reset button reboots NitrOS-9 from the boot ROM, replaying the
+/// boot script: requires the kit described in README.
+#[test]
+#[ignore]
+fn reset_reboots_nitros9() {
+    let kit = "reference/nitros9-basic09-starter-kit/nitros9-runtime";
+    let mut m = Machine::multicomp(
+        &fs::read(format!("{kit}/6809M.bin")).unwrap(),
+        File::open(format!("{kit}/multicomp09_sd.img")).unwrap(),
+    )
+    .unwrap();
+    let mut c = Cpu::default();
+    c.reset(&mut m);
+    let actions = VecDeque::from([
+        ("CamelForth".to_string(), "NITROS9".to_string()),
+        ("Time ?".into(), "2026/10/31 12:00:00".into()),
+    ]);
+    let mut d = Ice::new(c, m, Options { actions, echo_console: false });
+    let run_to = |d: &mut Ice, text: &str, n: usize| {
+        for _ in 0..400 {
+            d.run_steps(1_000_000);
+            if String::from_utf8_lossy(&d.console).matches(text).count() >= n {
+                return;
+            }
+        }
+        panic!("no {text}: {}", String::from_utf8_lossy(&d.console));
+    };
+    ok(&mut d, "/api/run");
+    run_to(&mut d, "OS9:", 1);
+    let calls = ok(&mut d, "/api/os/calls?user=1&limit=10");
+    assert!(calls.contains("\"name\""), "traced before the reset");
+    ok(&mut d, "/api/reset");
+    // The OS layer starts over too: nothing found yet, no calls.
+    let state = ok(&mut d, "/api/state");
+    assert!(state.contains("\"os\":null"), "{state}");
+    run_to(&mut d, "OS9:", 2);
+    let con = String::from_utf8_lossy(&d.console).into_owned();
+    assert_eq!(con.matches("CamelForth").count(), 2, "booted twice: {con}");
+    assert!(con.contains("[rs6809: リセット]"));
+}

@@ -6,8 +6,10 @@ ICEでシステムコール・プロセス表・プロセス切り替えを観�
 ```sh
 sh scripts/build-m68k-elf.sh          # 初回だけ。m68k-elfのbinutilsとgcc（数十分）
 sh scripts/build-fuzix-tiny68k.sh     # FUZIXのカーネル・コマンド・ディスク
-sh examples/fuzix68k.sh               # rootでログインしたシェル（^Cで終了）
+sh examples/fuzix68k.sh               # rootでログインしたシェル（^Cで終了。ディスクへの書き込みは残さない）
 sh examples/fuzix68k.sh --ice         # ICE: http://127.0.0.1:6809/
+sh examples/fuzix68k.sh --persist     # 書き込みを artifacts/fuzix68k/hd.img に残す（終わる前に telinit 6）
+sh examples/fuzix68k.sh --tty2        # 2つ目の端末：telnet 127.0.0.1 6812 でログイン
 ```
 
 ```text
@@ -53,6 +55,19 @@ FUZIXの `README.68000.md` は、m68k-linux-gnuのgccを使わないよう警告
 - IDEのドライブ1（スレーブ）はありません（DEVビットが立つと状態0）。カーネルは `IDE drive 1: ide error, status=0000` と表示します。
 - 起動時の質問（`bootdev:`、日付、時刻、`login:`）には `examples/fuzix68k/boot.script` が答えます。
   スクリプトでは `#` で始まる行は注釈なので、プロンプト `# ` を待つ行は `\#` と書きます。
+  `?` で始まる行は、順番に関係なく、その文字列が出るたびに答えます（fsckの `Continue? `・`Fix? `・`Zap? `・`Rebuild free list? ` に `y`）。
+
+## ディスクの書き込み・端末・状態
+
+- 既定では毎回ビルドした `disk.img` から起動し、書き込みはメモリの中だけです（止め方にかかわらず、次の起動は同じ状態から）。
+- `--persist` は `artifacts/fuzix68k/hd.img`（初回に `disk.img` を写す）に書き込みを残します。終わる前に `telinit 6` を打ってください。
+  ランレベル6の `/etc/rc.halt` が `umount -a` とルートの読み出し専用への切り替えをしてから止めます（`halt` だけではファイルシステムが汚れたまま）。
+  汚れたまま止めた場合は、次の起動でfsckが検査・修復します（起動スクリプトが質問に答えます）。
+- `--tty2 [127.0.0.1:6812]` で、DUARTのチャネルB（`/dev/tty2`）をTCPで待ち受けます。`telnet 127.0.0.1 6812` で2つ目のログインができます。
+  ビルドスクリプトが、もとは `off` の `/etc/inittab` の `getty /dev/tty2` を `respawn` にします（FUZIXの `ucp` でファイルシステムを書き換える）。
+  接続する前の出力は最後の2 KiBを取っておき、接続したときに送ります。
+- ICEの「保存」で、ログインした後などの状態（メモリ上のディスクも含む）をファイルにし、`--load-state` か「読込」でそこから再開できます。
+  「↺ リセット」は起動したときの状態（ブートセクタから）に戻します。
 
 ## FUZIXモニタ（`src/ice/fuzix.rs`）
 
@@ -79,6 +94,8 @@ FUZIXの `README.68000.md` は、m68k-linux-gnuのgccを使わないよう警告
 cargo test --release --test fuzix68k -- --ignored
 ```
 
+- 保存した状態から別のICEで再開し、すぐにシェルでコマンドが動くこと。リセットで `bootdev:` からやり直すこと。
+- 2つ目の端末（チャネルB）に `login:` が出て、ログインすると2つ目の `-sh` がプロセス表に出ること。
 - 起動から `ls /`・`ps`・`echo` の出力。シェルの `_fork`（子のpid）、子の `execve "/bin/ps" [ps]`・`open "/dev/proc"`・`_exit`、親の `waitpid` が子のpidを受け取ること、
   `open` で学んだパス名が後の `write` に付くこと、タイムラインが子に切り替わり、シェルに戻ること。
 - シェルの子の `execve` の呼び出し前（D0＝23、プロセス表で子は実行中、親のシェルは睡眠）、`waitpid` の復帰後（D0が子のpid）、

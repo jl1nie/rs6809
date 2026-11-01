@@ -161,6 +161,9 @@ canvas { width: 100%; display: block; }
   <button id="bStep" title="ステップイン (F11)">ステップ</button>
   <button id="bOver" title="ステップオーバー (F10) — JSR/BSR/OS9呼び出しを1命令として実行">ステップオーバー</button>
   <button id="bOut" title="ステップアウト (Shift+F11) — 現在のサブルーチンから戻るまで実行">ステップアウト</button>
+  <button id="bReset" title="リセット — 起動したときの状態に戻す（ディスクの中身はそのまま。起動の自動入力も最初から）">↺ リセット</button>
+  <button id="bSave" title="機械の状態をファイルに保存（--load-state や「読込」で、そこから再開できます）">保存</button>
+  <button id="bLoad" title="保存した状態から再開">読込</button>
   <label class="row" title="実行速度の上限（仮想サイクル/秒）。遅くするとOS-9の動きを目で追えます">速度
     <select id="speed">
       <option value="0">最大</option>
@@ -363,6 +366,19 @@ let consoleNext = 0, termText = "", memPrev = {}, viewAddr = null;
 // ---------- toolbar ----------
 $("bRun").onclick = () => act("run");
 $("bPause").onclick = () => act("pause");
+$("bReset").onclick = () => { if (confirm("リセットしますか？（ディスクの中身はそのまま）")) act("reset"); };
+// The path is on the machine running the emulator, relative to its directory.
+async function stateFile(op) {
+  const path = prompt(op === "save" ? "保存するファイル（エミュレータ側のパス）" : "読み込むファイル（エミュレータ側のパス）", localStorage.getItem("rs6809.state") || "rs6809.state");
+  if (!path) return;
+  try { localStorage.setItem("rs6809.state", path); } catch (e) { /* private mode */ }
+  const r = await fetch(`/api/machine/${op}?path=${encodeURIComponent(path)}`, { method: "POST" });
+  const j = await r.json();
+  if (j.error) alert(j.error); else if (op === "save") alert(`${j.path} に保存しました（${Math.round(j.bytes / 1024)} KiB）`);
+  poll(true);
+}
+$("bSave").onclick = () => stateFile("save");
+$("bLoad").onclick = () => stateFile("load");
 $("bStep").onclick = () => act("step");
 $("bOver").onclick = () => act("over");
 $("bOut").onclick = () => act("out");

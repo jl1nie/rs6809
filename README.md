@@ -345,7 +345,10 @@ ICEのOSタブで、システムコール（`_fork`・`execve`・`waitpid` な�
 sh scripts/build-m68k-elf.sh          # 初回だけ。m68k-elfのbinutilsとgcc
 sh scripts/build-fuzix-tiny68k.sh     # FUZIXのビルドとディスク
 sh examples/fuzix68k.sh --ice         # http://127.0.0.1:6809/
+sh examples/fuzix68k.sh --tty2        # 2つ目の端末：telnet 127.0.0.1 6812
 ```
+
+ICEには、リセット（「↺ リセット」・DAPの `restart`）と、68000の機械の状態の保存・読み込み（「保存」「読込」・`--load-state`）があります。
 
 ## ICE（GUIデバッガ）とOS-9モニタ
 

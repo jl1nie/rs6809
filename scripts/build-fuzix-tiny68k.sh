@@ -32,7 +32,20 @@ app as09 COPT=-fno-jump-tables
 # parallel make races on (one grammar's output ends up as the other's .c).
 app MWC/cmd
 (cd "$FUZIX" && make TARGET=tiny68k -j"$(nproc)" diskimage)
-cp "$FUZIX/Images/tiny68k/disk.img" "$OUT/disk.img"
+# A login on the second serial port too (DUART channel B, /dev/tty2; the
+# emulator's --tty2): its getty is "off" in the stock inittab. ucp's "put"
+# copies out of the image and "get" copies in.
+IMG=$FUZIX/Images/tiny68k
+TMP=$(mktemp -d)
+UCP="$FUZIX/Standalone/ucp $IMG/filesys.img"
+(cd "$TMP" && printf 'cd /etc\nput inittab\n' | $UCP >/dev/null)
+if grep -q '^02:3:off:getty /dev/tty2' "$TMP/inittab"; then
+	sed -i 's|^02:3:off:getty /dev/tty2|02:3:respawn:getty /dev/tty2|' "$TMP/inittab"
+	(cd "$TMP" && printf 'cd /etc\nrm inittab\nget inittab\nchmod 0644 inittab\n' | $UCP >/dev/null)
+	dd if="$IMG/filesys.img" of="$IMG/disk.img" bs=512 seek=2048 conv=notrunc,swab status=none
+fi
+rm -rf "$TMP"
+cp "$IMG/disk.img" "$OUT/disk.img"
 cp "$FUZIX/Kernel/fuzix.map" "$OUT/fuzix.map"
 cp "$FUZIX/Kernel/platform/platform-tiny68k/fuzix.elf" "$OUT/fuzix.elf"
 # Kernel symbols in nm form, which the ICE reads (--symbols).

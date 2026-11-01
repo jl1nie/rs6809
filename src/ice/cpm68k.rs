@@ -183,6 +183,9 @@ impl Cpm68k {
 }
 
 impl OsMonitor for Cpm68k {
+    fn forget(&mut self) {
+        *self.state.borrow_mut() = State::default();
+    }
     fn detect(&mut self, m: &dyn Mem) -> bool {
         // "CP/M-68K V1." after the two jumps at the start of the system, and
         // the BDOS installed on TRAP #2.

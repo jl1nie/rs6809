@@ -309,6 +309,7 @@ impl<T: Target> Ice<T> {
                 ("supportsEvaluateForHovers", true.into()),
                 ("supportsLoadedSourcesRequest", true.into()),
                 ("supportsExceptionFilterOptions", true.into()),
+                ("supportsRestartRequest", true.into()),
                 (
                     "exceptionBreakpointFilters",
                     {
@@ -366,6 +367,14 @@ impl<T: Target> Ice<T> {
                 Ok(Json::Null)
             }
             "configurationDone" | "cancel" => Ok(Json::Null),
+            // Reset the machine; it keeps running or stays stopped as it was.
+            "restart" => {
+                self.reset_machine();
+                if !self.running {
+                    self.dap.stopped(&Stop::Pause, "リセット", Vec::new());
+                }
+                Ok(Json::Null)
+            }
             "disconnect" | "terminate" => {
                 self.remove_sym_bps(|b| b.owner != id);
                 Ok(Json::Null)

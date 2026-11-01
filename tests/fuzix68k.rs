@@ -318,3 +318,78 @@ fn breaks_inside_the_kernel_by_symbol() {
     assert_eq!(dis.get("lines").arr()[0].get("label").str(), Some("dofork"), "{dis}");
     assert_eq!(st.get("os").get("pid").int(), Some(9), "the shell forks for ps");
 }
+
+#[test]
+#[ignore = "requires scripts/build-fuzix-tiny68k.sh"]
+fn saved_state_resumes_at_the_shell() {
+    let mut d = ice(&[]);
+    ok(&mut d, "/api/run");
+    run_until(&mut d, "# ", 1);
+    for _ in 0..20 {
+        d.run_steps(200_000);
+    }
+    ok(&mut d, "/api/pause");
+    let path = std::env::temp_dir().join(format!("rs6809-fuzix-{}.state", std::process::id()));
+    let p = path.to_string_lossy().into_owned();
+    let saved = get_post(&mut d, &format!("/api/machine/save?path={p}"));
+    // The disk is in memory here, so it is saved too.
+    assert!(saved.get("bytes").int().unwrap() > 40_000_000, "{saved}");
+
+    // A fresh ICE continues from the shell prompt: no boot, no login.
+    let mut e = Ice::for_target(
+        machine(),
+        Options {
+            actions: VecDeque::new(),
+            echo_console: false,
+        },
+        Box::new(Fuzix::default()),
+    );
+    e.load_symbols(&format!("{DIR}/fuzix.sym")).unwrap();
+    ok(&mut e, &format!("/api/machine/load?path={p}"));
+    ok(&mut e, "/api/run");
+    e.command("POST", "/api/console", b"echo resumed\r");
+    run_until(&mut e, "resumed\n", 2);
+    assert!(!console(&e).contains("FUZIX version"), "{}", console(&e));
+    let procs = get(&mut e, "/api/os/procs").to_string();
+    assert!(procs.contains("-sh"), "{procs}");
+
+    // Reset goes back to the boot sector.
+    ok(&mut e, "/api/reset");
+    ok(&mut e, "/api/run");
+    run_until(&mut e, "bootdev:", 1);
+    std::fs::remove_file(&path).ok();
+}
+
+fn get_post(d: &mut Fx, t: &str) -> Json {
+    Json::parse(&ok(d, t)).unwrap()
+}
+
+#[test]
+#[ignore = "requires scripts/build-fuzix-tiny68k.sh"]
+fn second_terminal_offers_a_login() {
+    // getty runs on /dev/tty2 (DUART channel B; the build enables it).
+    let mut d = ice(&[]);
+    ok(&mut d, "/api/run");
+    run_until(&mut d, "# ", 1);
+    let mut seen = Vec::new();
+    for _ in 0..200 {
+        d.run_steps(200_000);
+        seen.append(&mut d.t.machine.duart.b.tx);
+        if seen.windows(6).any(|w| w == b"login:") {
+            break;
+        }
+    }
+    assert!(seen.windows(6).any(|w| w == b"login:"), "{}", String::from_utf8_lossy(&seen));
+    // Log in there: a second shell appears in the process table.
+    d.t.machine.duart.b.rx.extend(b"root\r");
+    for _ in 0..200 {
+        d.run_steps(200_000);
+        seen.append(&mut d.t.machine.duart.b.tx);
+        if seen.windows(2).any(|w| w == b"# ") {
+            break;
+        }
+    }
+    let procs = get(&mut d, "/api/os/procs");
+    let shells = procs.get("procs").arr().iter().filter(|p| p.get("name").str() == Some("-sh")).count();
+    assert_eq!(shells, 2, "{procs}");
+}

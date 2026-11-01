@@ -172,6 +172,8 @@ pub trait OsMonitor: Send {
     /// Kernel symbols loaded into the ICE, for OSes found through them
     /// (FUZIX: `udata_shadow`, `ptab`). Called after each symbol load.
     fn use_symbols(&mut self, _find: &dyn Fn(&str) -> Option<u32>) {}
+    /// Forget what was learned at run time (after a reset or a loaded state).
+    fn forget(&mut self) {}
     /// Look for the OS in memory; true once it is running.
     fn detect(&mut self, m: &dyn Mem) -> bool;
     /// Name, terms, process columns, queue names and memory-map kind for the UI.

@@ -45,6 +45,20 @@ impl Sim68k {
             _ => self.ram.get(a as usize).copied().unwrap_or(0xff),
         }
     }
+    pub fn save_state(&self, w: &mut super::state::Writer) {
+        w.bytes(&self.ram);
+        w.bytes(&self.rx.iter().copied().collect::<Vec<u8>>());
+    }
+    pub fn load_state(&mut self, r: &mut super::state::Reader) -> Result<(), String> {
+        let ram = r.bytes()?;
+        if ram.len() != self.ram.len() {
+            return Err("RAMの大きさが違う".into());
+        }
+        self.ram.copy_from_slice(ram);
+        self.rx = r.bytes()?.iter().copied().collect();
+        self.tx.clear();
+        Ok(())
+    }
     /// Write to RAM only.
     pub fn poke(&mut self, a: u32, v: u8) {
         if let Some(b) = self.ram.get_mut((a & 0xff_ffff) as usize) {

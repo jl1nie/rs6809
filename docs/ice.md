@@ -61,6 +61,9 @@ sh examples/nitros9-ice.sh 127.0.0.1:8080  # 待ち受けアドレスを変更
 | シンボル | 逆アセンブルにラベル行・ソース行・分岐先の名前（`LBSR $AA0E <_stkcheck>`）を表示。移動欄にシンボル名を入力可 |
 | ソース行・シンボルのブレーク | `sum`、`hello.c:19` のように指定。モジュールがロードされた位置に自動で配置し直します |
 | スタック | Sから32語。呼び出し命令の直後を指す値を戻り番地（↩）として示し、シンボルを付けます |
+| リセット | 「↺ リセット」・`/api/reset`・DAPの `restart`。起動したときの状態に戻し、起動の自動入力（`--boot`・`--script`）も最初から流します。ディスクの中身はそのまま。ブレークポイントとシンボルは残し、システムコールの記録・トレース・OSの検出はやり直します。6809は、ブートROMがあればMMUなどを初期化してリセットベクタから、なければ読み込んだときのRAMとレジスタに戻します |
+| 状態の保存・読み込み | 「保存」「読込」・`/api/machine/save`・`load`・`--load-state`（68000のみ）。CPU・RAM・装置（DUART・IDE）と、書き込みをファイルに残さないディスクの中身を1つのファイルにします。ログインした後などから、起動を待たずに再開できます |
+| 待ちの省略 | 68000が `STOP` で割り込みを待つ間は命令を回さず、次のタイマーまで時間を進めて、その間ホストを実時間ぶん眠らせます（ゲストが休んでいればCPUをほとんど使いません） |
 
 ## シンボルとソース行
 
@@ -171,12 +174,13 @@ rs6809 ... --dap 127.0.0.1:7000
 ```
 
 エミュレータ自身がDAPサーバーです。各TCP接続が1つのセッションで、要求はHTTPと同じくエミュレータスレッドで処理します。
+例のスクリプトでは `sh examples/cpm68k.sh --dap`・`sh examples/fuzix68k.sh --dap` で、BIOSやカーネルのシンボルも読み込んで待ち受けます。
 ブラウザで止めればエディタにも停止が通知され、その逆も同じです。
 
 VS Codeでは `editors/vscode` の最小限の拡張（依存パッケージなし）を使います。
 
 ```sh
-ln -s "$PWD/editors/vscode" ~/.vscode/extensions/rs6809.rs6809-debug-0.1.0   # VS Codeを再起動
+ln -s "$PWD/editors/vscode" ~/.vscode/extensions/rs6809.rs6809-debug-0.2.0   # VS Codeを再起動
 ```
 
 `.vscode/launch.json`：
@@ -197,12 +201,23 @@ ln -s "$PWD/editors/vscode" ~/.vscode/extensions/rs6809.rs6809-debug-0.1.0   # V
 }
 ```
 
+68000では、拡張の設定の例（「rs6809: CP/M-68K」「rs6809: FUZIX/68000」）から作れます。
+
+```json
+{ "type": "rs6809", "request": "attach", "name": "rs6809: CP/M-68K", "port": 6810,
+  "symbols": ["${workspaceFolder}/examples/cpm68k/bios.lst", "${workspaceFolder}/artifacts/cpm68k/dist/DISK8/CPM15000.MAP"],
+  "sourceDirs": ["${workspaceFolder}/examples/cpm68k"] }
+{ "type": "rs6809", "request": "attach", "name": "rs6809: FUZIX", "port": 6810,
+  "symbols": ["${workspaceFolder}/artifacts/fuzix68k/fuzix.sym"] }
+```
+
 | DAP | 内容 |
 |---|---|
 | `attach`（`launch` も同じ） | `symbols`・`sourceDirs` を読み込みます。`stopOnEntry` で一時停止します |
 | `setBreakpoints` | ソース行。コードのない行は次のコードのある行へ移し、未ロードのモジュールは後で有効になったことを `breakpoint` イベントで通知します |
 | `setFunctionBreakpoints` | シンボル名、または `$C000` |
 | `setInstructionBreakpoints` | 逆アセンブル表示の番地 |
+| `restart` | リセット（ブラウザの「↺ リセット」と同じ）。止まっていれば止まったまま |
 | `setExceptionBreakpoints` | 「エラー復帰」「プロセス切り替え」（名前はOSから）と、条件付きの「システムコールの呼び出し」「システムコールの復帰」（`filterOptions` の条件に名前をカンマ区切りで。例：`F_OPEN,P_LOAD`） |
 | `stackTrace` | フレームの規則があればそれでたどり、なければスタック上の戻り番地（呼び出し命令の直後を指し、シンボルのある値）を探します。戻り番地は呼び出し命令の行を示します |
 | `scopes`/`variables`/`setVariable` | Cのローカル変数・大域変数（展開・変更可）、レジスタ（変更可）、スタック32語、OS-9（プロセスID・モジュール・状態・直近のシステムコール） |
@@ -345,6 +360,8 @@ P2 F$Wait     → 子3が終了 ステータス0
 |---|---|
 | `GET /api/state` | 実行状態、停止理由、レジスタ、MMU、ブレーク設定、OS-9の要約 |
 | `POST /api/run` `pause` `step?n=` `over` `out` `runto?addr=` `speed?hz=` | 実行制御 |
+| `POST /api/reset` | リセット（起動時の状態へ。ディスクの中身はそのまま） |
+| `POST /api/machine/save?path=&disk=1\|0`、`POST /api/machine/load?path=` | 機械の状態のファイル（パスはエミュレータ側。`disk` の既定は、ディスクの書き込みをファイルに残さないとき1） |
 | `POST /api/reg?name=&val=` | レジスタ変更 |
 | `POST /api/bp?addr=&op=add\|del\|toggle\|clear` | ブレークポイント |
 | `POST /api/watch?addr=&len=&kind=r\|w\|rw`、`op=del&index=`、`op=clear` | ウォッチポイント |
