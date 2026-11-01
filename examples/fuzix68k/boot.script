@@ -1,0 +1,5 @@
+# Answers for FUZIX booting on Tiny68K (examples/fuzix68k.sh).
+bootdev:	hda1
+Enter new date:	
+Enter new time:	
+login:	root

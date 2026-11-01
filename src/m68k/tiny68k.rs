@@ -375,8 +375,12 @@ impl Ide {
     fn reg_lba(&self) -> u32 {
         u32::from(self.regs[3]) | u32::from(self.regs[4]) << 8 | u32::from(self.regs[5]) << 16 | u32::from(self.regs[6] & 15) << 24
     }
+    /// Device 1 (the DEV bit of the drive/head register) is not fitted.
+    fn absent(&self) -> bool {
+        self.disk.is_empty() || self.regs[6] & 0x10 != 0
+    }
     fn status(&self) -> u8 {
-        if self.disk.is_empty() { 0 } else { self.status }
+        if self.absent() { 0 } else { self.status }
     }
     pub fn peek(&self, r: u8) -> u8 {
         match r & 15 {
@@ -459,7 +463,7 @@ impl Ide {
         }
     }
     fn command(&mut self, c: u8) {
-        if self.disk.is_empty() {
+        if self.absent() {
             return;
         }
         self.regs[1] = 0;

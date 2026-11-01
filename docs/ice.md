@@ -240,10 +240,12 @@ rs6809 --cpu 68000 --bin prog.s68 --dap             # VS Codeなどから
 
 ICEの画面・HTTP API・DAPは、OS固有の処理を `osmon.rs` の `OsMonitor` トレイト経由でだけ使います。
 2つ目のOSは、このトレイトを実装した型を `Ice::with_os`（6809）・`Ice::for_target` に渡せば載せられます（`Ice::new` はNitrOS-9）。
-CP/M-68Kの実装は `cpm68k.rs` です（[CP/M-68K](cpm68k.md)）。
+CP/M-68Kの実装は `cpm68k.rs`（[CP/M-68K](cpm68k.md)）、FUZIXは `fuzix.rs`（[FUZIX/68000](fuzix68k.md)）です。
+68000では `--os cpm68k|fuzix|none` で選びます。
 
 | メソッド | 内容 | NitrOS-9 |
 |---|---|---|
+| `use_symbols` | 読み込んだ絶対番地のシンボルを受け取る（シンボルの読み込みごと） | 使わない（FUZIXは `udata_shadow`・`ptab`） |
 | `detect` | メモリからOSを見分ける | `D.Init` が `Init` モジュールを指す |
 | `info` | 名前・見出し・キュー名・メモリマップの種類・例外ブレークの名前（`/api/os/info`） | `OS-9`、`NitrOS-9 Level 2` など |
 | `svc_at`・`svc_prefix`・`svc_mnemonic` | 命令がシステムコールか、番号・長さ・戻らないか。逆アセンブルの表記 | `SWI2`＋番号、`OS9 F$xxx` |
@@ -386,6 +388,7 @@ cargo test --release --test os_layer          # 作り物のOS（ToyOS）でAPI�
 cargo test --release --test os_snapshot -- --ignored --nocapture   # OSの表示のスナップショットと速度
 cargo test --release --test m68k_ice          # 68000でHTTP APIとDAP
 cargo test --release --test cpm68k -- --ignored   # CP/M-68K（scripts/fetch-cpm68k.py が必要）
+cargo test --release --test fuzix68k -- --ignored  # FUZIX（scripts/build-fuzix-tiny68k.sh が必要）
 ```
 
 - 逆アセンブラ、ステップオーバー／アウト、ブレークポイント、ウォッチポイント、メモリ・レジスタ操作。

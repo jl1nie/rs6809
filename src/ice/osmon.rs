@@ -169,6 +169,9 @@ pub struct Service {
 pub type PathNames = HashMap<(u8, u8), String>;
 
 pub trait OsMonitor: Send {
+    /// Kernel symbols loaded into the ICE, for OSes found through them
+    /// (FUZIX: `udata_shadow`, `ptab`). Called after each symbol load.
+    fn use_symbols(&mut self, _find: &dyn Fn(&str) -> Option<u32>) {}
     /// Look for the OS in memory; true once it is running.
     fn detect(&mut self, m: &dyn Mem) -> bool;
     /// Name, terms, process columns, queue names and memory-map kind for the UI.

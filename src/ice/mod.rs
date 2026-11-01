@@ -16,6 +16,7 @@ pub mod symbols;
 mod tables;
 pub mod target;
 pub mod cpm68k;
+pub mod fuzix;
 
 use crate::telnet::TelnetServer;
 use crate::{Cpu, Machine};
@@ -420,6 +421,14 @@ impl<T: Target> Ice<T> {
     /// Load symbols (a listing, map or directory) and re-place them.
     pub fn load_symbols(&mut self, spec: &str) -> Result<Vec<usize>, String> {
         let r = self.symbols.load(spec)?;
+        let tables = &self.symbols.tables;
+        // Absolute symbols, for an OS layer that finds the kernel by name.
+        self.os.use_symbols(&|name| {
+            tables
+                .iter()
+                .filter(|t| t.module.is_none())
+                .find_map(|t| t.symbols.iter().find(|s| s.1 == name).map(|s| s.0))
+        });
         self.refresh_symbols();
         self.reresolve();
         Ok(r)

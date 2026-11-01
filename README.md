@@ -335,6 +335,18 @@ sh examples/cpm68k.sh            # 初回は配布物を取得してディスク
 sh examples/cpm68k.sh --ice      # ICE: http://127.0.0.1:6809/
 ```
 
+## FUZIX/68000とプロセスモニタ
+
+小さなUnix系OSのFUZIX 0.5（Tiny68K版）を、モニタROMなしでディスクから起動し、シェルでコマンドを動かします。
+ICEのOSタブで、システムコール（`_fork`・`execve`・`waitpid` など、名前・引数・結果付き）、プロセス表、プロセス切り替えのタイムラインを観察できます。
+詳細は [FUZIX/68000](docs/fuzix68k.md)、OS-9との比較は [fork・exec・waitとOS-9のF$Fork・F$Wait](docs/fork-compare.md) を参照してください。
+
+```sh
+sh scripts/build-m68k-elf.sh          # 初回だけ。m68k-elfのbinutilsとgcc
+sh scripts/build-fuzix-tiny68k.sh     # FUZIXのビルドとディスク
+sh examples/fuzix68k.sh --ice         # http://127.0.0.1:6809/
+```
+
 ## ICE（GUIデバッガ）とOS-9モニタ
 
 ブラウザから操作するインサーキット・エミュレータ相当のデバッガです。外部crateを使わず、エミュレータ自身がlocalhostでHTTPを提供します。

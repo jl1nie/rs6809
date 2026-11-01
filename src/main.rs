@@ -43,6 +43,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut cpu_kind = String::from("6809");
     let mut bins: Vec<String> = Vec::new();
     let mut machine_kind: Option<String> = None;
+    let mut boot_sector = false;
+    let mut os_kind: Option<String> = None;
     let mut max = 0;
     let mut script = None;
     let mut until = None;
@@ -83,6 +85,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 bin = Some(path)
             }
             "--machine" => machine_kind = Some(args.next().ok_or("missing machine")?),
+            "--boot-sector" => boot_sector = true,
+            "--os" => os_kind = Some(args.next().ok_or("missing OS")?),
             "--load" => addr = number(&args.next().ok_or("missing load address")?)?,
             "--pc" => pc = Some(number(&args.next().ok_or("missing PC")?)?),
             "--cpu" => cpu_kind = args.next().ok_or("missing CPU")?,
@@ -114,7 +118,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
             "--help" | "-h" => {
                 println!(
-                    "rs6809 [--cpu 6809|68000] [--bin FILE --load 0x1000 --pc 0x1000]\n       [--rom FILE --disk FILE --boot] [--ram-kb N] [--script FILE]\n       [--acia-count N] [--telnet [127.0.0.1:0]] [--persist-disk|--volatile-disk]\n       [--until TEXT] [--max-cycles N] [--stats] [--measure-from TEXT]\n       [--ice [127.0.0.1:6809]] [--ice-halt] [--dap [127.0.0.1:6810]]\n       [--symbols FILE|DIR[@MODULE]]... [--source-dir DIR]...\n\nDefault: 64 KiB RAM, ACIA $8018/$8019, timer $8010.\nROM+disk: 512 KiB RAM (select 64/128/256/512/1024 with --ram-kb).\nMulticomp console $FFD0/$FFD1, SD $FFD8-$FFDC, timer $FFDD.\n--acia-count selects 1..4 Multicomp ACIAs (default 1, or 4 with --telnet).\n--telnet binds localhost on a free TCP port by default; OS-9 opens the available ACIAs.\nOne client per active ACIA; host stdin is disabled. Use the multi-user Level 2 disk.\n--boot types NITROS9 at the CamelForth prompt.\nScripts: lines PROMPT<TAB>RESPONSE, matched sequentially; response ends with CR.\nTelnet disk writes persist by default; --persist-disk also enables this without Telnet.\n--volatile-disk keeps writes in RAM. Cycle limit without --until exits successfully.\n--stats reports guest cycles and host elapsed seconds to stderr.\n--measure-from starts an output-marker interval, ending at --until.\n--ice serves the debugger UI (registers, disassembly, breakpoints, OS-9 views)\n  over HTTP; open the printed URL. ACIA 1 becomes the browser console.\n--ice-halt starts the CPU stopped at the reset vector.\n--dap also serves the Debug Adapter Protocol (VS Code etc.); implies --ice.\n--symbols loads LWASM/RMA listings and LWLINK/c.link maps (repeatable).\n--source-dir adds a directory searched for source files.\n\n--cpu 68000 [--machine plain|tiny68k] (docs/m68k.md, docs/cpm68k.md):\n  plain: RAM from $000000 (1 MiB, --ram-kb up to 16320), console status $FF0000\n  (bit 0 input ready), data $FF0001. SSP = top of RAM.\n  tiny68k: 16 MiB RAM less 32 KiB, 68681 DUART $FFF000, IDE $FFE000 (--disk,\n  --persist-disk); starts in supervisor state at --pc without a monitor ROM;\n  the CP/M-68K monitor follows the system once it runs.\n  --bin (repeatable) loads a raw binary at --load, or Motorola S-records.\n  Without --pc the start is the S-record entry, else the load address\n  (a raw image loaded at 0 keeps its own reset vectors).\n  Works with --ice, --ice-halt, --dap, --symbols, --script, --until, --max-cycles, --stats."
+                    "rs6809 [--cpu 6809|68000] [--bin FILE --load 0x1000 --pc 0x1000]\n       [--rom FILE --disk FILE --boot] [--ram-kb N] [--script FILE]\n       [--acia-count N] [--telnet [127.0.0.1:0]] [--persist-disk|--volatile-disk]\n       [--until TEXT] [--max-cycles N] [--stats] [--measure-from TEXT]\n       [--ice [127.0.0.1:6809]] [--ice-halt] [--dap [127.0.0.1:6810]]\n       [--symbols FILE|DIR[@MODULE]]... [--source-dir DIR]...\n\nDefault: 64 KiB RAM, ACIA $8018/$8019, timer $8010.\nROM+disk: 512 KiB RAM (select 64/128/256/512/1024 with --ram-kb).\nMulticomp console $FFD0/$FFD1, SD $FFD8-$FFDC, timer $FFDD.\n--acia-count selects 1..4 Multicomp ACIAs (default 1, or 4 with --telnet).\n--telnet binds localhost on a free TCP port by default; OS-9 opens the available ACIAs.\nOne client per active ACIA; host stdin is disabled. Use the multi-user Level 2 disk.\n--boot types NITROS9 at the CamelForth prompt.\nScripts: lines PROMPT<TAB>RESPONSE, matched sequentially; response ends with CR.\n  Lines starting with # are comments (68000: \\# starts a prompt with #).\nTelnet disk writes persist by default; --persist-disk also enables this without Telnet.\n--volatile-disk keeps writes in RAM. Cycle limit without --until exits successfully.\n--stats reports guest cycles and host elapsed seconds to stderr.\n--measure-from starts an output-marker interval, ending at --until.\n--ice serves the debugger UI (registers, disassembly, breakpoints, OS-9 views)\n  over HTTP; open the printed URL. ACIA 1 becomes the browser console.\n--ice-halt starts the CPU stopped at the reset vector.\n--dap also serves the Debug Adapter Protocol (VS Code etc.); implies --ice.\n--symbols loads LWASM/RMA listings, LWLINK/c.link maps, GNU as listings,\n  nm output and CP/M-68K NM68 maps (repeatable).\n--source-dir adds a directory searched for source files.\n\n--cpu 68000 [--machine plain|tiny68k] (docs/m68k.md, docs/cpm68k.md):\n  plain: RAM from $000000 (1 MiB, --ram-kb up to 16320), console status $FF0000\n  (bit 0 input ready), data $FF0001. SSP = top of RAM.\n  tiny68k: 16 MiB RAM less 32 KiB, 68681 DUART $FFF000, IDE $FFE000 (--disk,\n  --persist-disk); starts in supervisor state at --pc without a monitor ROM;\n  --boot-sector loads disk LBA 1 at $15000 and starts there (FUZIX loader);\n  --os cpm68k|fuzix|none picks the OS monitor (default cpm68k); FUZIX needs\n  the kernel symbols (--symbols fuzix.sym).\n  --bin (repeatable) loads a raw binary at --load, or Motorola S-records.\n  Without --pc the start is the S-record entry, else the load address\n  (a raw image loaded at 0 keeps its own reset vectors).\n  Works with --ice, --ice-halt, --dap, --symbols, --script, --until, --max-cycles, --stats."
                 );
                 return Ok(());
             }
@@ -129,6 +133,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
             return run68k(M68kArgs {
                 machine: machine_kind.unwrap_or_else(|| "plain".into()),
+                boot_sector,
+                os: os_kind,
                 bins,
                 disk,
                 persist_disk,
@@ -203,7 +209,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     } else if let Some(pc) = pc {
         cpu.pc = pc
     }
-    if machine_kind.is_some() || bins.len() > 1 {
+    if machine_kind.is_some() || bins.len() > 1 || boot_sector || os_kind.is_some() {
         return Err("--machine and several --bin are for --cpu 68000".into());
     }
     let mut actions = std::collections::VecDeque::<(String, String)>::new();
@@ -389,6 +395,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 }
 struct M68kArgs {
     machine: String,
+    boot_sector: bool,
+    os: Option<String>,
     bins: Vec<String>,
     disk: Option<String>,
     persist_disk: bool,
@@ -444,6 +452,8 @@ fn script_actions(path: &Option<String>) -> Result<std::collections::VecDeque<(S
                 continue;
             }
             let (prompt, response) = line.split_once('\t').ok_or("script requires PROMPT<TAB>RESPONSE")?;
+            // `\#` starts a prompt with `#` (a shell prompt), not a comment.
+            let prompt = prompt.strip_prefix('\\').filter(|p| p.starts_with('#')).unwrap_or(prompt);
             if prompt.is_empty() {
                 return Err("empty script prompt".into());
             }
@@ -452,6 +462,9 @@ fn script_actions(path: &Option<String>) -> Result<std::collections::VecDeque<(S
     }
     Ok(actions)
 }
+
+/// Where the Tiny68K monitor loads a boot sector (the CP/M boot loader).
+const BOOT_SECTOR: u32 = 0x15000;
 
 /// A 68000 machine: the plain one (RAM + console port) or Tiny68K.
 fn run68k(a: M68kArgs) -> Result<(), Box<dyn std::error::Error>> {
@@ -471,6 +484,9 @@ fn run68k(a: M68kArgs) -> Result<(), Box<dyn std::error::Error>> {
             let start = load_images(&a.bins, addr, &mut |at, d| m.load(at, d))?;
             if let Some(pc) = pc.or(start) {
                 m.set_vectors(m.ram.len() as u32 & !1, pc);
+            }
+            if a.os.is_some() {
+                return Err("--os needs --machine tiny68k".into());
             }
             run_board(ice::Mc68000::new(m), Box::new(ice::osmon::NoOs), a)
         }
@@ -493,14 +509,28 @@ fn run68k(a: M68kArgs) -> Result<(), Box<dyn std::error::Error>> {
             } else if a.persist_disk {
                 return Err("persistent writes require --disk".into());
             }
-            let start = load_images(&a.bins, addr, &mut |at, d| m.load(at, d))?;
+            let mut start = load_images(&a.bins, addr, &mut |at, d| m.load(at, d))?;
+            if a.boot_sector {
+                // What the monitor's boot command does: LBA 1 to $15000, run
+                // it. The disk holds byte-swapped words, as the bus reads them.
+                let sector = m.ide.disk.get(512..1024).ok_or("--boot-sector needs a --disk")?;
+                let code: Vec<u8> = sector.chunks(2).flat_map(|w| [w[1], w[0]]).collect();
+                m.load(BOOT_SECTOR, &code)?;
+                start = start.or(Some(BOOT_SECTOR));
+            }
             // No monitor ROM: start the loaded program in supervisor state.
             let t = match pc.or(start) {
                 Some(pc) => ice::Mc68000::start(m, pc, rs6809::m68k::tiny68k::RAM_END),
                 None => ice::Mc68000::new(m),
             };
-            // The CP/M-68K monitor stays idle until the system is found in memory.
-            run_board(t, Box::new(ice::cpm68k::Cpm68k::default()), a)
+            // The OS monitor stays idle until it finds its system in memory.
+            let os: Box<dyn ice::osmon::OsMonitor> = match a.os.as_deref().unwrap_or("cpm68k") {
+                "cpm68k" => Box::new(ice::cpm68k::Cpm68k::default()),
+                "fuzix" => Box::new(ice::fuzix::Fuzix::default()),
+                "none" => Box::new(ice::osmon::NoOs),
+                other => return Err(format!("unknown OS: {other} (cpm68k, fuzix or none)").into()),
+            };
+            run_board(t, os, a)
         }
         other => Err(format!("unknown 68000 machine: {other} (plain or tiny68k)").into()),
     }
