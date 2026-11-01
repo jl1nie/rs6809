@@ -61,7 +61,7 @@ The input field below sends one line with a CR. Combined with Telnet mode (`--te
 
 | Feature | Description |
 |---|---|
-| Run / stop | F5 / F6. A speed limit (1 kHz to 10 MHz, or max) can be chosen; slowing down lets you follow OS-9 by eye |
+| Run / stop | F5 / F6. A speed limit can be chosen around the CPU's nominal clock (6809 1 MHz, 68000 10 MHz), or max; slowing down lets you follow the OS by eye. At max, a guest waiting for the next tick (NitrOS-9 with nothing to run, shortly after an `F$Sleep`) runs at its nominal clock instead: every instruction still runs in the same order, only the host sleeps (the 68000's `STOP` is skipped to the next timer event) |
 | Step | F11 steps one instruction. When an interrupt is accepted, the branch to the vector is one step |
 | Step over | F10. Executes `JSR`, `BSR`, `LBSR`, `SWI` and `OS9` as one instruction, stopping when S returns in the same process |
 | Step out | Shift+F11. Stops when S returns above the current value by `RTS`, `RTI` or `PULS PC` |
@@ -71,7 +71,8 @@ The input field below sends one line with a CR. Combined with Telnet mode (`--te
 | Disassembly navigation | ▲▼ move 4 instructions, ⇞⇟ a page (also ↑↓ PageUp PageDown with the panel focused, and the wheel at either end). → after a branch or call goes to its target, ← returns. Scrolling up retraces the way down; otherwise instruction starts are found from the trace and the labels |
 | Watchpoints | Read, write or both on a range of CPU logical addresses. Stops after the instruction completes |
 | Register / memory editing | While stopped, click a register value or memory byte to change it |
-| Memory view | CPU logical space, OS-9 system space, first 64 KB of physical RAM |
+| Memory view | CPU logical space, OS-9 system space, first 64 KB of physical RAM; as bytes, words or longs. Search for hex bytes or a `"string"` from the shown address on ("Find next") |
+| Watch expressions | Expressions evaluated at every stop (and every second while running): C variables of the stopped function, registers, `[address]` (`.b` `.w` `.l`), symbols and operators, as in breakpoint conditions. Changed values are highlighted; the list is kept in the browser |
 | MMU view | The two task maps (8 banks each), the running task, write protection, fixed upper region |
 | Execution trace | Registers and instruction bytes of the last 4096 instructions, disassembled when displayed |
 | Symbols | The disassembly shows label lines, source lines and branch target names (`LBSR $AA0E <_stkcheck>`). Symbol names can be typed in the go-to field |
@@ -384,6 +385,8 @@ Everything is JSON on `127.0.0.1`. Numbers default to decimal, addresses to hex 
 | `POST /api/watch?addr=&len=&kind=r\|w\|rw`, `op=del&index=`, `op=clear` | Watchpoints |
 | `GET /api/disasm?addr=&n=&back=` | Disassembly (`back` starts from an earlier instruction boundary). Branches and calls have `target` |
 | `GET /api/mem?addr=&len=&space=cpu\|sys\|phys\|pidN`, `POST ...&val=hex` | Memory |
+| `GET /api/mem/find?addr=&pat=hex` | The first address from `addr` holding the bytes (`{"addr":null}` if none) |
+| `GET /api/eval?expr=&frame=` | A watch expression: `{"text":...}` for a C variable, `{"value":N}`, or `{"error":...}` |
 | `GET /api/trace?n=` | Execution trace |
 | `GET /api/console?since=`, `POST /api/console` (body to ACIA 1) | Console |
 | `POST /api/os/break?code=&when=call\|return&op=del`, `errors=` `switch=` `pid=` `trace=` | OS break conditions (`osbreak` in `state`) |

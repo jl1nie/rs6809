@@ -102,10 +102,12 @@ th { color: var(--mute); font-weight: 500; font-size: 12px; border-bottom: 1px s
 .hex .a { color: var(--mute); }
 .hex .byte { cursor: pointer; }
 .hex .byte:hover { background: var(--accent-soft); }
+.hex .byte.found { background: var(--pc); }
 .list { display: flex; flex-direction: column; gap: 3px; }
 .item { display: flex; align-items: center; gap: 6px; font-family: var(--mono); }
 .item button { padding: 0 6px; }
 .item .grow { flex: 1; }
+.item .chgv { color: var(--err); font-weight: 600; }
 .bpcond input { flex: 1; min-width: 0; }
 .item .cond { color: var(--accent); }
 .hide { display: none !important; }
@@ -262,6 +264,13 @@ canvas { width: 100%; display: block; }
         <div class="scroll" style="max-height:320px"><div class="body vars" id="vars"><span class="mute">なし</span></div></div>
       </div>
       <div class="panel">
+        <h2>ウォッチ式</h2>
+        <div class="body">
+          <div class="row"><input id="wxIn" class="mono" style="flex:1;min-width:0" placeholder="例: X+2, [A0].l, count" title="止まるたびに評価します。Cの変数（止まっている関数から）、レジスタ、[番地]（.b .w .l）、シンボル、演算子"><button id="wxAdd">追加</button></div>
+          <div class="list" id="wxList" style="margin-top:6px"></div>
+        </div>
+      </div>
+      <div class="panel">
         <h2>シンボル</h2>
         <div class="body">
           <div class="row"><input id="symPath" style="flex:1;min-width:8em" placeholder="artifacts/cdebug/hello" title="LWASM/RMAのリスト、LWLINK/c.linkのマップ、またはそのディレクトリ（ホスト上のパス）"><button id="symLoad">読込</button><button id="symClear">全削除</button></div>
@@ -303,6 +312,7 @@ canvas { width: 100%; display: block; }
         <h2>メモリ
           <span class="grow"></span>
           <input id="memAddr" class="addr" value="0000">
+          <select id="memWidth" title="表示の単位"><option value="1">1バイト</option><option value="2">ワード</option><option value="4">ロング</option></select>
           <select id="memSpace" title="アドレス空間">
             <option value="cpu">CPU論理</option>
             <option value="sys" id="sysSpace">OSのシステム空間</option>
@@ -310,6 +320,11 @@ canvas { width: 100%; display: block; }
           </select>
           <button id="memGo">表示</button>
         </h2>
+        <div class="row" style="padding:6px 12px 0">
+          <input id="memFind" class="mono" style="flex:1;min-width:0" placeholder="検索: 4E75 / &quot;text&quot;" title="16進のバイト列（空白可）か、&quot;&quot; で囲んだ文字列。表示中の番地の次から探します">
+          <button id="memFindGo">次を検索</button>
+          <span class="mute" id="memFindMsg" style="font-size:12px"></span>
+        </div>
         <div class="body hex" id="mem"></div>
       </div>
       <div class="panel">
@@ -402,6 +417,18 @@ canvas { width: 100%; display: block; }
 // Japanese is written in place; EN maps it to English. The ICE's language
 // (state.lang, /api/lang) is the UI's: one switch for both.
 const EN = {
+"ウォッチ式": "Watch expressions",
+"例: X+2, [A0].l, count": "e.g. X+2, [A0].l, count",
+"止まるたびに評価します。Cの変数（止まっている関数から）、レジスタ、[番地]（.b .w .l）、シンボル、演算子": "Evaluated at every stop: C variables (from the stopped function), registers, [address] (.b .w .l), symbols, operators",
+"表示の単位": "Display unit",
+"1バイト": "Bytes",
+"ワード": "Words",
+"ロング": "Longs",
+"検索: 4E75 / \"text\"": "search: 4E75 / \"text\"",
+"16進のバイト列（空白可）か、\"\" で囲んだ文字列。表示中の番地の次から探します": "Hex bytes (spaces allowed) or a string in \"\". Searches from the shown address on",
+"次を検索": "Find next",
+"16進のバイト列か \"文字列\"": "hex bytes or a \"string\"",
+"見つかりません": "not found",
 "分岐先へ移る前の位置に戻る (Alt+←)": "Back to where you were before jumping to a branch target (Alt+←)",
 "1ページ前 (PageUp)": "One page earlier (PageUp)",
 "4命令前 (↑ / ホイール)": "4 instructions earlier (↑ / wheel)",
@@ -979,16 +1006,23 @@ async function renderMem() {
   const d = await api(`mem?addr=${hex(addr, AW())}&len=256&space=${space}`);
   const key = space + addr;
   const prev = memPrev[key];
+  // Bytes, words or longs (both CPUs are big-endian), 16 bytes a row.
+  const unit = +$("memWidth").value;
+  const hit = memHit;
   let out = "";
   for (let row = 0; row < 16; row++) {
     const a = (addr + row * 16) & AMASK();
     let h = "", s = "";
-    for (let i = 0; i < 16; i++) {
+    for (let i = 0; i < 16; i += unit) {
       const off = (row * 16 + i) * 2;
-      const b = parseInt(d.hex.substr(off, 2), 16);
-      const chg = prev && prev.substr(off, 2) !== d.hex.substr(off, 2);
-      h += `<span class="byte ${chg ? "chg" : ""}" data-a="${(a + i) & AMASK()}">${d.hex.substr(off, 2)}</span>${i === 7 ? "  " : " "}`;
-      const c = b & 0x7f;
+      const txt = d.hex.substr(off, unit * 2);
+      const chg = prev && prev.substr(off, unit * 2) !== txt;
+      const ea = (a + i) & AMASK();
+      const found = hit && ea + unit > hit.addr && ea < hit.addr + hit.len;
+      h += `<span class="byte ${chg ? "chg" : ""} ${found ? "found" : ""}" data-a="${ea}">${txt}</span>${i + unit === 8 ? "  " : " "}`;
+    }
+    for (let i = 0; i < 16; i++) {
+      const c = parseInt(d.hex.substr((row * 16 + i) * 2, 2), 16) & 0x7f;
       s += c >= 32 && c < 127 ? esc(String.fromCharCode(c)) : ".";
     }
     out += `<span class="a">${hex(a, AW())}</span>  ${h} ${s}\n`;
@@ -1000,7 +1034,28 @@ async function renderMem() {
     if (v !== null) { await api(`mem?addr=${hex(+el.dataset.a, AW())}&val=${v.replace(/\s/g, "")}`, ""); renderMem(); }
   });
 }
-$("memGo").onclick = renderMem;
+$("memGo").onclick = () => { memHit = null; renderMem(); };
+$("memWidth").onchange = renderMem;
+// Memory search: hex bytes or a "quoted string", from after the shown address.
+let memHit = null;
+$("memFindGo").onclick = async () => {
+  const v = $("memFind").value.trim();
+  let pat = "";
+  const q = v.match(/^"(.*)"$/s);
+  if (q) pat = [...new TextEncoder().encode(q[1])].map((b) => hex(b, 2)).join("");
+  else pat = v.replace(/[\s,$]/g, "");
+  if (!pat || !/^([0-9a-f]{2})+$/i.test(pat)) { $("memFindMsg").textContent = t("16進のバイト列か \"文字列\""); return; }
+  const base = parseInt($("memAddr").value, 16) || 0;
+  const from = memHit && memHit.addr >= base && memHit.addr < base + 256 ? memHit.addr + 1 : base;
+  const r = await api(`mem/find?addr=${hex(from, AW())}&pat=${pat}`);
+  if (r.addr === null || r.addr === undefined) { $("memFindMsg").textContent = t("見つかりません"); memHit = null; return; }
+  $("memFindMsg").textContent = "$" + hex(r.addr, AW());
+  memHit = { addr: r.addr, len: pat.length / 2 };
+  $("memAddr").value = hex(r.addr & ~15 & AMASK(), AW());
+  $("memSpace").value = "cpu";
+  renderMem();
+};
+$("memFind").onkeydown = (e) => { if (e.key === "Enter") $("memFindGo").onclick(); };
 $("memSpace").onchange = renderMem;
 $("memAddr").onkeydown = (e) => { if (e.key === "Enter") renderMem(); };
 
@@ -1017,6 +1072,33 @@ async function renderTrace() {
   }).join("");
 }
 $("traceN").onchange = renderTrace;
+
+// ---------- watch expressions ----------
+let wxList = [], wxPrev = {};
+try { wxList = JSON.parse(localStorage.getItem("rs6809.watchExpr") || "[]"); } catch (e) { /* private mode */ }
+const wxSave = () => { try { localStorage.setItem("rs6809.watchExpr", JSON.stringify(wxList)); } catch (e) { /* private mode */ } };
+async function renderWatchExprs() {
+  if (!wxList.length) { $("wxList").innerHTML = t('<span class="mute">なし</span>'); return; }
+  const rows = await Promise.all(wxList.map((e) => api(`eval?expr=${encodeURIComponent(e)}&frame=${varFrame || 0}`)));
+  $("wxList").innerHTML = rows.map((r, i) => {
+    let v;
+    if (r.error) v = `<span class="mute">${esc(r.error)}</span>`;
+    else if (r.text !== undefined) v = esc(r.text);
+    else v = `$${(r.value < 0 ? r.value >>> 0 : r.value).toString(16).toUpperCase()} <span class="mute">${r.value}</span>`;
+    const now = r.error ? "" : String(r.text ?? r.value);
+    const chg = wxPrev[wxList[i]] !== undefined && wxPrev[wxList[i]] !== now && !r.error;
+    wxPrev[wxList[i]] = now;
+    return `<div class="item"><span>${esc(wxList[i])}</span><span class="mute">=</span><span class="${chg ? "chgv" : ""}">${v}</span><span class="grow"></span><button data-i="${i}">×</button></div>`;
+  }).join("");
+  $("wxList").querySelectorAll("button").forEach((b) => b.onclick = () => { wxList.splice(+b.dataset.i, 1); wxSave(); renderWatchExprs(); });
+}
+$("wxAdd").onclick = () => {
+  const e = $("wxIn").value.trim();
+  if (!e) return;
+  wxList.push(e); wxSave(); $("wxIn").value = "";
+  renderWatchExprs();
+};
+$("wxIn").onkeydown = (e) => { if (e.key === "Enter") $("wxAdd").onclick(); };
 
 // ---------- console ----------
 const term = $("term");
@@ -1833,7 +1915,7 @@ async function refreshAll() {
   renderRegs();
   renderBps();
   renderOs9Breaks();
-  if (tab === "dbg") await Promise.all([renderDis(), renderMem(), renderTrace(), renderStack(), renderSymbols(), renderVars()]);
+  if (tab === "dbg") await Promise.all([renderDis(), renderMem(), renderTrace(), renderStack(), renderSymbols(), renderVars(), renderWatchExprs()]);
   else await renderOs9();
 }
 let bpLogKey = "";
@@ -1858,7 +1940,7 @@ async function poll(force) {
       if (logKey !== bpLogKey) { bpLogKey = logKey; renderBps(); }
       const now = Date.now();
       if (tab === "os9" && now - lastSlow > 700) { lastSlow = now; await renderOs9(); }
-      else if (tab === "dbg" && now - lastSlow > 1000) { lastSlow = now; await Promise.all([renderDis(), renderTrace()]); }
+      else if (tab === "dbg" && now - lastSlow > 1000) { lastSlow = now; await Promise.all([renderDis(), renderTrace(), renderWatchExprs()]); }
     } else {
       renderHeader();
     }

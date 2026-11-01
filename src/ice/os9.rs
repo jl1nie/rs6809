@@ -872,6 +872,14 @@ impl OsMonitor for Nitros9 {
         // and Level 1 maps low memory one to one.
         self.level.map(|l| if l == Level::One { 0x4b } else { 0x50 })
     }
+    fn sleep_code(&self) -> Option<u8> {
+        Some(0x0a)
+    }
+    fn idle(&self, m: &dyn Mem) -> bool {
+        let Some(v) = self.view(m) else { return false };
+        let cur = u32::from(v.current());
+        v.queues()[0].is_empty() && (cur == 0 || self.in_system(m, cur))
+    }
     fn in_system(&self, m: &dyn Mem, key: u32) -> bool {
         let key = key as u16;
         let Some(v) = self.view(m) else { return false };

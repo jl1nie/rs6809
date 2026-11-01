@@ -302,6 +302,12 @@ pub struct Ice<T: Target = Mc6809> {
     /// The CPU and machine (for the 6809: `t.cpu`, `t.machine`).
     pub t: T,
     pub breakpoints: BTreeSet<u32>,
+    /// Recent idle samples (one bit each) and the start of idle pacing.
+    idle_bits: u16,
+    idle_mark: Option<(Instant, u64)>,
+    /// `os.sleep_code()`, and the cycle of the last such call.
+    sleep_code: Option<u8>,
+    last_sleep: u64,
     /// Conditions of the address breakpoints (`breakpoints`) that have one.
     pub bp_conds: std::collections::BTreeMap<u32, BpCond>,
     /// Logpoint output and condition errors, numbered.
@@ -382,9 +388,13 @@ impl<T: Target> Ice<T> {
         let bits = 1usize << t.addr_bits();
         Self {
             svc_prefix: os.svc_prefix(),
+            sleep_code: os.sleep_code(),
             os_slot: None,
             t,
             breakpoints: BTreeSet::new(),
+            idle_bits: 0,
+            idle_mark: None,
+            last_sleep: 0,
             bp_conds: Default::default(),
             bp_log: VecDeque::new(),
             bp_log_seq: 0,
@@ -767,6 +777,9 @@ impl<T: Target> Ice<T> {
                 None
             };
             let svc = svc.map(|v| self.os.svc_regs(v, &self.t.cpu_state().regs));
+            if svc.is_some_and(|s| Some(s.code) == self.sleep_code) {
+                self.last_sleep = self.t.cycles();
+            }
             if let Some(svc) = svc
                 && !skip
                 && self.break_calls.contains(&svc.code)
@@ -992,6 +1005,9 @@ impl<T: Target> Ice<T> {
                     break;
                 }
                 self.poll_telnet();
+                if self.speed == 0 && self.idle_pace(start, budget) {
+                    break;
+                }
             }
             if self.t.cycles() - c0 >= limit {
                 let rest = budget.saturating_sub(start.elapsed());
@@ -999,6 +1015,33 @@ impl<T: Target> Ice<T> {
                 break;
             }
         }
+    }
+    /// A guest that waits in a loop (the OS has nothing to run) runs at its
+    /// nominal clock instead of flat out: every instruction still executes in
+    /// the same order, only the host sleeps. Sampled every 1024 instructions;
+    /// three quarters of the last 16 samples idle starts the pacing. Returns
+    /// true when the slice's time is used up.
+    fn idle_pace(&mut self, start: Instant, budget: Duration) -> bool {
+        // Waiting: nothing to run, and a process gave the CPU up lately
+        // (within about two clock ticks).
+        let lately = self.t.cycles().saturating_sub(self.last_sleep) < 2 * self.t.clock_hz() / 50;
+        let idle = lately && self.pending_input.is_empty() && self.os().is_some_and(|os| os.idle(self.t.mem()));
+        self.idle_bits = self.idle_bits << 1 | u16::from(idle);
+        if self.idle_bits.count_ones() < 12 {
+            self.idle_mark = None;
+            return false;
+        }
+        let now = Instant::now();
+        let (t0, c0) = *self.idle_mark.get_or_insert((now, self.t.cycles()));
+        let hz = self.t.clock_hz().max(1) as f64;
+        let ahead = (self.t.cycles() - c0) as f64 / hz - now.duration_since(t0).as_secs_f64();
+        if ahead <= 0.0 {
+            return false;
+        }
+        let rest = budget.saturating_sub(start.elapsed());
+        let nap = Duration::from_secs_f64(ahead).min(rest);
+        std::thread::sleep(nap);
+        nap >= rest
     }
     fn poll_telnet(&mut self) {
         self.t.poll_io();
@@ -1332,6 +1375,52 @@ impl<T: Target> Ice<T> {
                 }
                 self.refresh_symbols();
                 http::Response::json(self.symbols_json())
+            }
+            // Watch expressions: a C variable (when stopped in C code), else
+            // an expression over registers, memory and symbols.
+            "/api/eval" => {
+                self.refresh_symbols();
+                let e = p("expr").unwrap_or("").trim();
+                if e.is_empty() {
+                    return bad("expr");
+                }
+                if !self.running {
+                    let frame = p("frame").and_then(parse_num).unwrap_or(0) as usize;
+                    if let Some((table, ty, place)) = self.eval_var(frame, e)
+                        && let Some(v) = self.with_ctx(table, |c| c.format(&ty, place))
+                    {
+                        return http::Response::json(format!("{{\"text\":{}}}", json_str(&v)));
+                    }
+                }
+                match expr::Expr::parse(e).and_then(|x| x.eval(&CondEnv { ice: self })) {
+                    Ok(v) => http::Response::json(format!("{{\"value\":{v}}}")),
+                    Err(err) => http::Response::json(format!("{{\"error\":{}}}", json_str(&err))),
+                }
+            }
+            // Find bytes in memory from addr on (pat: hex digits).
+            "/api/mem/find" => {
+                let from = p("addr").and_then(parse_addr).unwrap_or(0);
+                let pat: Vec<u8> = p("pat")
+                    .unwrap_or("")
+                    .as_bytes()
+                    .chunks(2)
+                    .filter_map(|c| u8::from_str_radix(std::str::from_utf8(c).ok()?, 16).ok())
+                    .collect();
+                if pat.is_empty() {
+                    return bad("pat");
+                }
+                let m = self.t.mem();
+                let end = 1u64 << self.t.addr_bits();
+                let mut found = None;
+                let mut a = u64::from(from);
+                while a + pat.len() as u64 <= end {
+                    if pat.iter().enumerate().all(|(i, &b)| m.peek((a + i as u64) as u32) == b) {
+                        found = Some(a);
+                        break;
+                    }
+                    a += 1;
+                }
+                http::Response::json(format!("{{\"addr\":{}}}", found.map_or("null".into(), |a| a.to_string())))
             }
             "/api/resolve" => {
                 self.refresh_symbols();

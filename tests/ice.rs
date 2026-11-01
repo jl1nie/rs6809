@@ -690,3 +690,19 @@ fn conditional_breakpoints_hit_counts_and_logpoints() {
     assert_eq!((d.running, d.t.cpu.pc), (false, 0x1002));
     assert!(state(&mut d).contains("nosuch"));
 }
+
+#[test]
+fn watch_expressions_and_memory_search() {
+    let mut d = ice(PROGRAM, 0x1000, |m| {
+        m.load(0x4000, b"..hello..hello").unwrap();
+    });
+    ok(&mut d, "/api/step"); // LDX #$2000
+    let get = |d: &mut Ice, q: &str| d.command("GET", q, b"").1;
+    assert_eq!(get(&mut d, "/api/eval?expr=X%2B1"), r#"{"value":8193}"#);
+    assert_eq!(get(&mut d, "/api/eval?expr=%5B%241000%5D.w"), r#"{"value":36384}"#);
+    assert!(get(&mut d, "/api/eval?expr=nosuch").contains("error"));
+    // "hello" from $4000, then the next one after it.
+    assert_eq!(get(&mut d, "/api/mem/find?addr=4000&pat=68656C6C6F"), r#"{"addr":16386}"#);
+    assert_eq!(get(&mut d, "/api/mem/find?addr=4003&pat=68656C6C6F"), r#"{"addr":16393}"#);
+    assert_eq!(get(&mut d, "/api/mem/find?addr=4010&pat=68656C6C6F7A"), r#"{"addr":null}"#);
+}

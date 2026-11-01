@@ -229,6 +229,19 @@ pub trait OsMonitor: Send {
     }
     /// The process is in system state (requests are kernel-internal).
     fn in_system(&self, m: &dyn Mem, key: u32) -> bool;
+    /// Nothing is ready to run: no process is waiting for the CPU, and the
+    /// current one (if any) is inside the kernel. Used only to slow a
+    /// guest that waits in a loop down to its nominal clock (every
+    /// instruction still runs), never to skip anything.
+    fn idle(&self, _m: &dyn Mem) -> bool {
+        false
+    }
+    /// The service that gives the CPU up for a while (OS-9 `F$Sleep`). The
+    /// guest counts as waiting only shortly after one: work inside the
+    /// kernel (a disk read) does not call it.
+    fn sleep_code(&self) -> Option<u8> {
+        None
+    }
     fn describe_entry(&self, m: &dyn Mem, paths: &PathNames, pid: u8, code: u8, r: &CpuRegs) -> String;
     fn describe_exit(&self, m: &dyn Mem, call: &Call, r: &CpuRegs) -> String;
     fn error_of(&self, r: &CpuRegs) -> Option<u8>;
