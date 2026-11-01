@@ -3,6 +3,7 @@
    to assembly and writes the .equ values to artifacts/fuzix68k/offsets.txt;
    tests/fuzix68k.rs compares them with the monitor. */
 #include <kernel.h>
+#include <tty.h>
 #include <stddef.h>
 #define O(n, v) __asm__ volatile (".equ " #n ", %c0" :: "i" (v))
 void f(void) {
@@ -27,4 +28,6 @@ void f(void) {
 	O(U_NAME, offsetof(struct u_data, u_name));
 	O(U_CODEBASE, offsetof(struct u_data, u_codebase));
 	O(U_TOP, offsetof(struct u_data, u_top));
+	O(TTY_SIZE, sizeof(struct tty));
+	O(TTY_WINSIZE, offsetof(struct tty, winsize));
 }

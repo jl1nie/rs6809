@@ -254,6 +254,8 @@ pub struct Ice<T: Target = Mc6809> {
     script: VecDeque<(String, String)>,
     /// Prompts answered whenever they show (`?PROMPT` lines).
     optional: Vec<(String, String)>,
+    /// The browser console's size (rows, columns), kept in the OS's tty.
+    console_size: Option<(u16, u16)>,
     seen: String,
     pending_input: VecDeque<u8>,
     next_input: u64,
@@ -324,6 +326,7 @@ impl<T: Target> Ice<T> {
                 .filter_map(|(p, r)| p.strip_prefix('?').map(|p| (p.to_string(), r.clone())))
                 .collect(),
             script: options.actions.iter().filter(|(p, _)| !p.starts_with('?')).cloned().collect(),
+            console_size: None,
             actions: options.actions.into_iter().filter(|(p, _)| !p.starts_with('?')).collect(),
             seen: String::new(),
             pending_input: VecDeque::new(),
@@ -777,6 +780,7 @@ impl<T: Target> Ice<T> {
         } else {
             (self.speed as f64 * budget.as_secs_f64()).max(1.0) as u64
         };
+        self.apply_console_size();
         self.refresh_symbols();
         let mut n = 0u32;
         while self.running {
@@ -857,6 +861,14 @@ impl<T: Target> Ice<T> {
                 if !self.running {
                     self.resume(Goal::None);
                 }
+                ok()
+            }
+            "/api/console/size" => {
+                let (Some(rows), Some(cols)) = (p("rows").and_then(parse_num), p("cols").and_then(parse_num)) else {
+                    return bad("rows/cols");
+                };
+                self.console_size = Some((rows.clamp(1, 999) as u16, cols.clamp(1, 999) as u16));
+                self.apply_console_size();
                 ok()
             }
             "/api/reset" => {
@@ -1606,6 +1618,17 @@ impl<T: Target> Ice<T> {
         self.forget_run(&format!("状態 {path} を読み込み"));
         Ok(())
     }
+    /// Keep the console's size in the OS: re-applied after the OS changes it
+    /// (FUZIX's login runs stty from .profile) or boots again.
+    fn apply_console_size(&mut self) {
+        let Some((rows, cols)) = self.console_size else { return };
+        if !self.os_ready {
+            return;
+        }
+        for (a, v) in self.os.console_size_writes(self.t.mem(), rows, cols) {
+            self.t.poke(a, v);
+        }
+    }
     /// What was learned from the previous run no longer holds.
     fn forget_run(&mut self, why: &str) {
         self.tracer = Tracer::default();
@@ -1629,6 +1652,7 @@ impl<T: Target> Ice<T> {
     }
     /// Keep executing while `running`, at most `max_steps` instructions.
     pub fn run_steps(&mut self, max_steps: u64) {
+        self.apply_console_size();
         for _ in 0..max_steps {
             if !self.running {
                 return;

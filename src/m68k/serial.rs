@@ -154,9 +154,13 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
         assert_eq!(rx.iter().copied().collect::<Vec<u8>>(), b"root\r");
+        // The requests and the backlog may come in separate segments.
         let mut buf = [0u8; 64];
-        let n = c.read(&mut buf).unwrap();
-        got.extend_from_slice(&buf[..n]);
+        while got.len() < 13 {
+            let n = c.read(&mut buf).unwrap();
+            assert!(n > 0, "closed after {got:?}");
+            got.extend_from_slice(&buf[..n]);
+        }
         assert_eq!(&got[..6], &[IAC, WILL, ECHO, IAC, WILL, SGA]);
         assert!(got.ends_with(b"login: "), "{got:?}");
     }

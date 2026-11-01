@@ -33,6 +33,8 @@ pub mod off {
     pub const U_TOP: u32 = 46;
     pub const U_CODEBASE: u32 = 54;
     pub const U_NAME: u32 = 212;
+    pub const TTY_SIZE: u32 = 32;
+    pub const TTY_WINSIZE: u32 = 24;
 }
 use off::*;
 
@@ -101,6 +103,8 @@ struct Syms {
     ptab_end: u32,
     kernel_end: u32,
     trap12: u32,
+    /// `struct tty ttydata[]` (index = minor; the console is tty1).
+    ttydata: u32,
 }
 
 #[derive(Default)]
@@ -190,6 +194,7 @@ impl OsMonitor for Fuzix {
                 ptab_end: e,
                 kernel_end: find("_end").unwrap_or(0),
                 trap12: find("e_trap12").unwrap_or(0),
+                ttydata: find("ttydata").unwrap_or(0),
             });
         }
     }
@@ -488,5 +493,16 @@ impl OsMonitor for Fuzix {
     }
     fn read_space(&self, _: &dyn Mem, _: &str, _: u32) -> Option<u8> {
         None
+    }
+    fn console_size_writes(&self, m: &dyn Mem, rows: u16, cols: u16) -> Vec<(u32, u8)> {
+        let Some(s) = self.s().filter(|s| s.ttydata != 0) else { return Vec::new() };
+        // ws_row, ws_col of ttydata[1] (no SIGWINCH: programs started later see it).
+        let at = s.ttydata + TTY_SIZE + TTY_WINSIZE;
+        if m.peek16(at) == rows && m.peek16(at + 2) == cols {
+            return Vec::new();
+        }
+        let [r0, r1] = rows.to_be_bytes();
+        let [c0, c1] = cols.to_be_bytes();
+        vec![(at, r0), (at + 1, r1), (at + 2, c0), (at + 3, c1)]
     }
 }

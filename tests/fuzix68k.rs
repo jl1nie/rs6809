@@ -292,6 +292,8 @@ fn monitor_offsets_match_the_kernel_headers() {
         ("U_NAME", off::U_NAME),
         ("U_CODEBASE", off::U_CODEBASE),
         ("U_TOP", off::U_TOP),
+        ("TTY_SIZE", off::TTY_SIZE),
+        ("TTY_WINSIZE", off::TTY_WINSIZE),
     ];
     for (name, v) in want {
         let got = text
@@ -392,4 +394,20 @@ fn second_terminal_offers_a_login() {
     let procs = get(&mut d, "/api/os/procs");
     let shells = procs.get("procs").arr().iter().filter(|p| p.get("name").str() == Some("-sh")).count();
     assert_eq!(shells, 2, "{procs}");
+}
+
+#[test]
+#[ignore = "requires scripts/build-fuzix-tiny68k.sh"]
+fn console_size_reaches_the_guest_tty() {
+    // Told before boot: kept through .profile's stty at login.
+    let mut d = ice(&["stty", "echo size-checked"]);
+    ok(&mut d, "/api/console/size?rows=31&cols=97");
+    ok(&mut d, "/api/run");
+    run_until(&mut d, "size-checked\n", 1);
+    let out = console(&d);
+    assert!(out.contains("31 rows 97 columns"), "{out}");
+    // Told again while running.
+    ok(&mut d, "/api/console/size?rows=24&cols=80");
+    d.command("POST", "/api/console", b"stty\r");
+    run_until(&mut d, "24 rows 80 columns", 1);
 }

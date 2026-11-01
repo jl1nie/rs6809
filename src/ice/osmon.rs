@@ -174,6 +174,12 @@ pub trait OsMonitor: Send {
     fn use_symbols(&mut self, _find: &dyn Fn(&str) -> Option<u32>) {}
     /// Forget what was learned at run time (after a reset or a loaded state).
     fn forget(&mut self) {}
+    /// Bytes to write so the console's terminal has this size in the OS
+    /// (FUZIX: the winsize of tty1, as TIOCSWINSZ sets it); empty when it
+    /// already has it or the OS keeps no size.
+    fn console_size_writes(&self, _m: &dyn Mem, _rows: u16, _cols: u16) -> Vec<(u32, u8)> {
+        Vec::new()
+    }
     /// Look for the OS in memory; true once it is running.
     fn detect(&mut self, m: &dyn Mem) -> bool;
     /// Name, terms, process columns, queue names and memory-map kind for the UI.

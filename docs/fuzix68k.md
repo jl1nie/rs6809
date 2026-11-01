@@ -61,6 +61,7 @@ FUZIXの `README.68000.md` は、m68k-linux-gnuのgccを使わないよう警告
 
 - 端末の種類は `TERM=vt52`（`init` が設定し、`/etc/termcap` にあります）。ICEのコンソールはFUZIXでは既定でVT52として解釈するので、`less`・`vile`・`fleamacs` などの全画面のプログラムも使えます。
   FUZIXの端末には大きさの既定がないため（全画面のプログラムが200行以上あると思ってしまう）、ビルドスクリプトが `/root/.profile` に `stty rows 24 cols 80` を書きます。
+  ICEの中では、ブラウザのコンソールの大きさを、ICEが1つ目の端末の `winsize` に書き込みます（`.profile` の後でも直します）。
 
 - 既定では毎回ビルドした `disk.img` から起動し、書き込みはメモリの中だけです（止め方にかかわらず、次の起動は同じ状態から）。
 - `--persist` は `artifacts/fuzix68k/hd.img`（初回に `disk.img` を写す）に書き込みを残します。終わる前に `telinit 6` を打ってください。

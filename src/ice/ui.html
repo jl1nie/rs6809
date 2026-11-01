@@ -104,7 +104,16 @@ th { color: var(--mute); font-weight: 500; font-size: 12px; border-bottom: 1px s
 .mmu .wp { text-decoration: underline; }
 #console { width: 34%; min-width: 320px; max-width: 720px; display: flex; flex-direction: column; border-left: 1px solid var(--line); background: var(--term-bg); }
 #console .bar { display: flex; gap: 6px; align-items: center; padding: 6px 8px; color: var(--term-ink); font-size: 12px; border-bottom: 1px solid #ffffff1a; }
-#term { flex: 1; margin: 0; padding: 8px 10px; overflow: auto; color: var(--term-ink); font: 13px/1.35 var(--mono); white-space: pre; outline: none; }
+/* The box takes the panel's free space; the terminal inside is exactly the
+   screen's rows high, so only the screen shows and the scrollback is above it. */
+#termBox { flex: 1; min-height: 0; overflow: hidden; padding: 8px 0; box-sizing: border-box; }
+/* No vertical padding inside: scrolled to the bottom, the view is exactly the
+   screen's rows (padding there would show part of the scrollback's last line). */
+#term { position: relative; box-sizing: border-box; height: 100%; margin: 0; padding: 0 10px; overflow-x: auto; overflow-y: scroll; color: var(--term-ink); font: 13px/1.35 var(--mono); white-space: pre; outline: none; }
+/* The vertical scrollbar's place is always kept (overflow-y: scroll), so the
+   width, and the number of columns, do not change when the scrollback grows;
+   the screen is sized to the panel, so there is no horizontal scrolling. */
+#term { overflow-x: hidden; }
 /* Terminal colours: 0-7 normal, 8-15 bright; 17/18 are the default background/ink (reverse video). */
 #term .f0 { color: #3b4252; } #term .f1 { color: #e06c75; } #term .f2 { color: #98c379; } #term .f3 { color: #e5c07b; }
 #term .f4 { color: #61afef; } #term .f5 { color: #c678dd; } #term .f6 { color: #56b6c2; } #term .f7 { color: #d7e0ea; }
@@ -344,18 +353,17 @@ canvas { width: 100%; display: block; }
       <strong>コンソール /term</strong><span style="opacity:.6">（クリックしてキー入力）</span>
       <span style="flex:1"></span>
       <span id="termSize" class="mono" title="端末の桁数×行数" style="opacity:.75"></span>
-      <select id="termFit" title="端末の大きさ：欄に合わせるか、80×24に固定（欄が狭ければ横にスクロール）" style="background:#ffffff12;color:inherit;border-color:#ffffff22">
-        <option value="fit">欄に合わせる</option>
+      <select id="termFit" title="端末の大きさ。80×24は文字の大きさを欄に合わせる。「欄に合わせる」は欄に収まる桁数・行数にする。どちらもゲストの端末の大きさに反映する（FUZIX）" style="background:#ffffff12;color:inherit;border-color:#ffffff22">
         <option value="80x24">80×24</option>
+        <option value="fit">欄に合わせる</option>
       </select>
-      <button id="termTell" title="ゲストに今の大きさを設定するコマンドを送る（シリアルの端末は大きさを自動では伝えられないため）" style="background:#ffffff12;color:inherit;border-color:#ffffff22">大きさを伝える</button>
       <select id="termMode" title="端末の種類（ゲストのTERMに合わせる。FUZIXはvt52）" style="background:#ffffff12;color:inherit;border-color:#ffffff22">
         <option value="ansi">ANSI/xterm</option>
         <option value="vt52">VT52</option>
       </select>
       <button id="termClear" style="background:#ffffff12;color:inherit;border-color:#ffffff22">消去</button>
     </div>
-    <pre id="term" tabindex="0"></pre>
+    <div id="termBox"><pre id="term" tabindex="0"></pre></div>
     <div class="bar"><input id="line" placeholder="1行入力して Enter（CRを付けて送信）"></div>
   </aside>
 </main>
@@ -990,48 +998,74 @@ function termMode(m, remember) {
   if (remember) try { localStorage.setItem("rs6809.term." + (osInfo?.os || "none"), m); } catch (e) { /* private mode */ }
 }
 $("termMode").onchange = () => termMode($("termMode").value, true);
-// The terminal's size: the console panel's, in character cells, or 80x24.
-let termFixed = false;
-try { termFixed = localStorage.getItem("rs6809.termFit") === "80x24"; } catch (e) { /* private mode */ }
+// The terminal's size. 80x24 (the default) is what the guests assume (FUZIX
+// sets it at login), drawn with the font scaled to fill the panel; "fit"
+// gives the panel's size in cells, which the guest must then be told.
+let termFixed = true;
+try { termFixed = localStorage.getItem("rs6809.termFit") !== "fit"; } catch (e) { /* private mode */ }
 $("termFit").value = termFixed ? "80x24" : "fit";
+const TERM_FONT = 13;
+// One character cell: the width of a run of characters, and the height of
+// a line box (two lines, so the line height counts, not just the glyphs).
 function cellSize() {
-  const probe = document.createElement("span");
-  probe.textContent = "M".repeat(20);
-  probe.style.visibility = "hidden";
+  const probe = document.createElement("div");
+  probe.textContent = "M".repeat(20) + "\n" + "M".repeat(20);
+  probe.style.cssText = "position:absolute;visibility:hidden;white-space:pre;left:0;top:0";
   term.appendChild(probe);
   const r = probe.getBoundingClientRect();
   probe.remove();
-  return [r.width / 20, r.height];
+  return [r.width / 20, r.height / 2];
 }
 function termFit() {
+  const box = $("termBox");
+  const cs = getComputedStyle(term);
+  const padX = parseFloat(cs.paddingLeft) + parseFloat(cs.paddingRight);
+  const padY = parseFloat(cs.paddingTop) + parseFloat(cs.paddingBottom);
+  // The width inside the terminal (its vertical scrollbar is always there),
+  // the height inside the box it sits in.
+  const bs = getComputedStyle(box);
+  const w = term.clientWidth - padX;
+  const h = box.clientHeight - parseFloat(bs.paddingTop) - parseFloat(bs.paddingBottom) - padY;
+  if (w <= 0 || h <= 0) return; // the console is hidden
+  // Measure at the base size, then scale (cells grow with the font).
+  term.style.fontSize = TERM_FONT + "px";
+  const [cw, ch] = cellSize();
+  if (!cw || !ch) return;
   let cols = 80, rows = 24;
-  if (!termFixed) {
-    const cs = getComputedStyle(term);
-    const w = term.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight);
-    const h = term.clientHeight - parseFloat(cs.paddingTop) - parseFloat(cs.paddingBottom);
-    const [cw, ch] = cellSize();
-    if (w <= 0 || h <= 0 || !cw || !ch) return; // the console is hidden
+  if (termFixed) {
+    // The whole 80x24 screen in the panel: the largest font that fits.
+    const scale = Math.min(w / (80 * cw), h / (24 * ch));
+    const size = Math.max(6, Math.min(32, Math.floor(TERM_FONT * scale * 10) / 10));
+    term.style.fontSize = size + "px";
+  } else {
     cols = Math.floor(w / cw);
     rows = Math.floor(h / ch);
   }
-  if (screen.resize(cols, rows)) termDraw();
+  screen.resize(cols, rows);
+  tellSize();
+  // Exactly the screen's rows tall (measured at the font now in use).
+  const lineH = cellSize()[1];
+  term.style.height = rows * lineH + padY + "px";
+  termDraw();
+  term.scrollTop = term.scrollHeight;
   $("termSize").textContent = `${screen.cols}×${screen.rows}`;
 }
 let fitTimer = 0;
-new ResizeObserver(() => { clearTimeout(fitTimer); fitTimer = setTimeout(termFit, 80); }).observe(term);
+new ResizeObserver(() => { clearTimeout(fitTimer); fitTimer = setTimeout(termFit, 80); }).observe($("termBox"));
 $("termFit").onchange = () => {
   termFixed = $("termFit").value === "80x24";
   try { localStorage.setItem("rs6809.termFit", $("termFit").value); } catch (e) { /* private mode */ }
   termFit();
 };
-// Tell the guest the size: FUZIX with stty, NitrOS-9 with tmode (page length).
-function tellCommand() {
-  const os = osInfo?.os;
-  if (os === "fuzix") return `stty rows ${screen.rows} cols ${screen.cols}\r`;
-  if (os === "nitros9") return `tmode pag=${screen.rows}\r`;
-  return null;
+// The guest's terminal gets the same size: the ICE keeps it in the OS
+// (FUZIX's tty1 winsize), so programs started from now on use it.
+let toldSize = "";
+function tellSize() {
+  const q = `rows=${screen.rows}&cols=${screen.cols}`;
+  if (q === toldSize) return;
+  toldSize = q;
+  api("console/size?" + q, "");
 }
-$("termTell").onclick = () => { const c = tellCommand(); if (c) { sendKeys(c); term.focus(); } };
 let keyQueue = "";
 function sendKeys(s) { keyQueue += s; }
 setInterval(() => { if (keyQueue) { const s = keyQueue; keyQueue = ""; api("console", s); } }, 40);
@@ -1066,10 +1100,7 @@ async function loadOsInfo() {
   let m = null;
   try { m = localStorage.getItem("rs6809.term." + osInfo.os); } catch (e) { /* private mode */ }
   termMode(m || (osInfo.os === "fuzix" ? "vt52" : "ansi"), false);
-  $("termTell").style.display = tellCommand() ? "" : "none";
-  $("termTell").title = tellCommand()
-    ? `ゲストに今の大きさを設定するコマンド（${tellCommand().trim()}）を送る。シリアルの端末は大きさを自動では伝えられないため`
-    : "";
+
   $("osTab").textContent = `${osInfo.name} モニタ`;
   // A bare program (no OS) has no OS monitor tab.
   $("osTab").style.display = osInfo.os === "none" ? "none" : "";
