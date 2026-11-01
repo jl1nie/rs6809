@@ -97,8 +97,11 @@ release CPM15000.MAP artifacts/cpm68k/dist/DISK8/CPM15000.MAP
 release cpm68k-a.img.gz artifacts/release-cache/cpm68k-a.img.gz
 release fuzix68k-disk.img.gz artifacts/release-cache/fuzix68k-disk.img.gz
 release fuzix.sym artifacts/fuzix68k/fuzix.sym
+release fuzix-usersyms.tar.gz artifacts/release-cache/fuzix-usersyms.tar.gz
 release NOTICE.md artifacts/release-cache/NOTICE.md
 [ -f artifacts/fuzix68k/disk.img ] || gzip -dc artifacts/release-cache/fuzix68k-disk.img.gz > artifacts/fuzix68k/disk.img
+# The programs' symbols for the ICE (artifacts/fuzix68k/usersyms/NAME.sym).
+[ -f artifacts/fuzix68k/usersyms/sh.sym ] || gzip -dc artifacts/release-cache/fuzix-usersyms.tar.gz | tar -xf - -C artifacts/fuzix68k
 fresh_cpm=
 if [ ! -f artifacts/cpm68k/a.img ]; then
 	gzip -dc artifacts/release-cache/cpm68k-a.img.gz > artifacts/cpm68k/a.img

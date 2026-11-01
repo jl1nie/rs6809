@@ -11,7 +11,7 @@ cd "$(dirname "$0")/.."
 OUT=artifacts/release
 D=artifacts/cpm68k/dist/DISK8
 F=artifacts/fuzix68k
-for f in $D/CPM15000.SR $D/CPM15000.MAP $F/disk.img $F/fuzix.sym; do
+for f in $D/CPM15000.SR $D/CPM15000.MAP $F/disk.img $F/fuzix.sym $F/usersyms/sh.sym; do
 	[ -f "$f" ] || { echo "missing $f (see the comment at the top)" >&2; exit 1; }
 done
 rm -rf "$OUT"
@@ -21,6 +21,8 @@ python3 -I scripts/cpm68k-disk.py dist --no-alcyon "$OUT/cpm68k-a.img" examples/
 gzip -n -9 "$OUT/cpm68k-a.img"
 gzip -n -9 -c $F/disk.img > "$OUT/fuzix68k-disk.img.gz"
 cp $F/fuzix.sym "$OUT/"
+# Each program's symbols; the same bytes for the same files.
+tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner -C $F -cf - usersyms | gzip -n -9 > "$OUT/fuzix-usersyms.tar.gz"
 cp release/NOTICE.md "$OUT/NOTICE.md"
 {
 	grep ' rs6809-' release/images.sha256 || true
