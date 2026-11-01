@@ -15,6 +15,7 @@ pub mod osmon;
 pub mod symbols;
 mod tables;
 pub mod target;
+pub mod cpm68k;
 
 use crate::telnet::TelnetServer;
 use crate::{Cpu, Machine};
@@ -22,7 +23,7 @@ use osmon::{CpuRegs, OsMonitor, Tracer};
 use std::collections::{BTreeSet, VecDeque};
 use symbols::{Symbols, Target as BpTarget};
 use target::{Flow, Mc6809, Target};
-pub use target::Mc68000;
+pub use target::{Board68k, Mc68000};
 use std::fmt::Write as _;
 use std::io;
 use std::net::TcpListener;
@@ -276,9 +277,9 @@ impl Ice<Mc6809> {
     }
 }
 
-impl Ice<Mc68000> {
+impl<B: target::Board68k> Ice<Mc68000<B>> {
     /// An ICE for a bare 68000 program (no OS).
-    pub fn m68000(t: Mc68000, options: Options) -> Self {
+    pub fn m68000(t: Mc68000<B>, options: Options) -> Self {
         Ice::for_target(t, options, Box::new(osmon::NoOs))
     }
 }
@@ -565,6 +566,7 @@ impl<T: Target> Ice<T> {
             } else {
                 None
             };
+            let svc = svc.map(|v| self.os.svc_regs(v, &self.t.cpu_state().regs));
             if let Some(svc) = svc
                 && !skip
                 && self.break_calls.contains(&svc.code)
@@ -1452,7 +1454,7 @@ impl<T: Target> Ice<T> {
                     c.depth,
                     Self::call_regs_json(&c.inp),
                     c.out.as_ref().map_or("null".into(), Self::call_regs_json),
-                    json_str(&if c.args.is_empty() && c.system { generic(&c.inp) } else { c.args.clone() }),
+                    json_str(&if c.args.is_empty() && c.system && !self.os.internal(c.code, 0) { generic(&c.inp) } else { c.args.clone() }),
                     json_str(&if c.result.is_empty() && c.out.is_some() { "OK".to_string() } else { c.result.clone() }),
                     c.error.map_or("null".into(), |e| e.to_string()),
                     c.no_return,

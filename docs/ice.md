@@ -76,6 +76,9 @@ rs6809 --rom ... --disk ... --boot --ice --symbols artifacts/level2/echo.lst --s
 | LWASMのリスト（`lwasm --list`） | ラベル、各行のコード範囲、ソース本文。先頭が `$87CD` のモジュールはモジュール内オフセットとして扱います |
 | LWLINKのマップ（`Symbol: 名前 (ファイル) = XXXX`） | 絶対アドレスのシンボル |
 | Microware RMAのリスト（`c.asm -l`）＋同名の `.map`（`c.link -m -s`）＋ `.m`（`c.prep -l`） | Cの関数シンボル、命令ごとのモジュール内オフセットとCの行 |
+| GNU asのリスト（`as -al`、先頭が `68K GAS`）＋同名の `.map`（`nm -n` の出力） | 68000のアセンブリの各行のコード範囲とソース本文。`.text` の番地は、`.map` の同じラベルの番地から求めます（CP/M-68KのBIOS） |
+| `nm` の出力（`0001b000 T _init`） | 絶対番地のシンボル |
+| CP/M-68KのNM68の出力（`CPM15000.MAP`、`_init 1B000 equ global abs`） | CCP・BDOSの絶対番地のシンボル |
 
 - `ファイル@モジュール名` でLWLINKのマップやリストをそのモジュールに配置し、`ファイル@abs` で絶対アドレスとして扱います。
 - OS-9のモジュールは位置独立で、ロードされる場所は実行ごとに変わります。モジュール内オフセットの表は、
@@ -200,7 +203,7 @@ ln -s "$PWD/editors/vscode" ~/.vscode/extensions/rs6809.rs6809-debug-0.1.0   # V
 | `setBreakpoints` | ソース行。コードのない行は次のコードのある行へ移し、未ロードのモジュールは後で有効になったことを `breakpoint` イベントで通知します |
 | `setFunctionBreakpoints` | シンボル名、または `$C000` |
 | `setInstructionBreakpoints` | 逆アセンブル表示の番地 |
-| `setExceptionBreakpoints` | 「OS-9 エラー復帰」「OS-9 プロセス切り替え」 |
+| `setExceptionBreakpoints` | 「エラー復帰」「プロセス切り替え」（名前はOSから）と、条件付きの「システムコールの呼び出し」「システムコールの復帰」（`filterOptions` の条件に名前をカンマ区切りで。例：`F_OPEN,P_LOAD`） |
 | `stackTrace` | フレームの規則があればそれでたどり、なければスタック上の戻り番地（呼び出し命令の直後を指し、シンボルのある値）を探します。戻り番地は呼び出し命令の行を示します |
 | `scopes`/`variables`/`setVariable` | Cのローカル変数・大域変数（展開・変更可）、レジスタ（変更可）、スタック32語、OS-9（プロセスID・モジュール・状態・直近のシステムコール） |
 | `next`/`stepIn`/`stepOut` | 行単位。`granularity: "instruction"` で命令単位。行情報のない場所では命令単位 |
@@ -236,16 +239,19 @@ rs6809 --cpu 68000 --bin prog.s68 --dap             # VS Codeなどから
 ## OSの差し替え口
 
 ICEの画面・HTTP API・DAPは、OS固有の処理を `osmon.rs` の `OsMonitor` トレイト経由でだけ使います。
-2つ目のOSは、このトレイトを実装した型を `Ice::with_os` に渡せば載せられます（`Ice::new` はNitrOS-9）。
+2つ目のOSは、このトレイトを実装した型を `Ice::with_os`（6809）・`Ice::for_target` に渡せば載せられます（`Ice::new` はNitrOS-9）。
+CP/M-68Kの実装は `cpm68k.rs` です（[CP/M-68K](cpm68k.md)）。
 
 | メソッド | 内容 | NitrOS-9 |
 |---|---|---|
 | `detect` | メモリからOSを見分ける | `D.Init` が `Init` モジュールを指す |
 | `info` | 名前・見出し・キュー名・メモリマップの種類・例外ブレークの名前（`/api/os/info`） | `OS-9`、`NitrOS-9 Level 2` など |
 | `svc_at`・`svc_prefix`・`svc_mnemonic` | 命令がシステムコールか、番号・長さ・戻らないか。逆アセンブルの表記 | `SWI2`＋番号、`OS9 F$xxx` |
+| `svc_regs` | 番号をレジスタで渡すOSで、実行直前のレジスタから番号を決める（既定は何もしない） | 使わない（CP/M-68KはD0.W） |
+| `internal` | 番号や呼び出し元の番地から、常にOS内部の呼び出しとみなすもの | 使わない（CP/M-68KはBIOS呼び出しと、BDOSの中からのBDOS呼び出し） |
 | `service_name` ほか | サービス・エラーの名前と説明 | `defs/os9.d` から生成した表 |
 | `current`・`current_slot`・`pid_of`・`in_system` | 実行中のプロセスとそのID、システム状態か | `D.Proc`、`P$ID`、`P$State` |
-| `describe_entry`・`describe_exit`・`error_of`・`learn` | 引数・結果の説明、エラーの判定、パス名の学習 | 下記 |
+| `describe_entry`・`describe_exit`・`error_of`・`error_for`・`learn` | 引数・結果の説明、エラーの判定（`error_for` は呼び出しの種類ごと。既定は `error_of`）、パス名などの学習 | 下記 |
 | `processes`・`summary` | プロセス表（共通の列＋OS固有の列）とキュー | プロセス記述子、`D.AProcQ` など |
 | `images`・`image_calls` | ロード済みイメージと物理RAM上の範囲（シンボルの配置）、それが変わりうる呼び出し | モジュールディレクトリ、`F$Link` など |
 | `memory_map`・`read_space` | メモリの使用状況、OSのアドレス空間 | `D.FMBM`／`D.BlkMap`、`sys`・`pidN` |
@@ -379,6 +385,7 @@ cargo test --release --test dap               # DAP（TCP）の一連の操作
 cargo test --release --test os_layer          # 作り物のOS（ToyOS）でAPIとDAP
 cargo test --release --test os_snapshot -- --ignored --nocapture   # OSの表示のスナップショットと速度
 cargo test --release --test m68k_ice          # 68000でHTTP APIとDAP
+cargo test --release --test cpm68k -- --ignored   # CP/M-68K（scripts/fetch-cpm68k.py が必要）
 ```
 
 - 逆アセンブラ、ステップオーバー／アウト、ブレークポイント、ウォッチポイント、メモリ・レジスタ操作。

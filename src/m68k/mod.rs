@@ -6,6 +6,7 @@
 //! Prefetch is not modelled: the PC points at the next unread word.
 pub mod disasm;
 pub mod machine;
+pub mod tiny68k;
 mod exec;
 
 /// The 68000's memory and I/O.

@@ -7,6 +7,7 @@ use super::osmon::{CpuRegs, CpuState, Mem, Regs, Regs68k};
 use super::{Watch, WatchKind};
 use crate::cpu::I;
 use crate::m68k::machine::Sim68k;
+use crate::m68k::tiny68k::Tiny68k;
 use crate::m68k::{Bus68k, M68k};
 use crate::{Bus, Cpu, Machine};
 use std::io;
@@ -337,18 +338,109 @@ pub fn regs68k_json(d: &[u32; 8], a: &[u32; 8], sr: u16, pc: u32, usp: u32, ssp:
     o
 }
 
-/// The 68000 and its plain machine (RAM and a console port).
-pub struct Mc68000 {
-    pub cpu: M68k,
-    pub machine: Sim68k,
+/// A 68000 machine: memory, devices and the console.
+pub trait Board68k: Bus68k + Mem + Send {
+    /// Write RAM only (no device side effects).
+    fn poke(&mut self, addr: u32, v: u8);
+    /// Advance the devices by CPU cycles.
+    fn tick(&mut self, _cycles: u64) {}
+    /// Interrupt request: (level 0–7, vector or autovector).
+    fn irq(&self) -> (u8, Option<u8>) {
+        (0, None)
+    }
+    fn console_take(&mut self) -> Vec<u8>;
+    fn console_ready(&self) -> bool;
+    fn console_put(&mut self, b: u8);
+    fn disk_error(&mut self) -> Option<io::Error> {
+        None
+    }
 }
 
-impl Mc68000 {
+impl Board68k for Sim68k {
+    fn poke(&mut self, addr: u32, v: u8) {
+        Sim68k::poke(self, addr, v)
+    }
+    fn console_take(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.tx)
+    }
+    fn console_ready(&self) -> bool {
+        self.rx.is_empty()
+    }
+    fn console_put(&mut self, b: u8) {
+        self.rx.push_back(b)
+    }
+}
+
+impl Mem for Tiny68k {
+    fn peek(&self, addr: u32) -> u8 {
+        Tiny68k::peek(self, addr)
+    }
+    fn translate(&self, addr: u32) -> Option<usize> {
+        let a = (addr & 0xff_ffff) as usize;
+        (a < self.ram.len()).then_some(a)
+    }
+    fn logical(&self, phys: usize) -> Option<u32> {
+        (phys < self.ram.len()).then_some(phys as u32)
+    }
+    fn ram(&self) -> &[u8] {
+        &self.ram
+    }
+}
+
+impl Board68k for Tiny68k {
+    fn poke(&mut self, addr: u32, v: u8) {
+        Tiny68k::poke(self, addr, v)
+    }
+    fn tick(&mut self, cycles: u64) {
+        Tiny68k::tick(self, cycles)
+    }
+    fn irq(&self) -> (u8, Option<u8>) {
+        Tiny68k::irq(self)
+    }
+    fn console_take(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.duart.a.tx)
+    }
+    fn console_ready(&self) -> bool {
+        self.duart.a.rx.is_empty()
+    }
+    fn console_put(&mut self, b: u8) {
+        self.duart.a.rx.push_back(b)
+    }
+    fn disk_error(&mut self) -> Option<io::Error> {
+        self.ide.error.take()
+    }
+}
+
+/// The 68000 and its machine (by default the plain RAM + console one).
+pub struct Mc68000<B: Board68k = Sim68k> {
+    pub cpu: M68k,
+    pub machine: B,
+}
+
+impl<B: Board68k> Mc68000<B> {
     /// Reset from the vectors at address 0.
-    pub fn new(mut machine: Sim68k) -> Self {
+    pub fn new(mut machine: B) -> Self {
         let mut cpu = M68k::default();
         cpu.reset(&mut machine);
         Self { cpu, machine }
+    }
+    /// Start at `pc` in supervisor state with the stack at `ssp`, without
+    /// reading the reset vectors (a program loaded without a ROM).
+    pub fn start(machine: B, pc: u32, ssp: u32) -> Self {
+        let mut cpu = M68k::default();
+        cpu.sr = crate::m68k::S | 0x0700;
+        cpu.a[7] = ssp;
+        cpu.pc = pc;
+        Self { cpu, machine }
+    }
+    /// One instruction or interrupt entry on the machine, with its devices.
+    pub fn run_one(&mut self) {
+        let (level, vector) = self.machine.irq();
+        self.cpu.irq = level;
+        self.cpu.irq_vector = vector;
+        let old = self.cpu.cycles;
+        self.cpu.step(&mut self.machine);
+        self.machine.tick(self.cpu.cycles - old);
     }
 }
 
@@ -368,12 +460,12 @@ impl Mem for Sim68k {
     }
 }
 
-struct Probe68<'a> {
-    m: &'a mut Sim68k,
+struct Probe68<'a, B: Board68k> {
+    m: &'a mut B,
     watches: &'a [Watch],
     hit: Option<WatchHit>,
 }
-impl Bus68k for Probe68<'_> {
+impl<B: Board68k> Bus68k for Probe68<'_, B> {
     fn read8(&mut self, a: u32) -> u8 {
         let v = self.m.read8(a);
         if self.hit.is_none() {
@@ -387,12 +479,29 @@ impl Bus68k for Probe68<'_> {
         }
         self.m.write8(a, v)
     }
+    fn read16(&mut self, a: u32) -> u16 {
+        let v = self.m.read16(a);
+        if self.hit.is_none() {
+            let [h, l] = v.to_be_bytes();
+            self.hit = watch_hit(self.watches, a & 0xff_ffff, false, h)
+                .or_else(|| watch_hit(self.watches, (a + 1) & 0xff_ffff, false, l));
+        }
+        v
+    }
+    fn write16(&mut self, a: u32, v: u16) {
+        if self.hit.is_none() {
+            let [h, l] = v.to_be_bytes();
+            self.hit = watch_hit(self.watches, a & 0xff_ffff, true, h)
+                .or_else(|| watch_hit(self.watches, (a + 1) & 0xff_ffff, true, l));
+        }
+        self.m.write16(a, v)
+    }
 }
 
 const D_NAMES: [&str; 8] = ["D0", "D1", "D2", "D3", "D4", "D5", "D6", "D7"];
 const A_NAMES: [&str; 8] = ["A0", "A1", "A2", "A3", "A4", "A5", "A6", "A7"];
 
-impl Target for Mc68000 {
+impl<B: Board68k> Target for Mc68000<B> {
     type Snap = Regs68k;
     const CPU: &'static str = "68000";
     const MAX_INSN: usize = 10;
@@ -402,7 +511,7 @@ impl Target for Mc68000 {
         &self.machine
     }
     fn poke(&mut self, addr: u32, v: u8) {
-        self.machine.poke(addr, v)
+        Board68k::poke(&mut self.machine, addr, v)
     }
     fn pc(&self) -> u32 {
         self.cpu.pc & 0xff_ffff
@@ -543,16 +652,22 @@ impl Target for Mc68000 {
             return Err("二重フォールトでCPUが停止した".into());
         }
         let hit = if watches.is_empty() {
-            self.cpu.step(&mut self.machine);
+            self.run_one();
             None
         } else {
+            let (level, vector) = self.machine.irq();
+            self.cpu.irq = level;
+            self.cpu.irq_vector = vector;
+            let old = self.cpu.cycles;
             let mut probe = Probe68 {
                 m: &mut self.machine,
                 watches,
                 hit: None,
             };
             self.cpu.step(&mut probe);
-            probe.hit
+            let hit = probe.hit;
+            self.machine.tick(self.cpu.cycles - old);
+            hit
         };
         if self.cpu.halted {
             return Err("二重フォールトでCPUが停止した".into());
@@ -560,21 +675,21 @@ impl Target for Mc68000 {
         Ok(hit)
     }
     fn disk_error(&mut self) -> Option<io::Error> {
-        None
+        self.machine.disk_error()
     }
     fn console_take(&mut self) -> Vec<u8> {
-        std::mem::take(&mut self.machine.tx)
+        self.machine.console_take()
     }
     fn console_ready(&self) -> bool {
-        self.machine.rx.is_empty()
+        self.machine.console_ready()
     }
     fn console_put(&mut self, b: u8) {
-        self.machine.rx.push_back(b)
+        self.machine.console_put(b)
     }
     fn mmu_json(&self) -> String {
         "null".into()
     }
     fn ram_len(&self) -> usize {
-        self.machine.ram.len()
+        self.machine.ram().len()
     }
 }

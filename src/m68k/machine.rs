@@ -68,47 +68,64 @@ impl Sim68k {
             self.poke(i as u32, b);
         }
     }
-    /// Load Motorola S-records (S1/S2/S3 data); returns the start address
-    /// of the S7/S8/S9 record, if any.
+    /// Load Motorola S-records; returns the start address of the end
+    /// record, if any (and not zero).
     pub fn load_srec(&mut self, text: &str) -> Result<Option<u32>, String> {
-        let mut start = None;
-        for (n, line) in text.lines().enumerate() {
-            let line = line.trim();
-            if line.is_empty() {
-                continue;
-            }
-            let err = |m: &str| format!("S-record {}行目: {m}", n + 1);
-            let kind = line.strip_prefix('S').and_then(|r| r.chars().next()).ok_or_else(|| err("Sで始まらない"))?;
-            let hex = &line[2..];
-            let bytes: Vec<u8> = (0..hex.len() / 2)
-                .map(|i| u8::from_str_radix(&hex[2 * i..2 * i + 2], 16))
-                .collect::<Result<_, _>>()
-                .map_err(|_| err("16進でない"))?;
-            if bytes.is_empty() || bytes[0] as usize != bytes.len() - 1 {
-                return Err(err("長さが合わない"));
-            }
-            if bytes.iter().fold(0u8, |s, b| s.wrapping_add(*b)) != 0xff {
-                return Err(err("チェックサムが合わない"));
-            }
-            let alen = match kind {
-                '1' | '9' => 2,
-                '2' | '8' => 3,
-                '3' | '7' => 4,
-                _ => continue,
-            };
-            let body = &bytes[1..bytes.len() - 1];
-            if body.len() < alen {
-                return Err(err("番地がない"));
-            }
-            let addr = body[..alen].iter().fold(0u32, |a, b| a << 8 | u32::from(*b));
-            if matches!(kind, '1' | '2' | '3') {
-                self.load(addr, &body[alen..]).map_err(|e| err(&e))?;
-            } else {
-                start = Some(addr);
-            }
+        let (chunks, start) = parse_srec(text)?;
+        for (addr, data) in chunks {
+            self.load(addr, &data)?;
         }
         Ok(start)
     }
+}
+
+/// Loaded S-records: data chunks and the start address.
+pub type Srec = (Vec<(u32, Vec<u8>)>, Option<u32>);
+
+/// Motorola S-records (S1/S2/S3 data) as (address, bytes), and the start
+/// address of the S7/S8/S9 record when it is not zero. A CP/M text file
+/// ends at ^Z; the rest of its last sector is ignored.
+pub fn parse_srec(text: &str) -> Result<Srec, String> {
+    let mut chunks = Vec::new();
+    let mut start = None;
+    let text = text.split('\x1a').next().unwrap_or("");
+    for (n, line) in text.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let err = |m: &str| format!("S-record {}行目: {m}", n + 1);
+        let kind = line.strip_prefix('S').and_then(|r| r.chars().next()).ok_or_else(|| err("Sで始まらない"))?;
+        let hex = &line[2..];
+        let bytes: Vec<u8> = (0..hex.len() / 2)
+            .map(|i| u8::from_str_radix(&hex[2 * i..2 * i + 2], 16))
+            .collect::<Result<_, _>>()
+            .map_err(|_| err("16進でない"))?;
+        if bytes.is_empty() || bytes[0] as usize != bytes.len() - 1 {
+            return Err(err("長さが合わない"));
+        }
+        if bytes.iter().fold(0u8, |s, b| s.wrapping_add(*b)) != 0xff {
+            return Err(err("チェックサムが合わない"));
+        }
+        let alen = match kind {
+            '1' | '9' => 2,
+            '2' | '8' => 3,
+            '3' | '7' => 4,
+            _ => continue,
+        };
+        let body = &bytes[1..bytes.len() - 1];
+        if body.len() < alen {
+            return Err(err("番地がない"));
+        }
+        let addr = body[..alen].iter().fold(0u32, |a, b| a << 8 | u32::from(*b));
+        if matches!(kind, '1' | '2' | '3') {
+            chunks.push((addr, body[alen..].to_vec()));
+        } else {
+            start = (addr != 0).then_some(addr);
+            break;
+        }
+    }
+    Ok((chunks, start))
 }
 
 impl Bus68k for Sim68k {

@@ -315,13 +315,24 @@ python3 scripts/benchmark-emulator.py --workload basic09 --runs 7 --output artif
 ## 68000 CPUコア
 
 `src/m68k/` に、68000の全命令・例外・割り込みを命令単位のサイクル数で実行するコアと逆アセンブラがあります。
-`--cpu 68000` で、RAMとコンソールだけの素の機械でプログラムを動かし、ICE（ブラウザ・DAP）で調べられます。
+`--cpu 68000` で、RAMとコンソールだけの素の機械か、Tiny68K互換の機械（`--machine tiny68k`：68681 DUART・IDE）でプログラムを動かし、ICE（ブラウザ・DAP）で調べられます。
 SingleStepTests/680x0の約100万件（アドレスエラーのフレームとサイクル数を含む）で検証しています。詳細は [68000 CPUコア](docs/m68k.md) を参照してください。
 
 ```sh
 python3 scripts/fetch-68000-tests.py
 cargo test --release --test m68k_sst -- --ignored --nocapture
 rs6809 --cpu 68000 --bin prog.s68 --ice --ice-halt   # http://127.0.0.1:6809/
+```
+
+## CP/M-68KとBDOSモニタ
+
+CP/M-68K 1.3を、Tiny68K互換の機械と自作のBIOS（`examples/cpm68k/bios.s`）で動かします。
+ICEのOSタブでBDOS・BIOSの呼び出し（名前・引数・結果）、読み込んだプログラム、メモリ領域を観察し、名前で呼び出し・復帰に停止できます。
+Alcyon CでCのコンパイルと実行もできます。詳細は [CP/M-68K](docs/cpm68k.md) を参照してください。
+
+```sh
+sh examples/cpm68k.sh            # 初回は配布物を取得してディスクを作る。A> が出る
+sh examples/cpm68k.sh --ice      # ICE: http://127.0.0.1:6809/
 ```
 
 ## ICE（GUIデバッガ）とOS-9モニタ

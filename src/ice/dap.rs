@@ -308,6 +308,7 @@ impl<T: Target> Ice<T> {
                 ("supportsSetVariable", true.into()),
                 ("supportsEvaluateForHovers", true.into()),
                 ("supportsLoadedSourcesRequest", true.into()),
+                ("supportsExceptionFilterOptions", true.into()),
                 (
                     "exceptionBreakpointFilters",
                     {
@@ -324,6 +325,21 @@ impl<T: Target> Ice<T> {
                                 ("filter", "osswitch".into()),
                                 ("label", label("switchLabel", "プロセス切り替え").into()),
                                 ("default", false.into()),
+                            ]),
+                            // Service names in the condition, comma-separated.
+                            obj([
+                                ("filter", "oscall".into()),
+                                ("label", "システムコールの呼び出し".into()),
+                                ("default", false.into()),
+                                ("supportsCondition", true.into()),
+                                ("conditionDescription", format!("名前（例：{}）をカンマ区切りで", label("breakExample", "F$Fork")).into()),
+                            ]),
+                            obj([
+                                ("filter", "osreturn".into()),
+                                ("label", "システムコールの復帰".into()),
+                                ("default", false.into()),
+                                ("supportsCondition", true.into()),
+                                ("conditionDescription", "名前をカンマ区切りで".into()),
                             ]),
                         ])
                     },
@@ -430,15 +446,39 @@ impl<T: Target> Ice<T> {
                     .collect();
                 self.break_errors = filters.contains(&"oserror");
                 self.break_switch = filters.contains(&"osswitch");
+                // Calls and returns by name come with filterOptions conditions.
+                let mut calls = std::collections::BTreeSet::new();
+                let mut returns = std::collections::BTreeSet::new();
+                let mut unknown = Vec::new();
+                for o in args.get("filterOptions").arr() {
+                    let set = match o.get("filterId").str() {
+                        Some("oscall") => &mut calls,
+                        Some("osreturn") => &mut returns,
+                        _ => continue,
+                    };
+                    for name in o.get("condition").str().unwrap_or("").split([',', ' ']).filter(|n| !n.is_empty()) {
+                        match self.os.service_code(name) {
+                            Some(c) => {
+                                set.insert(c);
+                            }
+                            None => unknown.push(name.to_string()),
+                        }
+                    }
+                }
+                if !unknown.is_empty() {
+                    return Err(format!("知らないシステムコール: {}", unknown.join(", ")));
+                }
+                self.break_calls = calls;
+                self.break_returns = returns;
                 Ok(obj([]))
             }
             "threads" => {
-                let mut name = "6809".to_string();
+                let mut name = T::CPU.to_string();
                 if let Some(os) = self.os() {
                     let cur = os.current(self.t.mem());
                     let osname = os.info().get("name").str().unwrap_or("OS").to_string();
                     if let Some(p) = os.processes(self.t.mem()).into_iter().find(|p| p.key == cur) {
-                        name = format!("6809 ({osname} プロセス{} {})", p.id, p.name);
+                        name = format!("{} ({osname} プロセス{} {})", T::CPU, p.id, p.name);
                     }
                 }
                 Ok(obj([(

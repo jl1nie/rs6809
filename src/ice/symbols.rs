@@ -246,6 +246,147 @@ fn parse_lwlink(path: &Path, text: &str) -> Table {
     t
 }
 
+/// `nm -n` output: `0001b000 T _init`. Absolute symbols (`a`) are skipped.
+fn parse_nm(text: &str) -> Vec<(u32, char, String)> {
+    text.lines()
+        .filter_map(|l| {
+            let mut f = l.split_whitespace();
+            let (a, k, n) = (f.next()?, f.next()?, f.next()?);
+            let k = k.chars().next()?;
+            (a.len() >= 4 && k != 'a' && k != 'A' && "TtDdBbRr".contains(k))
+                .then(|| Some((u32::from_str_radix(a, 16).ok()?, k, n.to_string())))?
+        })
+        .collect()
+}
+fn is_nm(text: &str) -> bool {
+    let mut lines = text.lines().filter(|l| !l.trim().is_empty()).peekable();
+    lines.peek().is_some()
+        && lines.take(20).all(|l| {
+            let f: Vec<&str> = l.split_whitespace().collect();
+            f.len() == 3 && u32::from_str_radix(f[0], 16).is_ok() && f[1].len() == 1
+        })
+}
+
+/// CP/M-68K NM68 output (`CPM15000.MAP`): `_init   1B000 equ global abs`.
+fn parse_nm68(path: &Path, text: &str) -> Table {
+    let mut t = Table::new(path, "nm68");
+    for line in text.split('\x1a').next().unwrap_or("").lines() {
+        let f: Vec<&str> = line.split_whitespace().collect();
+        if f.len() >= 3
+            && matches!(f[2], "global" | "local" | "equ")
+            && let Ok(a) = u32::from_str_radix(f[1], 16)
+        {
+            t.symbols.push((a, f[0].to_string()));
+        }
+    }
+    t.finish();
+    t
+}
+fn is_nm68(text: &str) -> bool {
+    text.lines().take(20).filter(|l| {
+        let f: Vec<&str> = l.split_whitespace().collect();
+        f.len() >= 3 && matches!(f[2], "global" | "local" | "equ") && u32::from_str_radix(f[1], 16).is_ok()
+    }).count() >= 3
+}
+
+/// GNU as `-al` listing (`68K GAS  bios.s`). Offsets are per section; the
+/// `.text` base comes from `nm` output beside it (`bios.map`), matched on
+/// a label, so lines and symbols are absolute.
+fn parse_gas(path: &Path, text: &str, nm: &[(u32, char, String)]) -> Result<Table, String> {
+    let mut t = Table::new(path, "gas");
+    let name = text
+        .lines()
+        .next()
+        .and_then(|l| l.split_whitespace().nth(2))
+        .unwrap_or("source.s")
+        .to_string();
+    let src = t.source(&name);
+    let mut section = "text";
+    // (line, offset, bytes) of text lines; labels by text offset.
+    let mut rows: Vec<(u32, u32, u32)> = Vec::new();
+    let mut labels: Vec<(u32, String)> = Vec::new();
+    let mut last: Option<(u32, u32)> = None; // (line, offset) of the row being continued
+    for l in text.lines() {
+        if l.starts_with('\x0c') || l.starts_with("68K GAS") || l.trim().is_empty() {
+            continue;
+        }
+        let head = l.split('\t').next().unwrap_or("");
+        let body = l.get(head.len()..).unwrap_or("").trim_start_matches('\t');
+        let mut f = head.split_whitespace();
+        let Some(Ok(lineno)) = f.next().map(str::parse::<u32>) else { continue };
+        // "  59 0000 21FC 0000" or a continuation "  59      0000 008C".
+        let cont = head.len() > 10 && head[5..].starts_with("     ");
+        let words: Vec<&str> = f.collect();
+        let (off, bytes) = if cont {
+            (None, words.iter().map(|w| w.len() as u32 / 2).sum::<u32>())
+        } else {
+            match words.split_first() {
+                Some((a, rest)) if a.len() == 4 && u32::from_str_radix(a, 16).is_ok() => {
+                    (u32::from_str_radix(a, 16).ok(), rest.iter().map(|w| w.len() as u32 / 2).sum())
+                }
+                _ => (None, 0),
+            }
+        };
+        if !cont {
+            t.sources[src].text.insert(lineno, body.to_string());
+            let code = body.trim();
+            for (dir, sec) in [(".text", "text"), (".data", "data"), (".bss", "bss")] {
+                if code == dir || code.starts_with(&format!("{dir} ")) || code.starts_with(&format!("{dir}\t")) {
+                    section = sec;
+                }
+            }
+            if section == "text"
+                && let Some(off) = off
+                && let Some((label, _)) = code.split_once(':')
+                && !label.is_empty()
+                && !label.starts_with(|c: char| c.is_ascii_digit())
+                && label.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.')
+            {
+                labels.push((off, label.to_string()));
+            }
+        }
+        if section != "text" {
+            continue;
+        }
+        match (cont, off) {
+            (false, Some(off)) => {
+                rows.push((lineno, off, bytes));
+                last = Some((lineno, off));
+            }
+            (true, _) => {
+                if let (Some((ln, _)), Some(r)) = (last, rows.last_mut())
+                    && r.0 == ln
+                {
+                    r.2 += bytes;
+                }
+            }
+            _ => {}
+        }
+    }
+    // Text base: an nm text symbol at the address of the same label.
+    let base = labels
+        .iter()
+        .find_map(|(off, n)| nm.iter().find(|s| s.2 == *n && "Tt".contains(s.1)).map(|s| s.0.wrapping_sub(*off)))
+        .unwrap_or(0);
+    for (lineno, off, bytes) in rows {
+        if bytes > 0 {
+            t.lines.push(LineRec {
+                off: base + off,
+                end: base + off + bytes,
+                src,
+                line: lineno,
+            });
+        }
+    }
+    if nm.is_empty() {
+        t.symbols = labels.into_iter().map(|(o, n)| (base + o, n)).collect();
+    } else {
+        t.symbols = nm.iter().map(|s| (s.0, s.2.clone())).collect();
+    }
+    t.finish();
+    Ok(t)
+}
+
 /// `c.link -m [-s]`: module name, section code offsets and code symbols.
 struct LinkMap {
     module: Option<String>,
@@ -654,7 +795,18 @@ impl Symbols {
 
     fn load_file(&mut self, path: &Path, module: Option<&str>) -> Result<usize, String> {
         let text = text_of(path)?;
-        let mut t = if text.contains("Microware OS-9 RMA") {
+        let mut t = if text.starts_with("68K GAS") {
+            // The nm output beside the listing gives the section bases.
+            let nm = fs::read_to_string(path.with_extension("map")).map(|m| parse_nm(&m)).unwrap_or_default();
+            parse_gas(path, &text, &nm)?
+        } else if is_nm(&text) {
+            let mut t = Table::new(path, "nm");
+            t.symbols = parse_nm(&text).into_iter().map(|s| (s.0, s.2)).collect();
+            t.finish();
+            t
+        } else if is_nm68(&text) {
+            parse_nm68(path, &text)
+        } else if text.contains("Microware OS-9 RMA") {
             parse_rma(path, &text)?
         } else if text.starts_with("Linkage map for") {
             let m = parse_linkmap(&text);

@@ -179,6 +179,18 @@ pub trait OsMonitor: Send {
     /// The service request at `pc`, if the instruction is one. Also used
     /// before the OS is detected, by the disassembler.
     fn svc_at(&self, read: &dyn Fn(u32) -> u8, pc: u32) -> Option<Svc>;
+    /// Complete a request found by `svc_at` from the registers at the
+    /// instruction, for OSes that pass the function in a register
+    /// (CP/M-68K: D0.W). Only called when the request is about to run.
+    fn svc_regs(&self, svc: Svc, _regs: &CpuRegs) -> Svc {
+        svc
+    }
+    /// Requests internal to the OS by their code or the caller's address
+    /// (CP/M-68K: BIOS calls, and BDOS calls made by the BDOS itself),
+    /// counted under the user call that made them.
+    fn internal(&self, _code: u8, _pc: u32) -> bool {
+        false
+    }
     /// Leading bytes every service request starts with (OS-9: `$10 $3F`),
     /// so the per-instruction check stays cheap; empty to always ask.
     fn svc_prefix(&self) -> &'static [u8] {
@@ -208,6 +220,10 @@ pub trait OsMonitor: Send {
     fn describe_entry(&self, m: &dyn Mem, paths: &PathNames, pid: u8, code: u8, r: &CpuRegs) -> String;
     fn describe_exit(&self, m: &dyn Mem, call: &Call, r: &CpuRegs) -> String;
     fn error_of(&self, r: &CpuRegs) -> Option<u8>;
+    /// The error of a completed call, when it depends on the request.
+    fn error_for(&self, _call: &Call, r: &CpuRegs) -> Option<u8> {
+        self.error_of(r)
+    }
     /// Learn from a completed user request (e.g. names of opened paths).
     fn learn(&self, call: &Call, out: &CpuRegs, pid: u8, paths: &mut PathNames);
 
@@ -320,14 +336,15 @@ impl Tracer {
     /// Call before executing the instruction at `cpu.pc`. Returns the new
     /// call id when the instruction is a service request.
     pub fn before(&mut self, m: &dyn Mem, os: &dyn OsMonitor, cpu: &CpuState) -> Option<u64> {
-        let svc = os.svc_at(&|a| m.peek(a), cpu.pc)?;
+        let svc = os.svc_regs(os.svc_at(&|a| m.peek(a), cpu.pc)?, &cpu.regs);
         let code = svc.code;
         let desc = os.current(m);
         let pid = os.pid_of(m, desc);
-        let system = desc != 0 && os.in_system(m, desc);
+        let system = (desc != 0 && os.in_system(m, desc)) || os.internal(code, cpu.pc);
         let inp = cpu.regs;
         // Kernel-internal requests are frequent; their registers are formatted on demand.
-        let args = if system {
+        // Requests the OS marks internal are few enough to describe (CP/M-68K's BIOS).
+        let args = if system && !os.internal(code, cpu.pc) {
             String::new()
         } else {
             os.describe_entry(m, &self.paths, pid, code, &inp)
@@ -491,8 +508,9 @@ impl Tracer {
         let Some(call) = self.calls.get(&p.index) else {
             return (None, switch);
         };
-        let error = os.error_of(&out);
-        let result = if call.system && error.is_none() {
+        let error = os.error_for(call, &out);
+        // Internal requests described on entry are described on return too.
+        let result = if call.system && error.is_none() && call.args.is_empty() {
             String::new()
         } else {
             os.describe_exit(m, call, &out)

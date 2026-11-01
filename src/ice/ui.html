@@ -135,7 +135,10 @@ th { color: var(--mute); font-weight: 500; font-size: 12px; border-bottom: 1px s
 .tree div { white-space: nowrap; }
 canvas { width: 100%; display: block; }
 .memgrid { display: grid; gap: 2px; }
-.memgrid div { aspect-ratio: 1; border-radius: 2px; background: var(--chip); font-size: 9px; display: flex; align-items: center; justify-content: center; font-family: var(--mono); color: #fff; overflow: hidden; }
+.memgrid .region { aspect-ratio: auto; display: grid; grid-template-columns: 6em 1fr 8em 5em; gap: 6px; align-items: center; background: none; color: inherit; font-size: 12px; justify-content: stretch; }
+.memgrid .region .bar { position: relative; height: 10px; background: var(--chip); border-radius: 2px; overflow: hidden; }
+.memgrid .region .bar i { position: absolute; top: 0; bottom: 0; }
+.memgrid div:not(.region) { aspect-ratio: 1; border-radius: 2px; background: var(--chip); font-size: 9px; display: flex; align-items: center; justify-content: center; font-family: var(--mono); color: #fff; overflow: hidden; }
 .legend { display: flex; gap: 10px; flex-wrap: wrap; font-size: 12px; color: var(--mute); margin-top: 6px; }
 .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; vertical-align: -1px; margin-right: 3px; }
 .span2 { grid-column: span 2; }
@@ -266,7 +269,7 @@ canvas { width: 100%; display: block; }
 
   <section id="os9" class="page">
     <div class="panel span2">
-      <h2>スケジューラ<span class="grow"></span><span id="osLevel" class="kbd"></span></h2>
+      <h2><span id="schedTitle">スケジューラ</span><span class="grow"></span><span id="osLevel" class="kbd"></span></h2>
       <div class="body">
         <div class="queues" id="queues"></div>
         <canvas id="timeline" height="150" style="margin-top:8px"></canvas>
@@ -279,7 +282,7 @@ canvas { width: 100%; display: block; }
     </div>
     <div class="list" style="gap:10px">
       <div class="panel">
-        <h2>プロセス</h2>
+        <h2 id="procsTitle">プロセス</h2>
         <div class="scroll"><table><thead id="procHead"></thead><tbody id="procs"></tbody></table></div>
       </div>
       <div class="panel">
@@ -300,7 +303,7 @@ canvas { width: 100%; display: block; }
         </div>
       </div>
       <div class="panel">
-        <h2>モジュールディレクトリ</h2>
+        <h2 id="imagesTitle">モジュールディレクトリ</h2>
         <div class="scroll" style="max-height:320px"><table><thead><tr><th>名前</th><th>種別</th><th>言語</th><th>アドレス</th><th>サイズ</th><th>リンク</th><th id="thBlk"></th></tr></thead><tbody id="mods"></tbody></table></div>
       </div>
       <div class="panel">
@@ -309,7 +312,7 @@ canvas { width: 100%; display: block; }
       </div>
     </div>
     <div class="panel">
-      <h2>システムコール
+      <h2><span id="callsTitle">システムコール</span>
         <span class="grow"></span>
         <label class="row"><input type="checkbox" id="cUser" checked>ユーザー呼び出しのみ</label>
         <input id="cPid" placeholder="ID" style="width:3.5em" title="プロセスIDで絞り込み">
@@ -351,7 +354,8 @@ const CAT = {
   proc: ["F$Fork", "F$Wait", "F$Chain", "F$Exit", "F$Send", "F$Icpt", "F$Sleep", "F$SSpd", "F$ID", "F$SPrior", "F$AProc", "F$NProc", "F$AllPrc", "F$DelPrc", "F$GPrDsc", "F$IOQu"],
   mem: ["F$Link", "F$Load", "F$UnLink", "F$Mem", "F$SRqMem", "F$SRtMem", "F$All64", "F$Ret64", "F$Find64", "F$Move", "F$AllRAM", "F$AllImg", "F$DelImg", "F$SetImg", "F$AllTsk", "F$DelTsk", "F$SetTsk", "F$SLink", "F$VModul", "F$CpyMem", "F$UnLoad", "F$ELink", "F$FModul", "F$MapBlk", "F$ClrBlk", "F$DelRAM"],
 };
-const cat = (n) => n.startsWith("I$") ? "io" : CAT.proc.includes(n) ? "proc" : CAT.mem.includes(n) ? "mem" : "sys";
+// CP/M-68K names: F_ (files) and C_/L_/A_ (character I/O) are I/O, P_ programs, BIOS_ the BIOS.
+const cat = (n) => n.startsWith("I$") || /^(F|C|L|A)_/.test(n) ? "io" : CAT.proc.includes(n) || n.startsWith("P_") ? "proc" : CAT.mem.includes(n) || n === "S_TPA" ? "mem" : "sys";
 
 let st = null, prevRegs = null, services = {}, tab = "dbg";
 let consoleNext = 0, termText = "", memPrev = {}, viewAddr = null;
@@ -611,6 +615,12 @@ async function loadOsInfo() {
   // A bare program (no OS) has no OS monitor tab.
   $("osTab").style.display = osInfo.os === "none" ? "none" : "";
   $("osBreakTitle").textContent = `${osInfo.name} ブレーク条件`;
+  // Panel titles an OS may rename (CP/M-68K has programs, not processes).
+  $("schedTitle").textContent = osInfo.schedTitle || "スケジューラ";
+  $("procsTitle").textContent = osInfo.procsTitle || "プロセス";
+  $("imagesTitle").textContent = osInfo.imagesTitle || "モジュールディレクトリ";
+  $("callsTitle").textContent = osInfo.callsTitle || "システムコール";
+  $("trCode").placeholder = osInfo.breakExample || "F$Fork";
   const sys = (osInfo.spaces || []).find((x) => x.key === "sys");
   $("sysSpace").textContent = sys ? sys.label : "OSのシステム空間";
   $("queues").innerHTML = `<div class="queue"><h3>${esc(osInfo.current || "実行中")}</h3><div class="chips" id="qRun"></div></div>` +
@@ -630,6 +640,7 @@ async function renderOs9() {
   (osInfo.queues || []).forEach((q) => { $("q_" + q.key).innerHTML = (o[q.key] || []).map(pidChip).join(""); });
   const [p, m, mm] = await Promise.all([api("os/procs"), api("os/modules"), api("os/memmap")]);
   const view = OS_VIEWS[osInfo.os] || GENERIC_VIEW;
+  if (view.summary) view.summary(o);
   view.procs(p.procs);
   view.mods(m.modules);
   view.memmap(mm, m.modules, p.procs);
@@ -716,7 +727,34 @@ function renderMemMap(mm, mods, procs, level) {
   }
 }
 // NitrOS-9: P$State flags, DAT images, module blocks and the block/page map.
+// Memory as named regions: one bar per region, to scale over RAM.
+function renderRegions(mm) {
+  const ram = mm.ram || 1;
+  const color = { sys: "var(--accent)", prog: "var(--warn)", free: "var(--chip)" };
+  $("memUnit").textContent = `RAM ${Math.round(ram / 1024)} KiB`;
+  $("memgrid").style.gridTemplateColumns = "1fr";
+  $("memgrid").innerHTML = (mm.regions || []).slice().sort((a, b) => a.start - b.start).map((r) =>
+    `<div class="region" title="$${hex(r.start, 6)}–$${hex(r.end - 1, 6)}"><span class="mono">${hex(r.start, 6)}</span>` +
+    `<span class="bar"><i style="left:${(r.start / ram) * 100}%;width:${Math.max(0.4, ((r.end - r.start) / ram) * 100)}%;background:${color[r.kind] || "var(--chip)"}"></i></span>` +
+    `<span>${esc(r.name)}</span><span class="mute">${Math.max(1, Math.round((r.end - r.start) / 1024))} KiB</span></div>`).join("");
+  $("memLegend").innerHTML = '<span><i style="background:var(--accent)"></i>システム</span><span><i style="background:var(--warn)"></i>プログラム</span><span><i style="background:var(--chip)"></i>TPA</span>';
+}
 const OS_VIEWS = {
+  cpm68k: {
+    summary(o) {
+      const files = (o.files || []).map((f) => `<span class="chip mono" title="FCB $${hex(f.fcb, 6)}">${esc(f.name)}</span>`).join(" ");
+      $("qRun").innerHTML = `<span class="mono">${esc(o.program)}</span>`;
+      $("queues").querySelectorAll(".cpm").forEach((e) => e.remove());
+      $("queues").insertAdjacentHTML("beforeend",
+        `<div class="queue cpm"><h3>ドライブ・ユーザー</h3><div class="mono">${esc(o.drive)}: / ${o.user}</div></div>` +
+        `<div class="queue cpm"><h3>DMA</h3><div class="mono">${o.dma === null ? "—" : "$" + hex(o.dma, 6)}</div></div>` +
+        `<div class="queue cpm"><h3>TPA</h3><div class="mono">${o.tpa ? `$${hex(o.tpa[0], 6)}–$${hex(o.tpa[1], 6)}` : "—"}</div></div>` +
+        `<div class="queue cpm"><h3>開いているファイル</h3><div class="chips">${files || '<span class="mute">なし</span>'}</div></div>`);
+    },
+    procs: (procs) => GENERIC_VIEW.procs(procs),
+    mods: (mods) => GENERIC_VIEW.mods(mods),
+    memmap: (mm) => renderRegions(mm),
+  },
   nitros9: {
     procs: (procs) => renderProcs(procs, osInfo.level),
     mods: (mods) => renderMods(mods, osInfo.level),
@@ -763,8 +801,9 @@ $("cReset").onclick = () => { calls.clear(); renderCalls(); };
 async function renderDetail(c, loadChildren) {
   if (!c) return;
   const s = services[c.name] || {};
-  const regs = ["a", "b", "x", "y", "u", "s", "cc"];
-  const w = (k) => k === "a" || k === "b" || k === "cc" ? 2 : 4;
+  const regs = is68k() ? ["d0", "d1", "d2", "a0", "a1", "a7", "sr"] : ["a", "b", "x", "y", "u", "s", "cc"];
+  const w = (k) => is68k() ? (k === "sr" ? 4 : 8) : k === "a" || k === "b" || k === "cc" ? 2 : 4;
+  const ptr = is68k() ? "d1" : "x";
   const outRow = c.out ? regs.map((k) => `<td class="${c.out[k] !== c.in[k] ? "chg" : ""}">${hex(c.out[k], w(k))}</td>`).join("") : `<td colspan="${regs.length}" class="mute">${c.noReturn ? "呼び出し元へは戻らない" : "未復帰"}</td>`;
   let html = `<h3><span class="cat-${cat(c.name)}">${esc(c.name)}</span> <span class="mute" style="font-weight:400">${esc(s.desc || "")} · コード $${hex(c.code, 2)}</span></h3>` +
     (s.explain ? `<div class="explain">${esc(s.explain)}</div>` : "") +
@@ -774,13 +813,13 @@ async function renderDetail(c, loadChildren) {
     `<tbody><tr><th>入力</th>${regs.map((k) => `<td>${hex(c.in[k], w(k))}</td>`).join("")}</tr><tr><th>出力</th>${outRow}</tr></tbody></table>` +
     `<p><b>引数</b> ${esc(c.args)}<br><b>結果</b> ${esc(c.result || "")}</p>` +
     `<div class="row"><button data-b="call">${esc(c.name)} の呼び出しで停止</button><button data-b="return">復帰で停止</button>` +
-    `<button data-b="mem">X のメモリを表示</button></div>` +
-    `<h3 style="margin-top:10px;font-size:13px">カーネル内部の呼び出し</h3>` +
+    `<button data-b="mem">${ptr.toUpperCase()} のメモリを表示</button></div>` +
+    `<h3 style="margin-top:10px;font-size:13px">${esc(osInfo.internalLabel || "カーネル内部の呼び出し")}</h3>` +
     (c.inner && c.inner.length ? `<p class="mono">${c.inner.slice().sort((a, b) => b[1] - a[1]).map(([n, k]) => `<span class="chip"><span class="cat-${cat(n)}">${esc(n)}</span>×${k}</span>`).join(" ")}</p>` : "") +
     `<div class="tree" id="tree"><span class="mute">読み込み中…</span></div>`;
   $("callDetail").innerHTML = html;
   $("callDetail").querySelectorAll("button").forEach((b) => b.onclick = async () => {
-    if (b.dataset.b === "mem") { $("memSpace").value = "cpu"; $("memAddr").value = hex(c.in.x, 4); document.querySelector('[data-tab="dbg"]').click(); return; }
+    if (b.dataset.b === "mem") { $("memSpace").value = "cpu"; $("memAddr").value = hex(c.in[ptr], AW()); document.querySelector('[data-tab="dbg"]').click(); return; }
     await api(`os/break?code=${encodeURIComponent(c.name)}&when=${b.dataset.b}`, ""); poll(true);
   });
   const tree = await childTree(c.id, 0);
