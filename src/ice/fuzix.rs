@@ -526,7 +526,7 @@ impl OsMonitor for Fuzix {
                 ("end", (start + len).into()),
             ]));
         }
-        obj([("regions", Json::Arr(regions)), ("ram", m.ram().len().into())])
+        obj([("regions", Json::Arr(regions)), ("ram", m.ram_size().into())])
     }
     fn read_space(&self, _: &dyn Mem, _: &str, _: u32) -> Option<u8> {
         None

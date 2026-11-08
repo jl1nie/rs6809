@@ -9,19 +9,49 @@
 #   offsets.txt  structure offsets for the FUZIX monitor (scripts/fuzix-offsets.c)
 #   usersyms/    each program's symbols (NAME.sym, nm output), placed by the
 #                ICE on the process running it (--symbols usersyms)
+#
+#   sh scripts/build-fuzix-tiny68k.sh --tn20k
+# builds the kernel for 8 MiB of RAM ($000000-$7FFFFF), the machine of the
+# Tang Nano 20K (rs6809-fpga), into artifacts/fuzix68k-tn20k. The kernel
+# has the RAM size in its source: Kernel/platform/platform-tiny68k/main.c
+# gives the memory after the kernel up to $FF8000 to the processes, and
+# p68000.S sets ramsize to 16352 KiB. Both are changed for the build and
+# put back afterwards. Run it in the emulator with --ram-kb 8192.
 set -eu
+TOP=0xFF8000
+RAMKB=16352
+SUFFIX=
+if [ "${1:-}" = "--tn20k" ]; then
+	TOP=0x800000
+	RAMKB=8192
+	SUFFIX=-tn20k
+fi
 cd "$(dirname "$0")/.."
 ROOT=$PWD
 FUZIX=$ROOT/reference/FUZIX
-OUT=$ROOT/artifacts/fuzix68k
+OUT=$ROOT/artifacts/fuzix68k$SUFFIX
 TOOLS=$ROOT/artifacts/tools/m68k-elf/bin
 [ -x "$TOOLS/m68k-elf-gcc" ] || { echo "run scripts/build-m68k-elf.sh first" >&2; exit 1; }
 [ -d "$FUZIX/Kernel" ] || { echo "clone FUZIX into reference/FUZIX" >&2; exit 1; }
 export PATH="$TOOLS:$PATH"
 mkdir -p "$OUT"
+# The RAM size (16 MiB less 32 KiB, or 8 MiB with --tn20k).
+PLAT=$FUZIX/Kernel/platform/platform-tiny68k
+restore() { git -C "$FUZIX" checkout -q -- Kernel/platform/platform-tiny68k/main.c Kernel/platform/platform-tiny68k/p68000.S; }
+trap restore EXIT
+restore
+if [ "$RAMKB" != 16352 ]; then
+	sed -i "s/kmemaddblk((void \*)e, 0xFF8000 - e);/kmemaddblk((void *)e, $TOP - e);/" "$PLAT/main.c"
+	sed -i "s/move.w #16352,d0/move.w #$RAMKB,d0/" "$PLAT/p68000.S"
+	grep -q "$TOP - e" "$PLAT/main.c" && grep -q "#$RAMKB,d0" "$PLAT/p68000.S" || { echo "RAM size patch did not apply" >&2; exit 1; }
+fi
+# make sees the changed (or restored) sources by their time stamps
+touch "$PLAT/main.c" "$PLAT/p68000.S"
 # gcc 10.3 -Os mis-sizes a switch table in as09's as.c ("value -684 out of
 # range", the problem FUZIX's README.68000.md reports for gcc 11): build it
 # without jump tables once the C library is there.
+# FUZIX's host tools (elf2aout links the programs, ucp edits the image)
+(cd "$FUZIX" && make -C Standalone)
 (cd "$FUZIX" && make TARGET=tiny68k -j"$(nproc)" libs)
 # Programs link through scripts/fuzix-ld68k-syms, which keeps their symbols.
 # Without them yet, the programs already built are linked again (only

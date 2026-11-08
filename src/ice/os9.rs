@@ -318,8 +318,7 @@ fn name_at(read: &dyn Fn(u16) -> u8, at: u16) -> String {
 impl<'a> View<'a> {
     /// Detect the OS from the Init module pointer; `None` before OS-9 runs.
     pub fn detect(m: &'a dyn Mem) -> Option<Self> {
-        let ram = m.ram();
-        let phys16 = |a: usize| u16::from_be_bytes([ram[a], ram[a + 1]]);
+        let phys16 = |a: usize| u16::from_be_bytes([m.phys(a).unwrap_or(0), m.phys(a + 1).unwrap_or(0)]);
         for level in [Level::One, Level::Two] {
             let v = Self::new(m, level);
             let init = phys16(usize::from(v.g().init));
@@ -340,7 +339,7 @@ impl<'a> View<'a> {
             for (i, b) in v.sysdat.iter_mut().enumerate() {
                 let a = usize::from(ptr.wrapping_add(i as u16 * 2));
                 if a < 0x1fff {
-                    *b = u16::from_be_bytes([m.ram()[a], m.ram()[a + 1]]);
+                    *b = u16::from_be_bytes([m.phys(a).unwrap_or(0), m.phys(a + 1).unwrap_or(0)]);
                 }
             }
         }
@@ -359,7 +358,7 @@ impl<'a> View<'a> {
         }
     }
     fn phys(&self, p: usize) -> u8 {
-        self.m.ram().get(p).copied().unwrap_or(0xff)
+        self.m.phys(p).unwrap_or(0xff)
     }
     /// Read through a DAT image: one 16-bit block number per 8 KiB slot.
     fn dat_read(&self, image: &[u16], addr: u16) -> u8 {

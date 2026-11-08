@@ -3,7 +3,7 @@
 //!
 //! | Address             | Device |
 //! |---------------------|--------|
-//! | `$000000`–`$FF7FFF` | RAM (16 MiB less the top 32 KiB) |
+//! | `$000000`–`$FF7FFF` | RAM (16 MiB less the top 32 KiB; `with_ram` makes it smaller, e.g. the 8 MiB of the Tang Nano 20K machine) |
 //! | `$FFE000`–`$FFEFFF` | IDE (CompactFlash): register = (address & 31) >> 1 |
 //! | `$FFF000`–`$FFF01F` | MC68681 DUART on odd addresses: register = (address >> 1) & 15 |
 //!
@@ -47,10 +47,22 @@ impl Default for Tiny68k {
 }
 
 impl Tiny68k {
+    /// A machine with less RAM from `$000000` (the Tang Nano 20K's has
+    /// 8 MiB); addresses above it up to `$FF7FFF` read `$FF`.
+    pub fn with_ram(bytes: usize) -> Self {
+        Self {
+            ram: vec![0; bytes.min(RAM_END as usize)],
+            ..Self::default()
+        }
+    }
+    /// The end of RAM (the initial supervisor stack without a monitor).
+    pub fn ram_end(&self) -> u32 {
+        self.ram.len() as u32
+    }
     /// Read without side effects.
     pub fn peek(&self, a: u32) -> u8 {
         let a = a & 0xff_ffff;
-        if a < RAM_END {
+        if (a as usize) < self.ram.len() {
             self.ram[a as usize]
         } else if (IDE_BASE..IDE_BASE + 0x1000).contains(&a) {
             self.ide.peek(((a & 31) >> 1) as u8)
@@ -113,7 +125,7 @@ impl Tiny68k {
 impl Bus68k for Tiny68k {
     fn read8(&mut self, a: u32) -> u8 {
         let a = a & 0xff_ffff;
-        if a < RAM_END {
+        if (a as usize) < self.ram.len() {
             self.ram[a as usize]
         } else if (IDE_BASE..IDE_BASE + 0x1000).contains(&a) {
             self.ide.read(((a & 31) >> 1) as u8)
@@ -125,7 +137,7 @@ impl Bus68k for Tiny68k {
     }
     fn write8(&mut self, a: u32, v: u8) {
         let a = a & 0xff_ffff;
-        if a < RAM_END {
+        if (a as usize) < self.ram.len() {
             self.ram[a as usize] = v
         } else if (IDE_BASE..IDE_BASE + 0x1000).contains(&a) {
             self.ide.write(((a & 31) >> 1) as u8, v)
@@ -135,7 +147,7 @@ impl Bus68k for Tiny68k {
     }
     fn read16(&mut self, a: u32) -> u16 {
         let a = a & 0xff_ffff;
-        if a + 1 < RAM_END {
+        if (a as usize) + 1 < self.ram.len() {
             return u16::from_be_bytes([self.ram[a as usize], self.ram[a as usize + 1]]);
         }
         if (IDE_BASE..IDE_BASE + 0x1000).contains(&a) && (a & 31) >> 1 == 0 {

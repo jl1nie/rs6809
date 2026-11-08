@@ -20,6 +20,7 @@ mod tables;
 pub mod target;
 pub mod cpm68k;
 pub mod fuzix;
+pub mod fpga;
 
 use crate::telnet::TelnetServer;
 use crate::{Cpu, Machine};
@@ -1027,6 +1028,13 @@ impl<T: Target> Ice<T> {
         self.refresh_symbols();
     }
     fn halt(&mut self, s: Stop) {
+        // A CPU on the FPGA keeps running until it is told to stop.
+        if let Some(h) = self.t.hw()
+            && h.running()
+            && let Err(e) = h.stop()
+        {
+            self.bp_log_line(e);
+        }
         self.running = false;
         self.goal = Goal::None;
         self.refresh_symbols();
@@ -1064,6 +1072,9 @@ impl<T: Target> Ice<T> {
 
     /// Run for up to `budget` host time; returns when stopped or out of time.
     pub fn run_slice(&mut self, budget: Duration) {
+        if self.t.hw().is_some() {
+            return self.run_hw(budget);
+        }
         let start = Instant::now();
         let c0 = self.t.cycles();
         let limit = if self.speed == 0 {
@@ -1114,6 +1125,106 @@ impl<T: Target> Ice<T> {
                 let rest = budget.saturating_sub(start.elapsed());
                 std::thread::sleep(rest);
                 break;
+            }
+        }
+    }
+    /// Run a CPU on the FPGA: it runs by itself with the breakpoints and
+    /// watchpoints in hardware, and the ICE waits for it to stop. What
+    /// needs every instruction (source-line steps, stepping out, OS call
+    /// breaks, recording) steps it one instruction at a time instead.
+    fn run_hw(&mut self, budget: Duration) {
+        let start = Instant::now();
+        self.apply_console_size();
+        while self.running {
+            let hw_running = self.t.hw().is_some_and(|h| h.running());
+            if !hw_running {
+                let free = matches!(self.goal, Goal::None | Goal::At { .. })
+                    && !self.recording
+                    && self.break_calls.is_empty()
+                    && self.break_returns.is_empty()
+                    && !self.break_errors
+                    && !self.break_switch;
+                if !free || self.skip_checks {
+                    // one instruction on the board (also to leave a breakpoint)
+                    if let Some(s) = self.step_one() {
+                        self.halt(s);
+                        return;
+                    }
+                    if !free {
+                        if start.elapsed() >= budget {
+                            return;
+                        }
+                        continue;
+                    }
+                }
+                let mut logical: Vec<u32> = self.breakpoints.iter().copied().collect();
+                let mut phys = Vec::new();
+                for b in &self.sym_bps {
+                    for t in &b.targets {
+                        match *t {
+                            BpTarget::Logical(a) => logical.push(a),
+                            BpTarget::Phys(p) => phys.push(p),
+                        }
+                    }
+                }
+                if let Goal::At { pc, .. } = self.goal {
+                    logical.push(pc);
+                }
+                logical.sort_unstable();
+                logical.dedup();
+                phys.sort_unstable();
+                phys.dedup();
+                let watches = self.watches.clone();
+                let r = self.t.hw().map(|h| h.run(&logical, &phys, &watches));
+                if let Some(Err(e)) = r {
+                    self.halt(Stop::Error(e));
+                    return;
+                }
+            }
+            let left = budget.saturating_sub(start.elapsed()).max(Duration::from_millis(1));
+            let r = self.t.hw().map(|h| h.wait(left.min(Duration::from_millis(20))));
+            match r {
+                Some(Err(e)) => {
+                    self.halt(Stop::Error(e));
+                    return;
+                }
+                Some(Ok(Some(stop))) => {
+                    self.refresh_symbols();
+                    let pc = self.t.pc();
+                    match stop {
+                        fpga::HwStop::Watch { addr, write, value } => {
+                            self.halt(Stop::Watch { addr, write, value });
+                            return;
+                        }
+                        fpga::HwStop::Breakpoint => {
+                            if let Goal::At { pc: target, s, proc_ } = self.goal
+                                && pc == target
+                                && self.t.sp() >= s
+                                && (proc_.is_none() || self.current_proc() == proc_)
+                            {
+                                self.halt(Stop::Step);
+                                return;
+                            }
+                            if (self.bp_at(pc) || self.phys_bp_at(pc)) && self.bp_check(pc) {
+                                self.halt(Stop::Breakpoint(pc));
+                                return;
+                            }
+                            // a condition that does not hold, or not yet
+                            // back in the calling frame: on again
+                            self.skip_checks = true;
+                        }
+                        _ => {
+                            self.halt(Stop::Pause);
+                            return;
+                        }
+                    }
+                }
+                Some(Ok(None)) | None => {}
+            }
+            self.pump_console();
+            self.poll_telnet();
+            if start.elapsed() >= budget {
+                return;
             }
         }
     }
@@ -1885,10 +1996,7 @@ impl<T: Target> Ice<T> {
                 // the bank given by `bank`.
                 (0..len)
                     .map(|i| {
-                        m.ram()
-                            .get(addr as usize + i as usize)
-                            .copied()
-                            .unwrap_or(0xff)
+                        m.phys(addr as usize + i as usize).unwrap_or(0xff)
                     })
                     .collect()
             }

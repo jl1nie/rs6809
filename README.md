@@ -10,6 +10,7 @@ A Motorola 6809 and 68000 emulator in pure Rust. It uses no external crates, no 
 - **ICE**: from a browser debugger and from VS Code (DAP) you can use breakpoints (with conditions, hit counts and logpoints), stepping, stepping back, source lines, C variables and watch expressions.
   The OS monitor follows NitrOS-9, CP/M-68K and FUZIX system calls from call to return, and shows the process table, scheduler and memory with explanations.
   It can also reset the machine and save and load its state.
+- **FPGA**: the same machines run on a Tang Nano 20K with [rs6809-fpga](https://github.com/jl1nie/rs6809-fpga) (the 68000 with 8 MiB of RAM, FUZIX built for it with `scripts/build-fuzix-tiny68k.sh --tn20k`), and the ICE can drive the real CPU on the board (`--fpga /dev/ttyUSB1`, [ICE on the FPGA](docs/ice.md#the-cpu-on-the-fpga-rs6809-fpga)).
 
 | Document | Contents |
 |---|---|
