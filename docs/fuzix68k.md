@@ -50,6 +50,7 @@ puts `disk.img`, `fuzix.elf`, `fuzix.sym` (nm output) and `offsets.txt` in `arti
 
 The kernel has the size of RAM in its source: `Kernel/platform/platform-tiny68k/main.c` gives the memory from the end of the kernel to `$FF8000` to the processes (`kmemaddblk`), and `p68000.S` sets `ramsize` to 16352 KiB.
 `sh scripts/build-fuzix-tiny68k.sh --tn20k` builds a kernel for 8 MiB (`$800000` and 8192 KiB), puts the two files back afterwards, and writes the results to `artifacts/fuzix68k-tn20k`.
+`./setup.sh` fetches the same build from the release (`fuzix68k-tn20k-disk.img.gz`, `fuzix-tn20k.sym`, `fuzix-tn20k-usersyms.tar.gz`) into `artifacts/fuzix68k-tn20k`, so no toolchain is needed.
 It runs in the emulator with `--ram-kb 8192`, the machine of [rs6809-fpga](https://github.com/jl1nie/rs6809-fpga):
 
 ```sh

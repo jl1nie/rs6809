@@ -50,6 +50,7 @@ FUZIXの `README.68000.md` は、m68k-linux-gnuのgccを使わないよう警告
 
 カーネルは RAM の大きさをソースに持っている：`Kernel/platform/platform-tiny68k/main.c` がカーネルの終わりから `$FF8000` までをプロセスに渡し（`kmemaddblk`）、`p68000.S` が `ramsize` を 16352KB にする。
 `sh scripts/build-fuzix-tiny68k.sh --tn20k` は 8MB 用（`$800000` と 8192KB）のカーネルを作り、2 つのファイルを元に戻して、結果を `artifacts/fuzix68k-tn20k` に置く。
+`./setup.sh` は同じビルドをリリースから取得して `artifacts/fuzix68k-tn20k` に置く（`fuzix68k-tn20k-disk.img.gz`、`fuzix-tn20k.sym`、`fuzix-tn20k-usersyms.tar.gz`）ので、ツールチェーンは要らない。
 エミュレータでは [rs6809-fpga](https://github.com/jl1nie/rs6809-fpga) の機械と同じ `--ram-kb 8192` で動く。
 
 ```sh
