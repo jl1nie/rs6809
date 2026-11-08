@@ -150,6 +150,11 @@ pub trait Target: Send {
     fn load_state(&mut self, _data: &[u8]) -> Result<(), String> {
         Err(tr!(format!("{}では状態の読み込みに対応していない", Self::CPU), format!("loading a state is not supported on the {}", Self::CPU)))
     }
+    /// The CPU of an FPGA machine (rs6809-fpga), which runs by itself
+    /// between stops.
+    fn hw(&mut self) -> Option<&mut dyn super::fpga::Hw> {
+        None
+    }
 }
 
 /// The 6809 and its (Multicomp or plain) machine.
@@ -220,6 +225,15 @@ fn line6809(l: super::disasm::Line) -> Line {
         },
         svc: l.svc,
     }
+}
+
+/// A 6809 instruction, with the OS's service requests decoded by `svc`.
+pub(crate) fn disasm6809(read: &dyn Fn(u32) -> u8, addr: u32, svc: SvcHook) -> Line {
+    let read16 = |a: u16| read(u32::from(a));
+    line6809(super::disasm::disassemble_with(&read16, addr as u16, &|r, at| {
+        let r32 = |a: u32| r(a as u16);
+        svc(&r32, u32::from(at)).map(|(len, text, code)| (len as u16, text, code as u16))
+    }))
 }
 
 impl Target for Mc6809 {
@@ -325,11 +339,7 @@ impl Target for Mc6809 {
         self.cpu.waiting()
     }
     fn disasm(&self, read: &dyn Fn(u32) -> u8, addr: u32, svc: SvcHook) -> Line {
-        let read16 = |a: u16| read(u32::from(a));
-        line6809(super::disasm::disassemble_with(&read16, addr as u16, &|r, at| {
-            let r32 = |a: u32| r(a as u16);
-            svc(&r32, u32::from(at)).map(|(len, text, code)| (len as u16, text, code as u16))
-        }))
+        disasm6809(read, addr, svc)
     }
     fn step(&mut self, watches: &[Watch]) -> Result<Option<WatchHit>, String> {
         if watches.is_empty() {
@@ -524,8 +534,11 @@ impl Mem for Tiny68k {
     fn logical(&self, phys: usize) -> Option<u32> {
         (phys < self.ram.len()).then_some(phys as u32)
     }
-    fn ram(&self) -> &[u8] {
-        &self.ram
+    fn phys(&self, p: usize) -> Option<u8> {
+        self.ram.get(p).copied()
+    }
+    fn ram_size(&self) -> usize {
+        self.ram.len()
     }
 }
 
@@ -649,8 +662,11 @@ impl Mem for Sim68k {
     fn logical(&self, phys: usize) -> Option<u32> {
         (phys < self.ram.len()).then_some(phys as u32)
     }
-    fn ram(&self) -> &[u8] {
-        &self.ram
+    fn phys(&self, p: usize) -> Option<u8> {
+        self.ram.get(p).copied()
+    }
+    fn ram_size(&self) -> usize {
+        self.ram.len()
     }
 }
 
@@ -971,6 +987,6 @@ impl<B: Board68k> Target for Mc68000<B> {
         B::NAME
     }
     fn ram_len(&self) -> usize {
-        self.machine.ram().len()
+        self.machine.ram_size()
     }
 }

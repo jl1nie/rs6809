@@ -1,0 +1,450 @@
+68K GAS  bios.s 			page 1
+
+
+   1               	| CP/M-68K 1.3 BIOS for the Tiny68K-compatible machine of rs6809.
+   2               	|
+   3               	| CPM15000.SR (the system without a BIOS, $15000-$1ACC1) calls _init at
+   4               	| $1B000 on a cold start; BDOS calls the other functions through TRAP #3
+   5               	| with the function number in D0.W and parameters in D1/D2.
+   6               	|
+   7               	|   console   MC68681 DUART channel A ($FFF000, odd addresses); input is
+   8               	|             waited for with STOP and the receive interrupt (level 2)
+   9               	|   list/aux  DUART channel B
+  10               	|   disk A:   IDE (CompactFlash) at $FFE000, LBA, 512-byte sectors
+  11               	|
+  12               	| Disk A: is 8 MiB: 2048 tracks of 32 logical 128-byte sectors (8 IDE
+  13               	| sectors), one reserved track, 4 KiB blocks and 512 directory entries.
+  14               	| BDOS works in 128-byte sectors; the BIOS keeps one 512-byte IDE sector
+  15               	| in a buffer (read-modify-write, written through on every write).
+  16               	|
+  17               	| Build: python3 scripts/build-cpm68k-bios.py (GNU as for m68k); with --tn20k
+  18               	| the TPA ends at $800000 for the 8 MiB machine of rs6809-fpga
+  19               	| (bios-tn20k.sr).
+  20               	
+  21               		.equ	CCP, 0x150bc		| _ccp in CPM15000.MAP (warm boot)
+  22               		.equ	TRAP3, 0x8c		| TRAP #3 vector
+  23               		.equ	TPA_BASE, 0x20000	| TPA above the BIOS ...
+  24               		.ifdef	TN20K
+  25               		.equ	TPA_END, 0x800000	| ... to the top of the 8 MiB (rs6809-fpga)
+  26               		.else
+  27               		.equ	TPA_END, 0xfe0000	| ... to near the top of RAM
+  28               		.endif
+  29               	
+  30               		.equ	DUART, 0xfff000
+  31               		.equ	MRA, 0x01
+  32               		.equ	SRA, 0x03
+  33               		.equ	CSRA, 0x03
+  34               		.equ	CRA, 0x05
+  35               		.equ	RHRA, 0x07
+  36               		.equ	THRA, 0x07
+  37               		.equ	ACR, 0x09
+  38               		.equ	IMR, 0x0b
+  39               		.equ	IVR, 0x19
+  40               		.equ	RXVEC, 64		| vector number of the DUART interrupt
+  41               		.equ	RXINT_A, 0x02		| IMR: channel A receiver ready
+  42               		.equ	SRB, 0x13
+  43               		.equ	CRB, 0x15
+  44               		.equ	RHRB, 0x17
+  45               		.equ	THRB, 0x17
+  46               		.equ	RXRDY, 0		| status bits
+  47               		.equ	TXRDY, 2
+  48               	
+  49               		.equ	IDE, 0xffe000
+  50               		.equ	IDE_DATA, 0x00
+  51               		.equ	IDE_COUNT, 0x05
+  52               		.equ	IDE_LBA0, 0x07
+  53               		.equ	IDE_LBA1, 0x09
+  54               		.equ	IDE_LBA2, 0x0b
+  55               		.equ	IDE_HEAD, 0x0d
+  56               		.equ	IDE_CMD, 0x0f
+  57               		.equ	IDE_STATUS, 0x0f
+68K GAS  bios.s 			page 2
+
+
+  58               		.equ	BSY, 7
+  59               		.equ	DRQ, 3
+  60               		.equ	ERR, 0
+  61               	
+  62               		.equ	SPT, 32			| logical sectors per track
+  63               		.equ	NFUNCS, 23
+  64               	
+  65               		.text
+  66               		.globl	_init
+  67               	| ---------- cold start: called with JSR from the system ----------
+  68               	_init:
+  69 0000 21FC 0000 		move.l	#entry,TRAP3
+  69      0000 008C 
+  70 0008 41F9 00FF 		lea	DUART,a0
+  70      F000 
+  71 000e 117C 0000 		move.b	#0x00,IMR(a0)		| no interrupts until conin waits
+  71      000B 
+  72 0014 117C 0040 		move.b	#RXVEC,IVR(a0)
+  72      0019 
+  73 001a 21FC 0000 		move.l	#rxint,RXVEC*4
+  73      0000 0100 
+  74 0022 117C 0010 		move.b	#0x10,CRA(a0)		| reset the MR pointer
+  74      0005 
+  75 0028 117C 0013 		move.b	#0x13,MRA(a0)		| 8 bits, no parity
+  75      0001 
+  76 002e 117C 0007 		move.b	#0x07,MRA(a0)		| 1 stop bit
+  76      0001 
+  77 0034 117C 0080 		move.b	#0x80,ACR(a0)		| baud rate set 2
+  77      0009 
+  78 003a 117C 00CC 		move.b	#0xcc,CSRA(a0)		| 38400 baud
+  78      0003 
+  79 0040 117C 0005 		move.b	#0x05,CRA(a0)		| enable receiver and transmitter
+  79      0005 
+  80 0046 117C 0005 		move.b	#0x05,CRB(a0)
+  80      0015 
+  81 004c 23FC FFFF 		move.l	#-1,buflba		| the sector buffer is empty
+  81      FFFF 0000 
+  81      0000 
+  82 0056 4239 0000 		clr.b	iobyte
+  82      0000 
+  83 005c 43F9 0000 		lea	signon,a1
+  83      0000 
+  84 0062 1219      	1:	move.b	(a1)+,d1
+  85 0064 6706      		beq.s	2f
+  86 0066 6100 00E4 		bsr	conout
+  87 006a 60F6      		bra.s	1b
+  88 006c 4280      	2:	clr.l	d0			| drive A:, user 0
+  89 006e 4E75      		rts
+  90               	
+  91               	| ---------- TRAP #3: D0.W = function ----------
+  92               	entry:
+  93 0070 0C40 0017 		cmp.w	#NFUNCS,d0
+  94 0074 641A      		bcc.s	1f
+  95 0076 48E7 7FFE 		movem.l	d1-d7/a0-a6,-(sp)
+  96 007a 0280 0000 		and.l	#0xffff,d0
+  96      FFFF 
+  97 0080 E548      		lsl.w	#2,d0
+68K GAS  bios.s 			page 3
+
+
+  98 0082 41FA 000E 		lea	functions,a0
+  99 0086 2070 0000 		move.l	(a0,d0.w),a0
+ 100 008a 4E90      		jsr	(a0)
+ 101 008c 4CDF 7FFE 		movem.l	(sp)+,d1-d7/a0-a6
+ 102 0090 4E73      	1:	rte
+ 103               	
+ 104               	functions:
+ 105 0092 0000 0000 		.long	init, wboot, const, conin, conout, list, punch, reader
+ 105      0000 0000 
+ 105      0000 0000 
+ 105      0000 0000 
+ 105      0000 0000 
+ 106 00b2 0000 0000 		.long	home, seldsk, settrk, setsec, setdma, read, write, listst
+ 106      0000 0000 
+ 106      0000 0000 
+ 106      0000 0000 
+ 106      0000 0000 
+ 107 00d2 0000 0000 		.long	sectran, nop, getmrt, getiob, setiob, flush, setexc
+ 107      0000 0000 
+ 107      0000 0000 
+ 107      0000 0000 
+ 107      0000 0000 
+ 108               	
+ 109 00ee 6000 0000 	init:	bra	_init
+ 110 00f2 4CDF 7FFE 	wboot:	movem.l	(sp)+,d1-d7/a0-a6	| drop the dispatcher's frame
+ 111 00f6 4280      		clr.l	d0
+ 112 00f8 4EF9 0001 		jmp	CCP
+ 112      50BC 
+ 113 00fe 4E75      	nop:	rts
+ 114               	
+ 115               	| ---------- character devices ----------
+ 116 0100 4280      	const:	clr.l	d0
+ 117 0102 0839 0000 		btst	#RXRDY,DUART+SRA
+ 117      00FF F003 
+ 118 010a 6706      		beq.s	1f
+ 119 010c 203C 0000 		move.l	#0xff,d0
+ 119      00FF 
+ 120 0112 4E75      	1:	rts
+ 121               	
+ 122               	| Wait for a key without spinning: enable the receive interrupt and STOP
+ 123               	| until it comes (rxint masks it again, as the request stays asserted
+ 124               	| until the byte is read).
+ 125 0114 0839 0000 	conin:	btst	#RXRDY,DUART+SRA
+ 125      00FF F003 
+ 126 011c 661A      		bne.s	2f
+ 127 011e 40E7      		move.w	sr,-(sp)
+ 128 0120 13FC 0002 	1:	move.b	#RXINT_A,DUART+IMR
+ 128      00FF F00B 
+ 129 0128 4E72 2000 		stop	#0x2000
+ 130 012c 0839 0000 		btst	#RXRDY,DUART+SRA
+ 130      00FF F003 
+ 131 0134 67EA      		beq.s	1b
+ 132 0136 46DF      		move.w	(sp)+,sr
+ 133 0138 4280      	2:	clr.l	d0
+ 134 013a 1039 00FF 		move.b	DUART+RHRA,d0
+ 134      F007 
+ 135 0140 4E75      		rts
+68K GAS  bios.s 			page 4
+
+
+ 136               	
+ 137 0142 13FC 0000 	rxint:	move.b	#0,DUART+IMR
+ 137      00FF F00B 
+ 138 014a 4E73      		rte
+ 139               	
+ 140 014c 0839 0002 	conout:	btst	#TXRDY,DUART+SRA
+ 140      00FF F003 
+ 141 0154 67F6      		beq.s	conout
+ 142 0156 13C1 00FF 		move.b	d1,DUART+THRA
+ 142      F007 
+ 143 015c 4E75      		rts
+ 144               	
+ 145               	list:
+ 146 015e 0839 0002 	punch:	btst	#TXRDY,DUART+SRB
+ 146      00FF F013 
+ 147 0166 67F6      		beq.s	punch
+ 148 0168 13C1 00FF 		move.b	d1,DUART+THRB
+ 148      F017 
+ 149 016e 4E75      		rts
+ 150               	
+ 151 0170 0839 0000 	reader:	btst	#RXRDY,DUART+SRB
+ 151      00FF F013 
+ 152 0178 670A      		beq.s	1f
+ 153 017a 4280      		clr.l	d0
+ 154 017c 1039 00FF 		move.b	DUART+RHRB,d0
+ 154      F017 
+ 155 0182 4E75      		rts
+ 156 0184 701A      	1:	move.l	#0x1a,d0		| no data: end of file
+ 157 0186 4E75      		rts
+ 158               	
+ 159 0188 203C 0000 	listst:	move.l	#0xff,d0
+ 159      00FF 
+ 160 018e 4E75      		rts
+ 161               	
+ 162 0190 4280      	getiob:	clr.l	d0
+ 163 0192 1039 0000 		move.b	iobyte,d0
+ 163      0000 
+ 164 0198 4E75      		rts
+ 165 019a 13C1 0000 	setiob:	move.b	d1,iobyte
+ 165      0000 
+ 166 01a0 4E75      		rts
+ 167               	
+ 168               	| ---------- disk ----------
+ 169 01a2 4279 0000 	home:	clr.w	track
+ 169      0000 
+ 170 01a8 4E75      		rts
+ 171               	
+ 172 01aa 4280      	seldsk:	clr.l	d0
+ 173 01ac 4A01      		tst.b	d1			| only A:
+ 174 01ae 6606      		bne.s	1f
+ 175 01b0 203C 0000 		move.l	#dph,d0
+ 175      0000 
+ 176 01b6 4E75      	1:	rts
+ 177               	
+ 178 01b8 33C1 0000 	settrk:	move.w	d1,track
+ 178      0000 
+ 179 01be 4E75      		rts
+68K GAS  bios.s 			page 5
+
+
+ 180 01c0 33C1 0000 	setsec:	move.w	d1,sector
+ 180      0000 
+ 181 01c6 4E75      		rts
+ 182 01c8 23C1 0000 	setdma:	move.l	d1,dma
+ 182      0000 
+ 183 01ce 4E75      		rts
+ 184               	sectran:
+ 185 01d0 2001      		move.l	d1,d0			| no skew
+ 186 01d2 4E75      		rts
+ 187               	
+ 188               	| D2 = IDE sector of (track, sector), A1 = its 128 bytes in the buffer.
+ 189 01d4 4282      	locate:	clr.l	d2
+ 190 01d6 3439 0000 		move.w	track,d2
+ 190      0000 
+ 191 01dc E78A      		lsl.l	#3,d2			| 8 IDE sectors per track
+ 192 01de 3039 0000 		move.w	sector,d0
+ 192      0000 
+ 193 01e4 3200      		move.w	d0,d1
+ 194 01e6 E448      		lsr.w	#2,d0
+ 195 01e8 D480      		add.l	d0,d2
+ 196 01ea 0241 0003 		and.w	#3,d1
+ 197 01ee EF49      		lsl.w	#7,d1
+ 198 01f0 43F9 0000 		lea	buffer,a1
+ 198      0000 
+ 199 01f6 D2C1      		add.w	d1,a1
+ 200 01f8 4E75      		rts
+ 201               	
+ 202               	| Make the buffer hold IDE sector D2. D0 = 0, or 1 on error.
+ 203 01fa B4B9 0000 	fetch:	cmp.l	buflba,d2
+ 203      0000 
+ 204 0200 6734      		beq.s	9f
+ 205 0202 23FC FFFF 		move.l	#-1,buflba
+ 205      FFFF 0000 
+ 205      0000 
+ 206 020c 103C 0020 		move.b	#0x20,d0		| READ SECTORS
+ 207 0210 6100 009E 		bsr	idecmd
+ 208 0214 6624      		bne.s	8f
+ 209 0216 41F9 0000 		lea	buffer,a0
+ 209      0000 
+ 210 021c 45F9 00FF 		lea	IDE,a2
+ 210      E000 
+ 211 0222 323C 00FF 		move.w	#255,d1
+ 212 0226 3012      	1:	move.w	IDE_DATA(a2),d0		| the bus swaps the bytes of a word
+ 213 0228 E058      		ror.w	#8,d0
+ 214 022a 30C0      		move.w	d0,(a0)+
+ 215 022c 51C9 FFF8 		dbra	d1,1b
+ 216 0230 23C2 0000 		move.l	d2,buflba
+ 216      0000 
+ 217 0236 4280      	9:	clr.l	d0
+ 218 0238 4E75      		rts
+ 219 023a 7001      	8:	moveq	#1,d0
+ 220 023c 4E75      		rts
+ 221               	
+ 222 023e 6100 FF94 	read:	bsr	locate
+ 223 0242 6100 FFB6 		bsr	fetch
+ 224 0246 6610      		bne.s	9f
+ 225 0248 2079 0000 		move.l	dma,a0
+68K GAS  bios.s 			page 6
+
+
+ 225      0000 
+ 226 024e 727F      		moveq	#127,d1
+ 227 0250 10D9      	1:	move.b	(a1)+,(a0)+
+ 228 0252 51C9 FFFC 		dbra	d1,1b
+ 229 0256 4280      		clr.l	d0
+ 230 0258 4E75      	9:	rts
+ 231               	
+ 232 025a 6100 FF78 	write:	bsr	locate
+ 233 025e 6100 FF9A 		bsr	fetch
+ 234 0262 663C      		bne.s	9f
+ 235 0264 2079 0000 		move.l	dma,a0
+ 235      0000 
+ 236 026a 727F      		moveq	#127,d1
+ 237 026c 12D8      	1:	move.b	(a0)+,(a1)+
+ 238 026e 51C9 FFFC 		dbra	d1,1b
+ 239 0272 103C 0030 		move.b	#0x30,d0		| WRITE SECTORS
+ 240 0276 6100 0038 		bsr	idecmd
+ 241 027a 6626      		bne.s	8f
+ 242 027c 41F9 0000 		lea	buffer,a0
+ 242      0000 
+ 243 0282 45F9 00FF 		lea	IDE,a2
+ 243      E000 
+ 244 0288 323C 00FF 		move.w	#255,d1
+ 245 028c 3018      	2:	move.w	(a0)+,d0
+ 246 028e E058      		ror.w	#8,d0
+ 247 0290 3480      		move.w	d0,IDE_DATA(a2)
+ 248 0292 51C9 FFF8 		dbra	d1,2b
+ 249 0296 082A 0007 	3:	btst	#BSY,IDE_STATUS(a2)
+ 249      000F 
+ 250 029c 66F8      		bne.s	3b
+ 251 029e 4280      		clr.l	d0
+ 252 02a0 4E75      	9:	rts
+ 253 02a2 23FC FFFF 	8:	move.l	#-1,buflba
+ 253      FFFF 0000 
+ 253      0000 
+ 254 02ac 7001      		moveq	#1,d0
+ 255 02ae 4E75      		rts
+ 256               	
+ 257               	| Issue IDE command D0.B for one sector at LBA D2, then wait for data.
+ 258               	| Z set when ready, clear on error.
+ 259 02b0 45F9 00FF 	idecmd:	lea	IDE,a2
+ 259      E000 
+ 260 02b6 082A 0007 	1:	btst	#BSY,IDE_STATUS(a2)
+ 260      000F 
+ 261 02bc 66F8      		bne.s	1b
+ 262 02be 157C 0001 		move.b	#1,IDE_COUNT(a2)
+ 262      0005 
+ 263 02c4 1542 0007 		move.b	d2,IDE_LBA0(a2)
+ 264 02c8 2202      		move.l	d2,d1
+ 265 02ca E089      		lsr.l	#8,d1
+ 266 02cc 1541 0009 		move.b	d1,IDE_LBA1(a2)
+ 267 02d0 E089      		lsr.l	#8,d1
+ 268 02d2 1541 000B 		move.b	d1,IDE_LBA2(a2)
+ 269 02d6 E089      		lsr.l	#8,d1
+ 270 02d8 0201 000F 		and.b	#0x0f,d1
+ 271 02dc 0001 00E0 		or.b	#0xe0,d1		| LBA, device 0
+ 272 02e0 1541 000D 		move.b	d1,IDE_HEAD(a2)
+68K GAS  bios.s 			page 7
+
+
+ 273 02e4 1540 000F 		move.b	d0,IDE_CMD(a2)
+ 274 02e8 122A 000F 	2:	move.b	IDE_STATUS(a2),d1
+ 275 02ec 0801 0007 		btst	#BSY,d1
+ 276 02f0 66F6      		bne.s	2b
+ 277 02f2 0801 0000 		btst	#ERR,d1
+ 278 02f6 660A      		bne.s	3f
+ 279 02f8 0801 0003 		btst	#DRQ,d1
+ 280 02fc 6704      		beq.s	3f
+ 281 02fe B201      		cmp.b	d1,d1			| Z = 1
+ 282 0300 4E75      		rts
+ 283 0302 7201      	3:	moveq	#1,d1			| Z = 0
+ 284 0304 4E75      		rts
+ 285               	
+ 286 0306 4280      	flush:	clr.l	d0			| written through already
+ 287 0308 4E75      		rts
+ 288               	
+ 289               	| ---------- memory and exceptions ----------
+ 290 030a 203C 0000 	getmrt:	move.l	#memtab,d0
+ 290      0000 
+ 291 0310 4E75      		rts
+ 292               	
+ 293               	| D1.W = vector number, D2.L = new handler; D0 = the old one.
+ 294 0312 0281 0000 	setexc:	and.l	#0xff,d1
+ 294      00FF 
+ 295 0318 E549      		lsl.w	#2,d1
+ 296 031a 2041      		move.l	d1,a0
+ 297 031c 2010      		move.l	(a0),d0
+ 298 031e 0C41 008C 		cmp.w	#TRAP3,d1		| keep the BIOS entry
+ 299 0322 6702      		beq.s	1f
+ 300 0324 2082      		move.l	d2,(a0)
+ 301 0326 4E75      	1:	rts
+ 302               	
+ 303               		.data
+ 304 0000 0D0A 7273 	signon:	.ascii	"\r\nrs6809 Tiny68K BIOS for CP/M-68K 1.3\r\n\0"
+ 304      3638 3039 
+ 304      2054 696E 
+ 304      7936 384B 
+ 304      2042 494F 
+ 305 0029 00        		.even
+ 306 002a 0001      	memtab:	.word	1
+ 307 002c 0002 0000 		.long	TPA_BASE, TPA_END-TPA_BASE
+ 307      007E 0000 
+ 308               	
+ 309               	| Disk parameter header and block of drive A:.
+ 310 0034 0000 0000 	dph:	.long	0			| no sector translation
+ 311 0038 0000 0000 		.word	0, 0, 0			| BDOS scratch
+ 311      0000 
+ 312 003e 0000 0000 		.long	dirbuf, dpb, csv, alv
+ 312      0000 0000 
+ 312      0000 0000 
+ 312      0000 0000 
+ 313 004e 0020      	dpb:	.word	SPT			| SPT
+ 314 0050 051F      		.byte	5, 31			| BSH, BLM: 4 KiB blocks
+ 315 0052 0100      		.byte	1, 0			| EXM, (unused)
+ 316 0054 07FE      		.word	2046			| DSM: 2047 blocks
+ 317 0056 01FF      		.word	511			| DRM: 512 entries
+ 318 0058 F000      		.byte	0xf0, 0			| AL0, AL1: 4 directory blocks
+68K GAS  bios.s 			page 8
+
+
+ 319 005a 0000      		.word	0			| CKS: fixed disk
+ 320 005c 0001      		.word	1			| OFF: reserved tracks
+ 321               	
+ 322               		.bss
+ 323 0000 0000      	track:	.space	2
+ 324 0002 0000      	sector:	.space	2
+ 325 0004 0000 0000 	dma:	.space	4
+ 326 0008 0000 0000 	buflba:	.space	4
+ 327 000c 0000      	iobyte:	.space	2
+ 328 000e 0000 0000 	dirbuf:	.space	128
+ 328      0000 0000 
+ 328      0000 0000 
+ 328      0000 0000 
+ 328      0000 0000 
+ 329 008e 0000      	csv:	.space	2
+ 330 0090 0000 0000 	alv:	.space	258
+ 330      0000 0000 
+ 330      0000 0000 
+ 330      0000 0000 
+ 330      0000 0000 
+ 331               		.even
+ 332 0192 0000 0000 	buffer:	.space	512
+ 332      0000 0000 
+ 332      0000 0000 
+ 332      0000 0000 
+ 332      0000 0000 
+ 333               		.end

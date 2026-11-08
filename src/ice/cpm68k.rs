@@ -715,7 +715,7 @@ impl OsMonitor for Cpm68k {
             let bp = m.peek32(lpb + 12);
             add(tr!("ベースページ", "base page"), "prog", bp, bp + 0x100);
         }
-        obj([("regions", Json::Arr(regions)), ("ram", m.ram().len().into())])
+        obj([("regions", Json::Arr(regions)), ("ram", m.ram_size().into())])
     }
     fn read_space(&self, _: &dyn Mem, _: &str, _: u32) -> Option<u8> {
         None

@@ -25,7 +25,10 @@ pub trait Mem {
     fn translate(&self, addr: u32) -> Option<usize>;
     /// The CPU address that maps a physical RAM index now, if any.
     fn logical(&self, phys: usize) -> Option<u32>;
-    fn ram(&self) -> &[u8];
+    /// A physical RAM byte (`None` past the end).
+    fn phys(&self, p: usize) -> Option<u8>;
+    /// Bytes of physical RAM.
+    fn ram_size(&self) -> usize;
 }
 
 impl Mem for Machine {
@@ -42,8 +45,11 @@ impl Mem for Machine {
             (phys >= base && phys < base + 8192).then(|| u32::from(slot << 13) | (phys - base) as u32)
         })
     }
-    fn ram(&self) -> &[u8] {
-        &self.ram
+    fn phys(&self, p: usize) -> Option<u8> {
+        self.ram.get(p).copied()
+    }
+    fn ram_size(&self) -> usize {
+        self.ram.len()
     }
 }
 
@@ -494,8 +500,7 @@ impl Tracer {
         let mut switch = None;
         let desc = match slot {
             Some(a) => {
-                let ram = m.ram();
-                u32::from(u16::from_be_bytes([ram.get(a).copied().unwrap_or(0), ram.get(a + 1).copied().unwrap_or(0)]))
+                u32::from(u16::from_be_bytes([m.phys(a).unwrap_or(0), m.phys(a + 1).unwrap_or(0)]))
             }
             None => os.current(m),
         };

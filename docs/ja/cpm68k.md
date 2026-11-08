@@ -61,6 +61,7 @@ Alcyon CがCP/Mのライセンスに含まれるかは明記がないため、�
 - ディスクA:はIDEです。BDOSは128バイトのセクタで読み書きするので、BIOSが512バイトのIDEセクタを1つ持ち、
   読み込みはそこから写し、書き込みはそこを書き換えてすぐIDEへ書きます（ライトスルー）。IDEの語はバイトを入れ替えて読み書きします。
 - `GETMRT` はTPAを `$20000`〜`$FE0000` とする表を返します。`SETEXC` はTRAP #3以外のベクタを書き換えます。
+- [rs6809-fpga](https://github.com/jl1nie/rs6809-fpga) の 8MB の機械（Tang Nano 20K）用には、`python3 scripts/build-cpm68k-bios.py --tn20k` で TPA が `$800000` で終わる `bios-tn20k.sr` を作る。ディスク `a.img` は同じもの。エミュレータでは `--ram-kb 8192 --bin examples/cpm68k/bios-tn20k.sr`。
 
 ## ディスクの形式
 

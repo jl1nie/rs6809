@@ -46,6 +46,23 @@ FUZIXの `README.68000.md` は、m68k-linux-gnuのgccを使わないよう警告
   `-fno-jump-tables` で先に作ります。
 - `Applications/MWC/cmd`：2つの文法を同じ `y.tab.c` に出すため、並列のmakeでは一方の出力がもう一方の `.c` になります。ここだけ並列にせず先に作ります。
 
+## 8MB（Tang Nano 20K の機械）
+
+カーネルは RAM の大きさをソースに持っている：`Kernel/platform/platform-tiny68k/main.c` がカーネルの終わりから `$FF8000` までをプロセスに渡し（`kmemaddblk`）、`p68000.S` が `ramsize` を 16352KB にする。
+`sh scripts/build-fuzix-tiny68k.sh --tn20k` は 8MB 用（`$800000` と 8192KB）のカーネルを作り、2 つのファイルを元に戻して、結果を `artifacts/fuzix68k-tn20k` に置く。
+エミュレータでは [rs6809-fpga](https://github.com/jl1nie/rs6809-fpga) の機械と同じ `--ram-kb 8192` で動く。
+
+```sh
+sh scripts/rs6809 --cpu 68000 --machine tiny68k --ram-kb 8192 --os fuzix \
+  --disk artifacts/fuzix68k-tn20k/disk.img --boot-sector --script examples/fuzix68k/boot.script
+```
+
+```text
+8192KiB total RAM, 8094KiB available to processes (125 processes max)
+```
+
+カーネルがプロセス用のメモリを取るのは `kmemaddblk` だけで、ブートローダー（`$1F0000`）とカーネル（`$400` から）は 8MB に収まるので、ほかは変えない。ディスクは 16MB 版とは別になる（カーネルが入っているため）。
+
 ## 起動
 
 モニタROMはありません。`--boot-sector` で、エミュレータがディスクのLBA 1（512バイト）を `$15000` に置いて始めます。

@@ -46,6 +46,23 @@ puts `disk.img`, `fuzix.elf`, `fuzix.sym` (nm output) and `offsets.txt` in `arti
   so it is built first with `-fno-jump-tables`.
 - `Applications/MWC/cmd`: two grammars are generated into the same `y.tab.c`, so with a parallel make one's output becomes the other's `.c`. This directory alone is built first, not in parallel.
 
+## 8 MiB (the Tang Nano 20K machine)
+
+The kernel has the size of RAM in its source: `Kernel/platform/platform-tiny68k/main.c` gives the memory from the end of the kernel to `$FF8000` to the processes (`kmemaddblk`), and `p68000.S` sets `ramsize` to 16352 KiB.
+`sh scripts/build-fuzix-tiny68k.sh --tn20k` builds a kernel for 8 MiB (`$800000` and 8192 KiB), puts the two files back afterwards, and writes the results to `artifacts/fuzix68k-tn20k`.
+It runs in the emulator with `--ram-kb 8192`, the machine of [rs6809-fpga](https://github.com/jl1nie/rs6809-fpga):
+
+```sh
+sh scripts/rs6809 --cpu 68000 --machine tiny68k --ram-kb 8192 --os fuzix \
+  --disk artifacts/fuzix68k-tn20k/disk.img --boot-sector --script examples/fuzix68k/boot.script
+```
+
+```text
+8192KiB total RAM, 8094KiB available to processes (125 processes max)
+```
+
+`kmemaddblk` is the only place the kernel takes memory for processes from, and the boot loader (at `$1F0000`) and the kernel (from `$400`) are inside 8 MiB, so nothing else changes. The disk is a different one from the 16 MiB build's (the kernel is on it).
+
 ## Booting
 
 There is no monitor ROM. With `--boot-sector` the emulator places LBA 1 of the disk (512 bytes) at `$15000` and starts there.

@@ -61,6 +61,7 @@ The system sets up its stack, calls `JSR $1B000` (the BIOS `_init`), initialises
 - Disk A: is the IDE. The BDOS reads and writes 128-byte sectors, so the BIOS keeps one 512-byte IDE sector;
   reads copy from it, and writes change it and write it to the IDE at once (write-through). IDE words are read and written with their bytes swapped.
 - `GETMRT` returns a table with the TPA at `$20000`–`$FE0000`. `SETEXC` changes any vector except TRAP #3.
+- For the 8 MiB machine of [rs6809-fpga](https://github.com/jl1nie/rs6809-fpga) (Tang Nano 20K), `python3 scripts/build-cpm68k-bios.py --tn20k` assembles `bios-tn20k.sr` with the TPA ending at `$800000`; the disk `a.img` stays the same. In the emulator: `--ram-kb 8192 --bin examples/cpm68k/bios-tn20k.sr`.
 
 ## Disk format
 

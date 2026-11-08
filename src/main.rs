@@ -58,6 +58,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut ice_halt = false;
     let mut dap_addr = None;
     let mut symbol_specs = Vec::new();
+    let mut fpga: Option<String> = None;
+    let mut fpga_baud: u32 = 115_200;
     let mut source_dirs = Vec::new();
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -88,6 +90,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 bin = Some(path)
             }
             "--machine" => machine_kind = Some(args.next().ok_or("missing machine")?),
+            "--fpga" => fpga = Some(args.next().ok_or("--fpga requires a serial device or tcp:HOST:PORT")?),
+            "--fpga-baud" => fpga_baud = args.next().ok_or("--fpga-baud requires a number")?.parse()?,
             "--boot-sector" => boot_sector = true,
             "--os" => os_kind = Some(args.next().ok_or("missing OS")?),
             "--load-state" => load_state = Some(args.next().ok_or("missing state file")?),
@@ -134,7 +138,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
             "--help" | "-h" => {
                 println!(
-                    "rs6809 [--cpu 6809|68000] [--bin FILE --load 0x1000 --pc 0x1000]\n       [--rom FILE --disk FILE --boot] [--ram-kb N] [--script FILE]\n       [--acia-count N] [--telnet [127.0.0.1:0]] [--persist-disk|--volatile-disk]\n       [--until TEXT] [--max-cycles N] [--stats] [--measure-from TEXT]\n       [--ice [127.0.0.1:6809]] [--ice-halt] [--dap [127.0.0.1:6810]]\n       [--symbols FILE|DIR[@MODULE]]... [--source-dir DIR]...\n\nDefault: 64 KiB RAM, ACIA $8018/$8019, timer $8010.\nROM+disk: 512 KiB RAM (select 64/128/256/512/1024 with --ram-kb).\nMulticomp console $FFD0/$FFD1, SD $FFD8-$FFDC, timer $FFDD.\n--acia-count selects 1..4 Multicomp ACIAs (default 1, or 4 with --telnet).\n--telnet binds localhost on a free TCP port by default; OS-9 opens the available ACIAs.\nOne client per active ACIA; host stdin is disabled. Use the multi-user Level 2 disk.\n--boot types NITROS9 at the CamelForth prompt.\nScripts: lines PROMPT<TAB>RESPONSE, matched sequentially; response ends with CR.\n  Lines starting with # are comments (68000: \\# starts a prompt with #,\n  and a ?PROMPT line is answered whenever PROMPT shows, out of order).\nTelnet disk writes persist by default; --persist-disk also enables this without Telnet.\n--volatile-disk keeps writes in RAM. Cycle limit without --until exits successfully.\n--stats reports guest cycles and host elapsed seconds to stderr.\n--measure-from starts an output-marker interval, ending at --until.\n--ice serves the debugger UI (registers, disassembly, breakpoints, OS-9 views)\n  over HTTP; open the printed URL. ACIA 1 becomes the browser console.\n--ice-halt starts the CPU stopped at the reset vector.\n--dap also serves the Debug Adapter Protocol (VS Code etc.); implies --ice.\n--symbols loads LWASM/RMA listings, LWLINK/c.link maps, GNU as listings,\n  nm output and CP/M-68K NM68 maps (repeatable).\n--source-dir adds a directory searched for source files.\n--lang ja|en sets the language of the ICE (default: Japanese if LANG says ja,\n  else English); the UI can switch it too.\n\n--cpu 68000 [--machine plain|tiny68k] (docs/m68k.md, docs/cpm68k.md):\n  plain: RAM from $000000 (1 MiB, --ram-kb up to 16320), console status $FF0000\n  (bit 0 input ready), data $FF0001. SSP = top of RAM.\n  tiny68k: 16 MiB RAM less 32 KiB, 68681 DUART $FFF000, IDE $FFE000 (--disk,\n  --persist-disk); starts in supervisor state at --pc without a monitor ROM;\n  --boot-sector loads disk LBA 1 at $15000 and starts there (FUZIX loader);\n  --os cpm68k|fuzix|none picks the OS monitor (default cpm68k); FUZIX needs\n  the kernel symbols (--symbols fuzix.sym).\n  --tty2 [127.0.0.1:6812] puts DUART channel B (FUZIX /dev/tty2) on TCP.\n  --load-state FILE continues from a state saved in the ICE (button or\n  /api/machine/save); the ICE's reset still returns to the boot.\n  --bin (repeatable) loads a raw binary at --load, or Motorola S-records.\n  Without --pc the start is the S-record entry, else the load address\n  (a raw image loaded at 0 keeps its own reset vectors).\n  Works with --ice, --ice-halt, --dap, --symbols, --script, --until, --max-cycles, --stats."
+                    "rs6809 [--cpu 6809|68000] [--bin FILE --load 0x1000 --pc 0x1000]\n       [--rom FILE --disk FILE --boot] [--ram-kb N] [--script FILE]\n       [--acia-count N] [--telnet [127.0.0.1:0]] [--persist-disk|--volatile-disk]\n       [--until TEXT] [--max-cycles N] [--stats] [--measure-from TEXT]\n       [--ice [127.0.0.1:6809]] [--ice-halt] [--dap [127.0.0.1:6810]]\n       [--symbols FILE|DIR[@MODULE]]... [--source-dir DIR]...\n       [--fpga DEVICE|tcp:HOST:PORT [--fpga-baud 115200]]\n\nDefault: 64 KiB RAM, ACIA $8018/$8019, timer $8010.\nROM+disk: 512 KiB RAM (select 64/128/256/512/1024 with --ram-kb).\nMulticomp console $FFD0/$FFD1, SD $FFD8-$FFDC, timer $FFDD.\n--acia-count selects 1..4 Multicomp ACIAs (default 1, or 4 with --telnet).\n--telnet binds localhost on a free TCP port by default; OS-9 opens the available ACIAs.\nOne client per active ACIA; host stdin is disabled. Use the multi-user Level 2 disk.\n--boot types NITROS9 at the CamelForth prompt.\nScripts: lines PROMPT<TAB>RESPONSE, matched sequentially; response ends with CR.\n  Lines starting with # are comments (68000: \\# starts a prompt with #,\n  and a ?PROMPT line is answered whenever PROMPT shows, out of order).\nTelnet disk writes persist by default; --persist-disk also enables this without Telnet.\n--volatile-disk keeps writes in RAM. Cycle limit without --until exits successfully.\n--stats reports guest cycles and host elapsed seconds to stderr.\n--measure-from starts an output-marker interval, ending at --until.\n--ice serves the debugger UI (registers, disassembly, breakpoints, OS-9 views)\n  over HTTP; open the printed URL. ACIA 1 becomes the browser console.\n--ice-halt starts the CPU stopped at the reset vector.\n--dap also serves the Debug Adapter Protocol (VS Code etc.); implies --ice.\n--symbols loads LWASM/RMA listings, LWLINK/c.link maps, GNU as listings,\n  nm output and CP/M-68K NM68 maps (repeatable).\n--source-dir adds a directory searched for source files.\n--fpga runs the ICE on the CPU of an rs6809-fpga machine (Tang Nano 20K)\n  over its USB serial port (or tcp:HOST:PORT, e.g. its simulation):\n  --cpu 6809 for the Multicomp09 machine, --cpu 68000 for Tiny68K (--os\n  fuzix by default). Breakpoints and watchpoints run in hardware (8 and 4).\n--lang ja|en sets the language of the ICE (default: Japanese if LANG says ja,\n  else English); the UI can switch it too.\n\n--cpu 68000 [--machine plain|tiny68k] (docs/m68k.md, docs/cpm68k.md):\n  plain: RAM from $000000 (1 MiB, --ram-kb up to 16320), console status $FF0000\n  (bit 0 input ready), data $FF0001. SSP = top of RAM.\n  tiny68k: 16 MiB RAM less 32 KiB (--ram-kb 8192: the 8 MiB of rs6809-fpga's\n  Tang Nano 20K machine), 68681 DUART $FFF000, IDE $FFE000 (--disk,\n  --persist-disk); starts in supervisor state at --pc without a monitor ROM;\n  --boot-sector loads disk LBA 1 at $15000 and starts there (FUZIX loader);\n  --os cpm68k|fuzix|none picks the OS monitor (default cpm68k); FUZIX needs\n  the kernel symbols (--symbols fuzix.sym).\n  --tty2 [127.0.0.1:6812] puts DUART channel B (FUZIX /dev/tty2) on TCP.\n  --load-state FILE continues from a state saved in the ICE (button or\n  /api/machine/save); the ICE's reset still returns to the boot.\n  --bin (repeatable) loads a raw binary at --load, or Motorola S-records.\n  Without --pc the start is the S-record entry, else the load address\n  (a raw image loaded at 0 keeps its own reset vectors).\n  Works with --ice, --ice-halt, --dap, --symbols, --script, --until, --max-cycles, --stats."
                 );
                 return Ok(());
             }
@@ -143,6 +147,28 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
     // The ICE's text: --lang, else Japanese only when the environment asks.
     ice::lang::set_en(lang.unwrap_or_else(ice::lang::english_from_env));
+    if let Some(spec) = fpga {
+        if rom.is_some() || disk.is_some() || !bins.is_empty() || bin.is_some() || telnet.is_some() || until.is_some() || max != 0 {
+            return Err("--fpga runs the machine on the board: no --rom, --disk, --bin, --telnet, --until or --max-cycles".into());
+        }
+        let mut actions = std::collections::VecDeque::<(String, String)>::new();
+        if boot {
+            actions.push_back(("CamelForth".into(), "NITROS9".into()));
+        }
+        actions.extend(script_actions(&script)?);
+        return run_fpga(FpgaArgs {
+            cpu: cpu_kind,
+            spec,
+            baud: fpga_baud,
+            os: os_kind,
+            actions,
+            ice_addr: ice_addr.unwrap_or_else(|| "127.0.0.1:6809".into()),
+            ice_halt,
+            dap_addr,
+            symbol_specs,
+            source_dirs,
+        });
+    }
     match cpu_kind.as_str() {
         "6809" => {}
         "68000" | "68k" => {
@@ -485,6 +511,67 @@ fn script_actions(path: &Option<String>) -> Result<std::collections::VecDeque<(S
     Ok(actions)
 }
 
+struct FpgaArgs {
+    cpu: String,
+    spec: String,
+    baud: u32,
+    os: Option<String>,
+    actions: std::collections::VecDeque<(String, String)>,
+    ice_addr: String,
+    ice_halt: bool,
+    dap_addr: Option<String>,
+    symbol_specs: Vec<String>,
+    source_dirs: Vec<String>,
+}
+
+/// The ICE on the machine of rs6809-fpga (Tang Nano 20K): the CPU runs on
+/// the board, the ICE talks to it over the serial port.
+fn run_fpga(a: FpgaArgs) -> Result<(), Box<dyn std::error::Error>> {
+    let options = ice::Options {
+        actions: a.actions,
+        echo_console: true,
+    };
+    let listener = std::net::TcpListener::bind(&a.ice_addr)?;
+    let dap = match &a.dap_addr {
+        Some(d) => Some(std::net::TcpListener::bind(d)?),
+        None => None,
+    };
+    eprintln!("rs6809: connecting to the FPGA on {}", a.spec);
+    macro_rules! go {
+        ($t:expr, $os:expr) => {{
+            let mut debugger = ice::Ice::for_target($t, options, $os);
+            for dir in a.source_dirs {
+                debugger.symbols.add_source_dir(dir.into());
+            }
+            for spec in &a.symbol_specs {
+                debugger.load_symbols(spec).map_err(|e| format!("--symbols: {e}"))?;
+            }
+            eprintln!("rs6809: ICE UI at http://{}/ (CPU on the FPGA)", listener.local_addr()?);
+            if let Some(l) = &dap {
+                eprintln!("rs6809: DAP listening on {}", l.local_addr()?);
+            }
+            return Ok(debugger.serve(listener, dap, !a.ice_halt)?);
+        }};
+    }
+    match a.cpu.as_str() {
+        "6809" => {
+            let t = ice::fpga::Fpga6809::connect(&a.spec, a.baud)?;
+            go!(t, Box::new(ice::os9::Nitros9::default()))
+        }
+        "68000" | "68k" => {
+            let t = ice::fpga::Fpga68k::connect(&a.spec, a.baud)?;
+            let os: Box<dyn ice::osmon::OsMonitor> = match a.os.as_deref().unwrap_or("fuzix") {
+                "cpm68k" => Box::new(ice::cpm68k::Cpm68k::default()),
+                "fuzix" => Box::new(ice::fuzix::Fuzix::default()),
+                "none" => Box::new(ice::osmon::NoOs),
+                other => return Err(format!("unknown OS: {other} (cpm68k, fuzix or none)").into()),
+            };
+            go!(t, os)
+        }
+        other => Err(format!("unknown CPU: {other} (6809 or 68000)").into()),
+    }
+}
+
 /// Where the Tiny68K monitor loads a boot sector (the CP/M boot loader).
 const BOOT_SECTOR: u32 = 0x15000;
 
@@ -513,13 +600,16 @@ fn run68k(a: M68kArgs) -> Result<(), Box<dyn std::error::Error>> {
             run_board(ice::Mc68000::new(m), Box::new(ice::osmon::NoOs), a)
         }
         "tiny68k" => {
-            if a.ram_kb.is_some() {
-                return Err("Tiny68K has 16 MiB of RAM (no --ram-kb)".into());
+            // 16 MiB less 32 KiB by default; --ram-kb 8192 is the Tang Nano
+            // 20K machine (rs6809-fpga).
+            let kb = a.ram_kb.unwrap_or(rs6809::m68k::tiny68k::RAM_END as usize / 1024);
+            if kb == 0 || kb > rs6809::m68k::tiny68k::RAM_END as usize / 1024 {
+                return Err("--ram-kb for Tiny68K is 1..16352".into());
             }
             if a.persist_disk && a.volatile_disk {
                 return Err("--persist-disk and --volatile-disk conflict".into());
             }
-            let mut m = Tiny68k::default();
+            let mut m = Tiny68k::with_ram(kb * 1024);
             if let Some(addr) = &a.tty2 {
                 let port = rs6809::m68k::serial::TcpPort::bind(addr.as_str())?;
                 eprintln!("rs6809: tty2 (DUART channel B) on {} (telnet or nc)", port.local_addr()?);
@@ -547,7 +637,10 @@ fn run68k(a: M68kArgs) -> Result<(), Box<dyn std::error::Error>> {
             }
             // No monitor ROM: start the loaded program in supervisor state.
             let t = match pc.or(start) {
-                Some(pc) => ice::Mc68000::start(m, pc, rs6809::m68k::tiny68k::RAM_END),
+                Some(pc) => {
+                    let ssp = m.ram_end();
+                    ice::Mc68000::start(m, pc, ssp)
+                }
                 None => ice::Mc68000::new(m),
             };
             // The OS monitor stays idle until it finds its system in memory.

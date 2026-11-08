@@ -14,12 +14,18 @@
 | BDOS works in 128-byte sectors; the BIOS keeps one 512-byte IDE sector
 | in a buffer (read-modify-write, written through on every write).
 |
-| Build: python3 scripts/build-cpm68k-bios.py (GNU as for m68k).
+| Build: python3 scripts/build-cpm68k-bios.py (GNU as for m68k); with --tn20k
+| the TPA ends at $800000 for the 8 MiB machine of rs6809-fpga
+| (bios-tn20k.sr).
 
 	.equ	CCP, 0x150bc		| _ccp in CPM15000.MAP (warm boot)
 	.equ	TRAP3, 0x8c		| TRAP #3 vector
 	.equ	TPA_BASE, 0x20000	| TPA above the BIOS ...
+	.ifdef	TN20K
+	.equ	TPA_END, 0x800000	| ... to the top of the 8 MiB (rs6809-fpga)
+	.else
 	.equ	TPA_END, 0xfe0000	| ... to near the top of RAM
+	.endif
 
 	.equ	DUART, 0xfff000
 	.equ	MRA, 0x01

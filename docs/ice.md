@@ -249,6 +249,33 @@ For the 68000, these can be created from the extension's configuration snippets 
 | `source`/`loadedSources` | For sources not on the host, returns the text in the listing |
 | `output` event | Sends the guest's console output (ACIA 1) to the debug console |
 
+## The CPU on the FPGA (rs6809-fpga)
+
+With `--fpga DEVICE` (or `--fpga tcp:HOST:PORT`) the ICE uses the CPU of an [rs6809-fpga](https://github.com/jl1nie/rs6809-fpga) machine on a Tang Nano 20K instead of the emulator: the Multicomp09-compatible 6809 (cpu09p) or, with `--cpu 68000`, the Tiny68K-compatible 68000 (fx68k, 8 MiB).
+The board's USB serial port carries the console and the debugger at once (console bytes as they are, DLE `0x10` doubled, `DLE code len data` frames for the debugger), so the browser console is the board's console.
+
+```sh
+rs6809 --fpga /dev/ttyUSB1 --ice                                       # 6809, NitrOS-9 monitor
+rs6809 --cpu 68000 --fpga /dev/ttyUSB1 --os fuzix --symbols artifacts/fuzix68k-tn20k/fuzix.sym --ice
+rs6809 --fpga tcp:127.0.0.1:6820 --ice                                 # rs6809-fpga's simulation
+```
+
+`--fpga-baud` sets the serial speed (115200 by default; set with `stty`). `--boot` and `--script` type into the board's console as usual; `--rom`, `--disk` and `--bin` do not apply (the ROM and the SD card are on the board).
+
+| | On the FPGA |
+|---|---|
+| Run | The CPU runs at full speed on the board; the ICE waits for it to stop |
+| Breakpoints | 8 in hardware: the 6809 compares the address of the next instruction (CPU or, for placed modules, physical addresses through the MMU); the 68000 shows an ILLEGAL in place of the instruction word and takes the exception into its stub. Conditions, hit counts and logpoints are evaluated by the ICE when the board stops |
+| Watchpoints | 4 address ranges in hardware, read, write or both; the CPU stops after the instruction |
+| Step, step over | Step: one instruction in hardware (interrupts held off). Step over: a breakpoint on the return address |
+| Source-line steps, step out, OS call breaks and the call record | Need every instruction: the ICE steps the board one instruction at a time (a few hundred per second at 115200 baud) |
+| Registers, memory | Read and written while stopped (6809: halted CPU, memory over the bus through the MMU or physically; 68000: the stub's mailbox, memory directly in the SDRAM). Device registers read without side effects |
+| OS views | As with the emulator (they read memory) |
+| Not available | Stepping back (recording), saving and loading states, cycle counts (the time is shown) |
+| Reset | Resets the board's machine from its ROM; it stops at the first instruction and runs on if the ICE was running |
+
+`src/ice/fpga.rs` has the serial link and the two targets; the ICE's run loop asks a target for `hw()` and, for one on hardware, lets it run with the breakpoints and watchpoints instead of executing instructions itself.
+
 ## Swapping the CPU
 
 The ICE takes the `Target` trait from `target.rs` as a type parameter (`Ice<T: Target = Mc6809>`). Dispatch is static, so

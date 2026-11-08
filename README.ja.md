@@ -10,6 +10,7 @@ Pure RustのMotorola 6809・68000エミュレータです。外部crate・Cコ�
 - **ICE**：ブラウザのデバッガとVS Code（DAP）から、ブレーク（条件・回数・ログポイント付き）・ステップ・逆ステップ・ソース行・Cの変数・ウォッチ式を扱えます。
   OSモニタが、NitrOS-9・CP/M-68K・FUZIXのシステムコールを呼び出しから復帰まで追い、プロセス表・スケジューラ・メモリを説明付きで見せます。
   リセットと、機械の状態の保存・読み込みもできます。
+- **FPGA**：同じ機械を [rs6809-fpga](https://github.com/jl1nie/rs6809-fpga) で Tang Nano 20K 上でも動かせます（68000 は RAM 8MB。FUZIX は `scripts/build-fuzix-tiny68k.sh --tn20k` で 8MB 用に作る）。ICE はボード上の実 CPU も操作できます（`--fpga /dev/ttyUSB1`、[FPGA上のCPU](docs/ja/ice.md#fpga上のcpurs6809-fpga)）。
 
 | 説明 | 内容 |
 |---|---|
