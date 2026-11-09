@@ -54,6 +54,18 @@ fetch() {
 rsha() { awk -v f="$1" '$2 == f { print $1 }' release/images.sha256; }
 # release FILE DEST: fetch a release file into DEST.
 release() { fetch "$RELEASE_URL/$1" "$2" "$(rsha "$1")"; }
+# A release file that may not be there yet: skipped with a note.
+release_opt() {
+	s=$(rsha "$1")
+	if [ -f "$2" ] && [ "$(sha "$2")" = "$s" ]; then return 0; fi
+	mkdir -p "$(dirname "$2")"
+	if curl -fsSL --retry 3 -o "$2.part" "$RELEASE_URL/$1" 2>/dev/null && [ "$(sha "$2.part")" = "$s" ]; then
+		mv "$2.part" "$2"
+	else
+		rm -f "$2.part"
+		return 1
+	fi
+}
 
 say "1/4 emulator"
 MSRV=1.89
@@ -98,10 +110,23 @@ release cpm68k-a.img.gz artifacts/release-cache/cpm68k-a.img.gz
 release fuzix68k-disk.img.gz artifacts/release-cache/fuzix68k-disk.img.gz
 release fuzix.sym artifacts/fuzix68k/fuzix.sym
 release fuzix-usersyms.tar.gz artifacts/release-cache/fuzix-usersyms.tar.gz
-release NOTICE.md artifacts/release-cache/NOTICE.md
+# the licences (informational: an older copy is kept if the release has not caught up)
+release_opt NOTICE.md artifacts/release-cache/NOTICE.md || cp release/NOTICE.md artifacts/release-cache/NOTICE.md
 [ -f artifacts/fuzix68k/disk.img ] || gzip -dc artifacts/release-cache/fuzix68k-disk.img.gz > artifacts/fuzix68k/disk.img
 # The programs' symbols for the ICE (artifacts/fuzix68k/usersyms/NAME.sym).
 [ -f artifacts/fuzix68k/usersyms/sh.sym ] || gzip -dc artifacts/release-cache/fuzix-usersyms.tar.gz | tar -xf - -C artifacts/fuzix68k
+# FUZIX built for 8 MiB, for rs6809-fpga's Tang Nano 20K machine (and
+# --ram-kb 8192 here): artifacts/fuzix68k-tn20k
+T=artifacts/fuzix68k-tn20k
+if release_opt fuzix68k-tn20k-disk.img.gz artifacts/release-cache/fuzix68k-tn20k-disk.img.gz &&
+	release_opt fuzix-tn20k.sym $T/fuzix.sym &&
+	release_opt fuzix-tn20k-usersyms.tar.gz artifacts/release-cache/fuzix-tn20k-usersyms.tar.gz; then
+	[ -f $T/disk.img ] || gzip -dc artifacts/release-cache/fuzix68k-tn20k-disk.img.gz > $T/disk.img
+	[ -f $T/usersyms/sh.sym ] || gzip -dc artifacts/release-cache/fuzix-tn20k-usersyms.tar.gz | tar -xf - -C $T
+	echo "  FUZIX for 8 MiB (Tang Nano 20K): $T"
+else
+	echo "  FUZIX for 8 MiB (Tang Nano 20K) is not in the release yet: sh scripts/build-fuzix-tiny68k.sh --tn20k builds it"
+fi
 fresh_cpm=
 if [ ! -f artifacts/cpm68k/a.img ]; then
 	gzip -dc artifacts/release-cache/cpm68k-a.img.gz > artifacts/cpm68k/a.img
@@ -135,6 +160,7 @@ Done. Run one of:
   ./run.sh nitros9          NitrOS-9 Level 1 (6809, Multicomp)
   ./run.sh cpm68k           CP/M-68K 1.3 (68000, Tiny68K)
   ./run.sh fuzix            FUZIX 0.5 (68000, Tiny68K)
+  ./run.sh fpga68k DEVICE   the ICE on rs6809-fpga's 68000 board (FUZIX for 8 MiB)
 Add --ice for the debugger at http://127.0.0.1:6809/ (--dap for VS Code).
 Licences of the images: artifacts/release-cache/NOTICE.md
 EOF
